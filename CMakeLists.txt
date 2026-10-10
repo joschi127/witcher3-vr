@@ -254,6 +254,15 @@ if(BUILD_TESTING)
         COMMAND w3vr_cinema_aspect_tests
     )
 
+    add_executable(w3vr_game_build_tests
+        tests/game_build_tests.cpp
+    )
+    target_include_directories(w3vr_game_build_tests PRIVATE src)
+    add_test(
+        NAME game_build
+        COMMAND w3vr_game_build_tests
+    )
+
     add_executable(w3vr_camera_follow_policy_tests
         tests/camera_follow_policy_tests.cpp
     )

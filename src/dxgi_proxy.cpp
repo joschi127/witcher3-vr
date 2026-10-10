@@ -29,6 +29,7 @@
 #include "first_person_anchor_smoothing.h"
 #include "first_person_horse_gallop_offset.h"
 #include "foliage_native_snapshot_policy.h"
+#include "game_build.h"
 #include "focus_fire_projection_policy.h"
 #include "hmd_camera_orientation.h"
 #include "mode3_transport_policy.h"
@@ -2257,6 +2258,9 @@ SetPipelineStateFn g_set_pipeline_state{};
 SetGraphicsRootSignatureFn g_set_graphics_root_signature{};
 SetGraphicsRootSignatureFn g_set_compute_root_signature{};
 DrawIndexedInstancedFn g_draw_indexed_instanced{};
+// [DIAG:COMMAND-LIST-VTABLE-MODULE] Address the DrawIndexedInstanced detour was
+// installed on, compared against the game's own command lists at submission.
+std::atomic<void*> g_draw_indexed_instanced_hook_target{};
 DrawInstancedFn g_draw_instanced{};
 DispatchFn g_dispatch{};
 CopyBufferRegionFn g_copy_buffer_region{};
@@ -19700,6 +19704,8 @@ void install_command_list_hooks() {
         auto target = method<void*>(command_list, 13);
         if (MH_CreateHook(target, reinterpret_cast<void*>(&hook_draw_indexed_instanced), reinterpret_cast<void**>(&g_draw_indexed_instanced)) == MH_OK &&
             MH_EnableHook(target) == MH_OK) {
+            g_draw_indexed_instanced_hook_target.store(
+                target, std::memory_order_release);
             log_line("Reverse hooked ID3D12GraphicsCommandList::DrawIndexedInstanced at %p", target);
         }
     }
@@ -20692,10 +20698,70 @@ void publish_rt_private_history_submissions(
     }
 }
 
+// [DIAG:COMMAND-LIST-VTABLE-MODULE] Logs, for the first few distinct command
+// list vtables the game submits, which module implements DrawIndexedInstanced
+// and whether it is the address our detour was installed on. A mismatch means
+// the game records through a different D3D12 runtime or wrapper (for example
+// an Agility SDK D3D12Core.dll) than the dummy list used to place the hooks.
+void log_module_for_address(const char* label, const void* address) {
+    HMODULE module{};
+    char path[MAX_PATH]{};
+    if (address != nullptr &&
+        GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            static_cast<LPCSTR>(address), &module) &&
+        GetModuleFileNameA(module, path, MAX_PATH) != 0) {
+        log_line("%s address=%p module=%p path=%s", label, address, module, path);
+    } else {
+        log_line("%s address=%p module=unknown", label, address);
+    }
+}
+
+void diagnose_command_list_vtables(
+    UINT num_command_lists, ID3D12CommandList* const* command_lists) {
+    constexpr size_t kMaxVtables = 6;
+    static std::mutex mutex;
+    static void* seen[kMaxVtables]{};
+    static size_t seen_count{};
+    static std::atomic<bool> hook_target_logged{};
+    if (!g_config.logging_enabled || command_lists == nullptr ||
+        seen_count >= kMaxVtables) {
+        return;
+    }
+    void* const hook_target =
+        g_draw_indexed_instanced_hook_target.load(std::memory_order_acquire);
+    if (!hook_target_logged.exchange(true)) {
+        log_module_for_address(
+            "Command-list vtable diag: hooked DrawIndexedInstanced", hook_target);
+    }
+    std::lock_guard<std::mutex> lock(mutex);
+    for (UINT index = 0; index < num_command_lists; ++index) {
+        auto* list = command_lists[index];
+        if (list == nullptr || seen_count >= kMaxVtables) {
+            continue;
+        }
+        void** const vtable = *reinterpret_cast<void***>(list);
+        if (std::find(seen, seen + seen_count, vtable) != seen + seen_count) {
+            continue;
+        }
+        seen[seen_count++] = vtable;
+        void* const draw_indexed = vtable[13];
+        log_line(
+            "Command-list vtable diag: list=%p vtable=%p type=%d "
+            "draw_indexed=%p matches_hook=%d",
+            list, vtable, static_cast<int>(list->GetType()), draw_indexed,
+            draw_indexed == hook_target ? 1 : 0);
+        log_module_for_address("Command-list vtable diag: vtable", vtable);
+        log_module_for_address(
+            "Command-list vtable diag: game DrawIndexedInstanced", draw_indexed);
+    }
+}
+
 void STDMETHODCALLTYPE hook_execute_command_lists(
     ID3D12CommandQueue* queue,
     UINT num_command_lists,
     ID3D12CommandList* const* command_lists) {
+    diagnose_command_list_vtables(num_command_lists, command_lists);
     // [TRIAL:RESHADE-IMMEDIATE-LIST-ISOLATION V23001 4/4] The official
     // D3D12 queue wrapper flushes its named immediate list as a separate raw
     // ExecuteCommandLists call before the game's submission. Preserve that GPU
@@ -29463,7 +29529,46 @@ void __fastcall hook_engine_view_constants(void* self, void* view_data, char fla
     g_engine_view_constants(self, view_data, flags);
 }
 
+// Every install_engine_* / initialize_engine_* routine patches or reads
+// witcher3.exe at fixed RVAs that are only valid for one game build. Identify
+// the build once from the PE header and fail closed on anything else, so an
+// unsupported exe keeps the D3D12/DXGI/OpenXR layers without engine patches.
+bool engine_build_supported() {
+    static const bool supported = []() {
+        const auto* module =
+            reinterpret_cast<const uint8_t*>(GetModuleHandleW(nullptr));
+        uint32_t time_date_stamp{};
+        uint32_t size_of_image{};
+        if (module != nullptr) {
+            const auto* dos =
+                reinterpret_cast<const IMAGE_DOS_HEADER*>(module);
+            if (dos->e_magic == IMAGE_DOS_SIGNATURE) {
+                const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(
+                    module + dos->e_lfanew);
+                if (nt->Signature == IMAGE_NT_SIGNATURE) {
+                    time_date_stamp = nt->FileHeader.TimeDateStamp;
+                    size_of_image = nt->OptionalHeader.SizeOfImage;
+                }
+            }
+        }
+        const auto build =
+            w3vr::game_build::identify(time_date_stamp, size_of_image);
+        const bool hooks_supported =
+            w3vr::game_build::engine_hooks_supported(build);
+        log_line(
+            "Game build %s timestamp=0x%08X size_of_image=0x%08X "
+            "engine_hooks=%s",
+            w3vr::game_build::name(build), time_date_stamp, size_of_image,
+            hooks_supported ? "enabled" : "disabled_unsupported_build");
+        return hooks_supported;
+    }();
+    return supported;
+}
+
 void install_engine_view_constants_hook() {
+    if (!engine_build_supported()) {
+        return;
+    }
     // The same detour owns the optional bounded view probe and the functional
     // strict-Stereo DLSS re-entry. The latter must exist independently of all
     // diagnostic INI controls.
@@ -30036,6 +30141,9 @@ void __fastcall hook_engine_temporal_writer(
 }
 
 void install_engine_temporal_writer_hook() {
+    if (!engine_build_supported()) {
+        return;
+    }
     if ((!asymmetric_authority_audit_active() &&
             !native_asymmetric_noaa_route_active()) ||
         g_engine_temporal_writer != nullptr) {
@@ -31373,6 +31481,9 @@ void __fastcall hook_engine_frame_builder(void* render_context, void* frame_data
 }
 
 void install_engine_frame_builder_probe() {
+    if (!engine_build_supported()) {
+        return;
+    }
     const bool cinema_frame_camera_needed =
         (std::isfinite(g_config.cinema_aspect_ratio) &&
             g_config.cinema_aspect_ratio > 1.0f) ||
@@ -31500,6 +31611,9 @@ void __fastcall hook_engine_dlss_command_emit(
 }
 
 void install_engine_dlss_command_emit_hook() {
+    if (!engine_build_supported()) {
+        return;
+    }
     if (!dlss_sequential_mode_active() ||
         g_engine_dlss_command_emit != nullptr) {
         return;
@@ -31761,6 +31875,9 @@ uint32_t __fastcall hook_engine_upscaler_pipeline(
 }
 
 void install_engine_upscaler_pipeline_hook() {
+    if (!engine_build_supported()) {
+        return;
+    }
     if (!dlss_sequential_mode_active() ||
         g_engine_upscaler_pipeline != nullptr) {
         return;
@@ -31789,6 +31906,9 @@ void install_engine_upscaler_pipeline_hook() {
 }
 
 void install_engine_dlss_command_route_hook() {
+    if (!engine_build_supported()) {
+        return;
+    }
     // [FIX:STRICT-DLSS-SMOKE-EXACT-EYE V1231 2/2] This hook is functional:
     // it restores the exact emitter eye/pair while REDengine executes the
     // deferred DLSS command. ngx_trace controls only the bounded log inside
@@ -32094,6 +32214,9 @@ void __fastcall hook_engine_gameplay_frame_entry(void* frame_task) {
 }
 
 void install_engine_gameplay_entry_probe() {
+    if (!engine_build_supported()) {
+        return;
+    }
     if ((!g_config.engine_gameplay_entry_probe &&
             !g_engine_dual_render_active.load() &&
             !clean_mono_transport_active()) ||
@@ -32131,6 +32254,9 @@ void __fastcall hook_engine_scene_enqueue(void* render_context, void* frame_data
 }
 
 void install_engine_scene_enqueue_probe() {
+    if (!engine_build_supported()) {
+        return;
+    }
     if (!g_config.engine_scene_enqueue_probe || g_engine_scene_enqueue != nullptr) {
         return;
     }
@@ -32342,6 +32468,9 @@ void __fastcall hook_engine_render_scene_setup(void* renderer, float delta_time)
 }
 
 void install_engine_render_scene_setup_probe() {
+    if (!engine_build_supported()) {
+        return;
+    }
     if (g_engine_render_scene_setup != nullptr) {
         return;
     }
@@ -32528,6 +32657,9 @@ void __fastcall hook_engine_shadow_cascade_build(
 }
 
 void install_engine_shadow_cascade_build_hook() {
+    if (!engine_build_supported()) {
+        return;
+    }
     if (g_engine_shadow_cascade_build != nullptr) {
         return;
     }
@@ -33318,6 +33450,9 @@ int __fastcall hook_engine_frustum_aabb_test(void* frustum, const void* bounds) 
 }
 
 void install_engine_animated_component_visibility_hook() {
+    if (!engine_build_supported()) {
+        return;
+    }
     if (!g_config.engine_animated_component_visible ||
         g_engine_frustum_aabb_test != nullptr) {
         return;
@@ -39087,6 +39222,9 @@ bool native_head_pose_signature_matches(
 }
 
 void install_engine_native_head_pose_hooks() {
+    if (!engine_build_supported()) {
+        return;
+    }
     if (g_native_head_pose_hooks_ready.load(std::memory_order_acquire)) {
         return;
     }
@@ -39181,6 +39319,9 @@ void install_engine_native_head_pose_hooks() {
 }
 
 void install_engine_native_camera_authority_hooks() {
+    if (!engine_build_supported()) {
+        return;
+    }
     auto* module = reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr));
     if (module == nullptr) {
         return;
@@ -39358,6 +39499,9 @@ void __fastcall hook_engine_camera_direction(void* camera, void* stack, float* r
 }
 
 void install_engine_camera_direction_hook() {
+    if (!engine_build_supported()) {
+        return;
+    }
     if (!g_config.hmd_freelook || g_engine_camera_direction != nullptr) {
         return;
     }
@@ -39377,6 +39521,9 @@ void install_engine_camera_direction_hook() {
 
 
 void initialize_engine_player_pose_helpers() {
+    if (!engine_build_supported()) {
+        return;
+    }
     constexpr uintptr_t kTransformToEulerRva = 0x02C9C30;
     auto* module = reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr));
     g_engine_transform_to_euler = module != nullptr
@@ -39770,6 +39917,9 @@ void __fastcall hook_engine_world_vector_to_view_ratio(
 }
 
 void install_engine_world_vector_to_view_ratio_hook() {
+    if (!engine_build_supported()) {
+        return;
+    }
     if (!g_config.hmd_freelook ||
         g_engine_world_vector_to_view_ratio != nullptr) {
         return;
@@ -39795,6 +39945,9 @@ void install_engine_world_vector_to_view_ratio_hook() {
 // corrected camera for both the existing DLSS route and Mode-3 TAAU. Logging
 // remains fully dependent on Diagnostic Logging.
 void install_engine_temporal_camera_builder_hook() {
+    if (!engine_build_supported()) {
+        return;
+    }
     if (!engine_native_per_eye_temporal_history_active() ||
         g_engine_temporal_camera_build != nullptr) {
         return;
@@ -39824,6 +39977,9 @@ void install_engine_temporal_camera_builder_hook() {
 }
 
 void install_engine_view_factory_probe() {
+    if (!engine_build_supported()) {
+        return;
+    }
     // [FIX:CLEAN-MONO-VIEW-REBUILD-DEPENDENCY V19000 1/2] Clean Mode 1 uses
     // the common gameplay/Full-VR camera correction and its private rebuilds
     // even though it deliberately owns no stereo offset or per-eye temporal
@@ -39967,6 +40123,9 @@ float* __fastcall hook_engine_render_proxy_distance_scale(
 // transport; the strict view signature and native-camera validity gate still
 // decide whether an individual view is eligible.
 void install_engine_render_proxy_distance_scale_hook() {
+    if (!engine_build_supported()) {
+        return;
+    }
     if (!g_config.openxr_enabled ||
         !supported_projection_transport_active() ||
         g_engine_view_copy_rebuild != nullptr) {
@@ -40811,6 +40970,9 @@ void* __fastcall hook_engine_frame_data_factory(void* render_context, void* rend
 }
 
 void install_engine_frame_factory_probe() {
+    if (!engine_build_supported()) {
+        return;
+    }
     if ((!g_config.engine_frame_factory_probe &&
             !g_config.engine_dual_render_probe &&
             !clean_mono_transport_active()) ||
@@ -40847,6 +41009,9 @@ void __fastcall hook_engine_is_any_menu(void* gui_manager, void* script_context,
 }
 
 void install_engine_menu_state_probe() {
+    if (!engine_build_supported()) {
+        return;
+    }
     if (!g_config.engine_menu_state_probe || g_engine_is_any_menu != nullptr) {
         return;
     }
@@ -43258,6 +43423,9 @@ void __fastcall hook_engine_viewport_resolution(
 }
 
 void install_engine_viewport_resolution_hook() {
+    if (!engine_build_supported()) {
+        return;
+    }
     if (g_engine_viewport_resolution != nullptr ||
         g_config.render_width <= 0 || g_config.render_height <= 0) {
         return;

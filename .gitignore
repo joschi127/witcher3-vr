@@ -21,3 +21,12 @@
 *.w3vr.tmp
 witcher3vr.ini
 dx12user.settings
+
+# Local-only port data (see CLAUDE.md "Data hygiene"): never commit
+CLAUDE.local.md
+CMakeUserPresets.json
+/.claude/settings.local.json
+/local/
+*.jsonl
+*.gpr
+*.rep/
