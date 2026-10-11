@@ -43994,6 +43994,10 @@ std::atomic<uint32_t> g_test_capture_frames_pending{};
 std::atomic<uint32_t> g_test_capture_request_ms{};
 std::atomic<uint32_t> g_test_capture_sequence{};
 std::atomic<uint64_t> g_test_mode_start_tick{};
+// Input path diagnostics for the run summary: Remaster 5.01 also links the
+// GameInput API, which bypasses the XInput hook.
+std::atomic<uint64_t> g_test_xinput_calls{};
+std::atomic<uint64_t> g_test_xinput_connected_calls{};
 std::atomic<uint32_t> g_test_mode_packet{};
 
 bool test_mode_active() {
@@ -44063,6 +44067,13 @@ void test_mode_request_quit_locked(uint32_t now_ms, uint64_t frame) {
         return;
     }
     g_test_mode.quit_requested = true;
+    log_line("Test mode input xinput_calls=%llu xinput_connected=%llu "
+             "gameinput_loaded=%d xinput9_loaded=%d xinput1_4_loaded=%d",
+        static_cast<unsigned long long>(g_test_xinput_calls.load()),
+        static_cast<unsigned long long>(g_test_xinput_connected_calls.load()),
+        GetModuleHandleW(L"GameInput.dll") != nullptr ? 1 : 0,
+        GetModuleHandleW(L"XINPUT9_1_0.dll") != nullptr ? 1 : 0,
+        GetModuleHandleW(L"xinput1_4.dll") != nullptr ? 1 : 0);
     log_line("Test mode quit at_ms=%u presents=%llu draws_indexed=%llu "
              "draws_nonindexed=%llu window=%p",
         now_ms, static_cast<unsigned long long>(frame),
@@ -44116,6 +44127,10 @@ SHORT test_mode_stick_axis(float value) {
 DWORD test_mode_apply_xinput(DWORD user_index, XINPUT_STATE* state, DWORD result) {
     if (state == nullptr || user_index != 0 || !test_mode_active()) {
         return result;
+    }
+    g_test_xinput_calls.fetch_add(1, std::memory_order_relaxed);
+    if (result == ERROR_SUCCESS) {
+        g_test_xinput_connected_calls.fetch_add(1, std::memory_order_relaxed);
     }
     const uint32_t now_ms = test_mode_now_ms();
     std::scoped_lock lock{g_test_mode.mutex};

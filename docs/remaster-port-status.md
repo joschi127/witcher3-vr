@@ -121,3 +121,15 @@ See `remaster-porting-analysis.md` §6. In short:
   mapped: HUD composite (two render targets), tiled culling (moved offsets), nudge probes
   (ambiguous), RT history (not compared), TAAU (removed in 5.01). Unverified at runtime; the
   census logs `build=5.01` sightings.
+
+### Test mode (unattended runs)
+- `[test]` input scripts, gamepad recording and PNG captures work on 4.04: the smoke script
+  (`scripts/test-input/smoke-continue.txt`) skips the intros, continues the latest save, walks,
+  uses Witcher Senses, opens the game menu and quits, without anyone at the controller.
+- Flat stereo without OpenXR (`mode=3`, `[openxr] enabled=0`) renders both eyes alternately;
+  two consecutive captures show the two eyes with the expected horizontal offset.
+- **5.01 reads the gamepad through GameInput** (the game loads `GameInputRedist.dll`; the exe also
+  references ScePad). It never calls `XInputGetState` (0 calls in a full run), so the XInput hook
+  sees nothing: test scripts cannot drive 5.01 yet, and the first-person snap-turn/head-follow
+  input remap (XInput) has no effect there. Options: hook GameInput readings, or drive tests
+  with synthetic keyboard input.
