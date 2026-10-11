@@ -263,6 +263,15 @@ if(BUILD_TESTING)
         COMMAND w3vr_game_build_tests
     )
 
+    add_executable(w3vr_shader_fingerprint_census_tests
+        tests/shader_fingerprint_census_tests.cpp
+    )
+    target_include_directories(w3vr_shader_fingerprint_census_tests PRIVATE src)
+    add_test(
+        NAME shader_fingerprint_census
+        COMMAND w3vr_shader_fingerprint_census_tests
+    )
+
     add_executable(w3vr_camera_follow_policy_tests
         tests/camera_follow_policy_tests.cpp
     )

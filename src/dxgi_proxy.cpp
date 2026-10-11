@@ -30,6 +30,7 @@
 #include "first_person_horse_gallop_offset.h"
 #include "foliage_native_snapshot_policy.h"
 #include "game_build.h"
+#include "shader_fingerprint_census.h"
 #include "focus_fire_projection_policy.h"
 #include "hmd_camera_orientation.h"
 #include "mode3_transport_policy.h"
@@ -14981,6 +14982,176 @@ uint64_t hash_shader_bytecode(const D3D12_SHADER_BYTECODE& bytecode) {
     return fnv1a64(bytecode.pShaderBytecode, bytecode.BytecodeLength);
 }
 
+// [DIAG:SHADER-FINGERPRINT-CENSUS] Records which shaders and pipeline
+// combinations a game build creates, so known fingerprints can be checked on a
+// new build. Every distinct shader and stage combination goes to
+// witcher3vr-shader-inventory.log next to the exe (diff two builds' files to
+// find recompiled passes); sightings of known fingerprints and a periodic
+// summary go to the main log. Binds of pipelines never seen at creation reveal
+// creation paths that are not hooked (pipeline libraries, CreatePipelineState
+// streams); pipelines the mod creates itself also count there.
+namespace shader_census = w3vr::shader_fingerprint_census;
+
+struct ShaderFingerprintCensus {
+    std::mutex mutex;
+    std::unordered_set<uint64_t> shaders;
+    std::unordered_set<uint64_t> combinations;
+    std::unordered_set<const void*> pipelines;
+    FILE* inventory{};
+    bool inventory_opened{};
+};
+
+ShaderFingerprintCensus g_shader_census;
+std::atomic<uint64_t> g_shader_census_known_seen{};
+std::atomic<uint64_t> g_shader_census_binds{};
+std::atomic<uint64_t> g_shader_census_unknown_binds{};
+std::atomic<uint32_t> g_shader_census_unknown_bind_logs{};
+
+bool shader_census_active() {
+    return g_config.logging_enabled && g_config.runtime_diagnostics;
+}
+
+FILE* shader_census_inventory_locked() {
+    if (!g_shader_census.inventory_opened) {
+        g_shader_census.inventory_opened = true;
+        char path[MAX_PATH]{};
+        GetModuleFileNameA(nullptr, path, sizeof(path));
+        auto* slash = strrchr(path, '\\');
+        if (slash != nullptr) {
+            slash[1] = '\0';
+            strcat_s(path, "witcher3vr-shader-inventory.log");
+            if (fopen_s(&g_shader_census.inventory, path, "a") == 0 &&
+                g_shader_census.inventory != nullptr) {
+                std::fprintf(g_shader_census.inventory,
+                    "# session pid=%lu\n", GetCurrentProcessId());
+            }
+        }
+    }
+    return g_shader_census.inventory;
+}
+
+// Caller holds g_shader_census.mutex.
+void shader_census_note_shader_locked(
+    const char* kind, const char* stage, uint64_t hash, SIZE_T size) {
+    if (hash == 0 || !g_shader_census.shaders.insert(hash).second) {
+        return;
+    }
+    if (auto* inventory = shader_census_inventory_locked()) {
+        std::fprintf(inventory, "shader stage=%s hash=%016llX size=%zu\n",
+            stage, static_cast<unsigned long long>(hash),
+            static_cast<size_t>(size));
+    }
+    const int known = shader_census::find_known(hash);
+    if (known < 0) {
+        return;
+    }
+    const auto& entry = shader_census::kKnownFingerprints[known];
+    g_shader_census_known_seen.fetch_or(1ull << known, std::memory_order_acq_rel);
+    log_line("Shader fingerprint seen name=%s group=%s expected_stage=%s "
+             "stage=%s kind=%s hash=%016llX size=%zu",
+        entry.name, entry.group, shader_census::stage_name(entry.stage), stage,
+        kind, static_cast<unsigned long long>(hash), static_cast<size_t>(size));
+}
+
+void shader_census_note_graphics_pipeline(
+    const void* pipeline, const D3D12_GRAPHICS_PIPELINE_STATE_DESC& desc) {
+    const uint64_t vs = hash_shader_bytecode(desc.VS);
+    const uint64_t hs = hash_shader_bytecode(desc.HS);
+    const uint64_t ds = hash_shader_bytecode(desc.DS);
+    const uint64_t gs = hash_shader_bytecode(desc.GS);
+    const uint64_t ps = hash_shader_bytecode(desc.PS);
+    const uint64_t key[] = {vs, hs, ds, gs, ps,
+        static_cast<uint64_t>(desc.NumRenderTargets) |
+            (static_cast<uint64_t>(desc.RTVFormats[0]) << 8) |
+            (static_cast<uint64_t>(desc.DSVFormat) << 24)};
+    std::scoped_lock lock{g_shader_census.mutex};
+    g_shader_census.pipelines.insert(pipeline);
+    shader_census_note_shader_locked("graphics", "vs", vs, desc.VS.BytecodeLength);
+    shader_census_note_shader_locked("graphics", "hs", hs, desc.HS.BytecodeLength);
+    shader_census_note_shader_locked("graphics", "ds", ds, desc.DS.BytecodeLength);
+    shader_census_note_shader_locked("graphics", "gs", gs, desc.GS.BytecodeLength);
+    shader_census_note_shader_locked("graphics", "ps", ps, desc.PS.BytecodeLength);
+    if (!g_shader_census.combinations.insert(fnv1a64(key, sizeof(key))).second) {
+        return;
+    }
+    if (auto* inventory = shader_census_inventory_locked()) {
+        std::fprintf(inventory,
+            "graphics vs=%016llX hs=%016llX ds=%016llX gs=%016llX ps=%016llX "
+            "rts=%u rt0=%u dsv=%u topology=%u\n",
+            static_cast<unsigned long long>(vs), static_cast<unsigned long long>(hs),
+            static_cast<unsigned long long>(ds), static_cast<unsigned long long>(gs),
+            static_cast<unsigned long long>(ps), desc.NumRenderTargets,
+            static_cast<unsigned>(desc.RTVFormats[0]),
+            static_cast<unsigned>(desc.DSVFormat),
+            static_cast<unsigned>(desc.PrimitiveTopologyType));
+    }
+}
+
+void shader_census_note_compute_pipeline(
+    const void* pipeline, const D3D12_COMPUTE_PIPELINE_STATE_DESC& desc) {
+    const uint64_t cs = hash_shader_bytecode(desc.CS);
+    std::scoped_lock lock{g_shader_census.mutex};
+    g_shader_census.pipelines.insert(pipeline);
+    shader_census_note_shader_locked("compute", "cs", cs, desc.CS.BytecodeLength);
+}
+
+void shader_census_note_bind(const void* pipeline) {
+    g_shader_census_binds.fetch_add(1, std::memory_order_relaxed);
+    bool known{};
+    {
+        std::scoped_lock lock{g_shader_census.mutex};
+        known = g_shader_census.pipelines.count(pipeline) != 0;
+    }
+    if (!known) {
+        g_shader_census_unknown_binds.fetch_add(1, std::memory_order_relaxed);
+        if (g_shader_census_unknown_bind_logs.fetch_add(1) < 8) {
+            log_line("Shader census: bound pipeline %p was not seen at creation",
+                pipeline);
+        }
+    }
+}
+
+void log_shader_census_summary() {
+    static uint64_t reported_mask{~0ull};
+    const uint64_t mask =
+        g_shader_census_known_seen.load(std::memory_order_acquire);
+    size_t shaders{};
+    size_t combinations{};
+    size_t pipelines{};
+    {
+        std::scoped_lock lock{g_shader_census.mutex};
+        shaders = g_shader_census.shaders.size();
+        combinations = g_shader_census.combinations.size();
+        pipelines = g_shader_census.pipelines.size();
+        if (g_shader_census.inventory != nullptr) {
+            std::fflush(g_shader_census.inventory);
+        }
+    }
+    log_line("Shader census pipelines=%zu shaders=%zu graphics_combinations=%zu "
+             "binds=%llu unknown_pipeline_binds=%llu known_seen=%d/%zu",
+        pipelines, shaders, combinations,
+        static_cast<unsigned long long>(
+            g_shader_census_binds.load(std::memory_order_relaxed)),
+        static_cast<unsigned long long>(
+            g_shader_census_unknown_binds.load(std::memory_order_relaxed)),
+        static_cast<int>(__popcnt64(mask)), shader_census::kKnownFingerprintCount);
+    if (mask == reported_mask) {
+        return;
+    }
+    reported_mask = mask;
+    std::string missing;
+    for (size_t index = 0; index < shader_census::kKnownFingerprintCount; ++index) {
+        if ((mask & (1ull << index)) == 0) {
+            if (!missing.empty()) {
+                missing += ' ';
+            }
+            missing += shader_census::kKnownFingerprints[index].name;
+        }
+    }
+    log_line("Shader census known fingerprints not seen yet: %s",
+        missing.empty() ? "(none)" : missing.c_str());
+}
+
 void dump_shader_bytecode(const char* stage, uint64_t hash, const D3D12_SHADER_BYTECODE& bytecode) {
     if (!g_config.logging_enabled || !g_config.runtime_diagnostics) {
         return;
@@ -21583,6 +21754,10 @@ HRESULT STDMETHODCALLTYPE hook_create_graphics_pipeline_state(
     REFIID riid,
     void** pipeline_state) {
     const auto hr = g_create_graphics_pipeline_state(device, desc, riid, pipeline_state);
+    if (shader_census_active() && SUCCEEDED(hr) && desc != nullptr &&
+        pipeline_state != nullptr && *pipeline_state != nullptr) {
+        shader_census_note_graphics_pipeline(*pipeline_state, *desc);
+    }
     if ((!common_renderer_pipeline_hooks_needed() &&
             !foliage_bound_basis_route_active() && !reverse_enabled()) ||
         FAILED(hr) || desc == nullptr || pipeline_state == nullptr ||
@@ -22241,6 +22416,10 @@ HRESULT STDMETHODCALLTYPE hook_create_compute_pipeline_state(
     REFIID riid,
     void** pipeline_state) {
     const auto hr = g_create_compute_pipeline_state(device, desc, riid, pipeline_state);
+    if (shader_census_active() && SUCCEEDED(hr) && desc != nullptr &&
+        pipeline_state != nullptr && *pipeline_state != nullptr) {
+        shader_census_note_compute_pipeline(*pipeline_state, *desc);
+    }
     if (!temporal_compute_hooks_needed() || FAILED(hr) || desc == nullptr ||
         pipeline_state == nullptr || *pipeline_state == nullptr) {
         return hr;
@@ -23100,6 +23279,9 @@ void STDMETHODCALLTYPE hook_set_pipeline_state(
     if (is_reshade_immediate_command_list(command_list)) {
         g_set_pipeline_state(command_list, pipeline_state);
         return;
+    }
+    if (pipeline_state != nullptr && shader_census_active()) {
+        shader_census_note_bind(pipeline_state);
     }
     if (mode3_aer_presentation_active()) {
         EngineFrameTag exact_render_tag{};
@@ -53006,6 +53188,9 @@ HRESULT STDMETHODCALLTYPE hook_present(IDXGISwapChain* swapchain, UINT sync_inte
         previous_indexed_draw_count = indexed_draw_count;
         previous_nonindexed_draw_count = nonindexed_draw_count;
         previous_execute_count = execute_count;
+    }
+    if (shader_census_active() && frame % 600 == 0) {
+        log_shader_census_summary();
     }
     if (g_config.runtime_diagnostics && frame % 120 == 0 &&
         false) {
