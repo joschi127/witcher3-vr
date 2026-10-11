@@ -30,7 +30,7 @@
 #include "first_person_horse_gallop_offset.h"
 #include "foliage_native_snapshot_policy.h"
 #include "game_build.h"
-#include "shader_fingerprint_census.h"
+#include "shader_fingerprints.h"
 #include "focus_fire_projection_policy.h"
 #include "hmd_camera_orientation.h"
 #include "mode3_transport_policy.h"
@@ -4170,10 +4170,8 @@ std::atomic<uint32_t> g_foliage_bound_basis_route_logs{};
 // to the RGBA16F velocity MRT even though the domain shader exports the world
 // position needed for a real current-to-history vector. Keep the original
 // material draw intact and register a second PSO that writes only that target.
-constexpr uint64_t kNativeTemporalTerrainVsHash = 0x5D723F550153F88Bull;
-constexpr uint64_t kNativeTemporalTerrainHsHash = 0x5B33D68BABD52A7Eull;
-constexpr uint64_t kNativeTemporalTerrainSecondHsHash = 0x9ABE7F60D2CFC2EBull;
-constexpr uint64_t kNativeTemporalTerrainDsHash = 0x4793F519D8E9F837ull;
+namespace shader_fingerprints = w3vr::shader_fingerprints;
+using ShaderFingerprint = shader_fingerprints::Id;
 constexpr size_t kNativeTemporalTerrainReplayPsoSlotCount = 256;
 constexpr size_t kNativeTemporalTerrainReplayPsoProbeCount = 16;
 constexpr uintptr_t kNativeTemporalTerrainReplayPsoClaimed = ~uintptr_t{};
@@ -4205,13 +4203,17 @@ IDxcBlob* g_native_temporal_terrain_motion_shader{};
 std::atomic<uint32_t> g_native_temporal_terrain_motion_binding_failure_logs{};
 
 bool native_temporal_terrain_hs_hash_matches(uint64_t hash) {
-    return hash == kNativeTemporalTerrainHsHash ||
-        hash == kNativeTemporalTerrainSecondHsHash;
+    return shader_fingerprints::matches(
+               ShaderFingerprint::NativeTemporalTerrainHs, hash) ||
+        shader_fingerprints::matches(
+            ShaderFingerprint::NativeTemporalTerrainSecondHs, hash);
 }
 
 // The validated real-smoke path is identified by this exact shader pair.
-constexpr uint64_t kRealSmokeVsHash = 0x840EF7AC5229BC58ull;
-constexpr uint64_t kRealSmokePsHash = 0x88504F5A627B9F03ull;
+bool real_smoke_shader_pair(uint64_t vs_hash, uint64_t ps_hash) {
+    return shader_fingerprints::matches(ShaderFingerprint::RealSmokeVs, vs_hash) &&
+        shader_fingerprints::matches(ShaderFingerprint::RealSmokePs, ps_hash);
+}
 std::atomic<ID3D12PipelineState*> g_real_smoke_pipeline{};
 std::array<std::atomic<ID3D12PipelineState*>, 3>
     g_real_smoke_center_pipelines{};
@@ -5414,7 +5416,6 @@ std::atomic<bool> g_compute_probe_active{};
 std::atomic<uint64_t> g_compute_probe_end_present{};
 std::atomic<uint32_t> g_compute_probe_capture_id{};
 std::atomic<uint32_t> g_taau_binding_sample_count{};
-constexpr uint64_t kTaauResolveComputeHash = 0x9FBCF9A46B050321ull;
 constexpr UINT kTaauOverrideHeapSize = 64;
 constexpr UINT kTaauCbvOffset = 0;
 constexpr UINT kTaauSrvOffset = 16;
@@ -5441,8 +5442,11 @@ std::atomic<bool> g_taau_override_resources_ready{};
 // tile frusta from M00/M11 and omit the asymmetric M20/M21 center. Each
 // corrected dispatch receives a private b12 copy and private descriptor block;
 // engine upload memory is never changed.
-constexpr uint64_t kTiledLightResolveComputeHash = 0x2F58A01A6E3F1800ull;
-constexpr uint64_t kTiledDimmerCullComputeHash = 0x9D732288E451D8CAull;
+bool tiled_culling_compute_shader(uint64_t cs_hash) {
+    return shader_fingerprints::matches(
+               ShaderFingerprint::TiledLightResolveCs, cs_hash) ||
+        shader_fingerprints::matches(ShaderFingerprint::TiledDimmerCullCs, cs_hash);
+}
 constexpr UINT kTiledCullingCbvCount = 14;
 constexpr UINT kTiledCullingSrvCount = 32;
 constexpr UINT kTiledCullingUavCount = 4;
@@ -6697,8 +6701,7 @@ bool dispatch_asymmetric_tiled_culling_remap(
     if (!load_effect_pipeline_info(pipeline, pipeline_info)) {
         return false;
     }
-    if (pipeline_info.cs_hash != kTiledLightResolveComputeHash &&
-        pipeline_info.cs_hash != kTiledDimmerCullComputeHash) {
+    if (!tiled_culling_compute_shader(pipeline_info.cs_hash)) {
         return false;
     }
 
@@ -8077,8 +8080,6 @@ bool dispatch_rt_symmetric_dlss_per_eye_ao_output_publish(
     UINT x,
     UINT y,
     UINT z) {
-    constexpr uint64_t kAoHistoryReaderCs = 0xB023FC3C1198AD08ull;
-    constexpr uint64_t kAoHistoryWriterCs = 0x060788714B3B371Bull;
     constexpr UINT kCbvRoot = 0;
     constexpr UINT kSrvRoot = 1;
     constexpr UINT kSamplerRoot = 2;
@@ -8104,8 +8105,10 @@ bool dispatch_rt_symmetric_dlss_per_eye_ao_output_publish(
         !load_effect_pipeline_info(pipeline, pipeline_info)) {
         return false;
     }
-    const bool reader = pipeline_info.cs_hash == kAoHistoryReaderCs;
-    const bool writer = pipeline_info.cs_hash == kAoHistoryWriterCs;
+    const bool reader = shader_fingerprints::matches(
+        ShaderFingerprint::RtAoHistoryReaderCs, pipeline_info.cs_hash);
+    const bool writer = shader_fingerprints::matches(
+        ShaderFingerprint::RtAoHistoryWriterCs, pipeline_info.cs_hash);
     if (!reader && !writer) {
         return false;
     }
@@ -8730,9 +8733,6 @@ bool dispatch_rt_symmetric_dlss_per_eye_sigma_shadow_history(
     UINT x,
     UINT y,
     UINT z) {
-    constexpr uint64_t kShadowPreBlurCs = 0x64C9E098A7C07F3Aull;
-    constexpr uint64_t kShadowTemporalStabilizationCs =
-        0x365D2AB2D6ED60B2ull;
     constexpr UINT kCbvRoot = 0;
     constexpr UINT kSrvRoot = 1;
     constexpr UINT kSamplerRoot = 2;
@@ -8756,9 +8756,12 @@ bool dispatch_rt_symmetric_dlss_per_eye_sigma_shadow_history(
         !load_effect_pipeline_info(pipeline, pipeline_info)) {
         return false;
     }
-    const bool reader = pipeline_info.cs_hash == kShadowPreBlurCs;
+    const bool reader = shader_fingerprints::matches(
+        ShaderFingerprint::RtShadowPreBlurCs, pipeline_info.cs_hash);
     const bool writer =
-        pipeline_info.cs_hash == kShadowTemporalStabilizationCs;
+        shader_fingerprints::matches(
+            ShaderFingerprint::RtShadowTemporalStabilizationCs,
+            pipeline_info.cs_hash);
     if (!reader && !writer) {
         return false;
     }
@@ -9249,8 +9252,6 @@ bool dispatch_rt_symmetric_dlss_per_eye_specular_history(
     UINT x,
     UINT y,
     UINT z) {
-    constexpr uint64_t kSpecularTemporalAccumulationCs =
-        0x208C44DC77E1FAD9ull;
     constexpr UINT kCbvRoot = 0;
     constexpr UINT kSrvRoot = 1;
     constexpr UINT kSamplerRoot = 2;
@@ -9274,7 +9275,9 @@ bool dispatch_rt_symmetric_dlss_per_eye_specular_history(
     PipelineInfo pipeline_info{};
     if (pipeline == nullptr ||
         !load_effect_pipeline_info(pipeline, pipeline_info) ||
-        pipeline_info.cs_hash != kSpecularTemporalAccumulationCs) {
+        !shader_fingerprints::matches(
+            ShaderFingerprint::RtSpecularTemporalAccumulationCs,
+            pipeline_info.cs_hash)) {
         return false;
     }
     w3vr::pipeline_flight::CpuScope flight_cpu{
@@ -9690,8 +9693,6 @@ bool dispatch_rt_symmetric_dlss_specular_stabilization_camera_translation(
     UINT x,
     UINT y,
     UINT z) {
-    constexpr uint64_t kSpecularTemporalStabilizationCs =
-        0x723416A8E26035B8ull;
     constexpr UINT kCbvRoot = 0;
     constexpr UINT kSrvRoot = 1;
     constexpr UINT kSamplerRoot = 2;
@@ -9712,7 +9713,9 @@ bool dispatch_rt_symmetric_dlss_specular_stabilization_camera_translation(
     PipelineInfo pipeline_info{};
     if (pipeline == nullptr ||
         !load_effect_pipeline_info(pipeline, pipeline_info) ||
-        pipeline_info.cs_hash != kSpecularTemporalStabilizationCs) {
+        !shader_fingerprints::matches(
+            ShaderFingerprint::RtSpecularTemporalStabilizationCs,
+            pipeline_info.cs_hash)) {
         return false;
     }
     w3vr::pipeline_flight::CpuScope flight_cpu{
@@ -14995,8 +14998,6 @@ uint64_t hash_shader_bytecode(const D3D12_SHADER_BYTECODE& bytecode) {
 // summary go to the main log. Binds of pipelines never seen at creation reveal
 // creation paths that are not hooked (pipeline libraries, CreatePipelineState
 // streams); pipelines the mod creates itself also count there.
-namespace shader_census = w3vr::shader_fingerprint_census;
-
 struct ShaderFingerprintCensus {
     std::mutex mutex;
     std::unordered_set<uint64_t> shaders;
@@ -15071,16 +15072,18 @@ void shader_census_note_shader_locked(const char* kind, const char* stage,
     if (g_config.shader_inventory_dump) {
         shader_census_dump_bytecode(stage, hash, bytecode);
     }
-    const int known = shader_census::find_known(hash);
-    if (known < 0) {
+    const auto known = shader_fingerprints::find(hash);
+    if (known.index < 0) {
         return;
     }
-    const auto& entry = shader_census::kKnownFingerprints[known];
-    g_shader_census_known_seen.fetch_or(1ull << known, std::memory_order_acq_rel);
-    log_line("Shader fingerprint seen name=%s group=%s expected_stage=%s "
+    const auto& entry = shader_fingerprints::kEntries[known.index];
+    g_shader_census_known_seen.fetch_or(
+        1ull << known.index, std::memory_order_acq_rel);
+    log_line("Shader fingerprint seen name=%s group=%s build=%s expected_stage=%s "
              "stage=%s kind=%s hash=%016llX size=%zu",
-        entry.name, entry.group, shader_census::stage_name(entry.stage), stage,
-        kind, static_cast<unsigned long long>(hash), static_cast<size_t>(size));
+        entry.name, entry.group, shader_fingerprints::build_name(known.build),
+        shader_fingerprints::stage_name(entry.stage), stage, kind,
+        static_cast<unsigned long long>(hash), static_cast<size_t>(size));
 }
 
 void shader_census_note_graphics_pipeline(
@@ -15164,18 +15167,18 @@ void log_shader_census_summary() {
             g_shader_census_binds.load(std::memory_order_relaxed)),
         static_cast<unsigned long long>(
             g_shader_census_unknown_binds.load(std::memory_order_relaxed)),
-        static_cast<int>(__popcnt64(mask)), shader_census::kKnownFingerprintCount);
+        static_cast<int>(__popcnt64(mask)), shader_fingerprints::kEntryCount);
     if (mask == reported_mask) {
         return;
     }
     reported_mask = mask;
     std::string missing;
-    for (size_t index = 0; index < shader_census::kKnownFingerprintCount; ++index) {
+    for (size_t index = 0; index < shader_fingerprints::kEntryCount; ++index) {
         if ((mask & (1ull << index)) == 0) {
             if (!missing.empty()) {
                 missing += ' ';
             }
-            missing += shader_census::kKnownFingerprints[index].name;
+            missing += shader_fingerprints::kEntries[index].name;
         }
     }
     log_line("Shader census known fingerprints not seen yet: %s",
@@ -15187,15 +15190,18 @@ void dump_shader_bytecode(const char* stage, uint64_t hash, const D3D12_SHADER_B
         return;
     }
     const bool taau_motion_writer =
-        hash == 0x9503CB0CCE8D37AFull || hash == 0x835BD7C8E1E8FD93ull;
+        shader_fingerprints::matches(ShaderFingerprint::TaauMotionWriterVs, hash) ||
+        shader_fingerprints::matches(ShaderFingerprint::TaauMotionWriterPs, hash);
     const bool rt_ao_history_shader =
-        hash == 0xB023FC3C1198AD08ull ||
-        hash == 0x060788714B3B371Bull;
+        shader_fingerprints::matches(ShaderFingerprint::RtAoHistoryReaderCs, hash) ||
+        shader_fingerprints::matches(ShaderFingerprint::RtAoHistoryWriterCs, hash);
     const bool rt_shadow_history_shader =
-        hash == 0x64C9E098A7C07F3Aull ||
-        hash == 0x365D2AB2D6ED60B2ull;
+        shader_fingerprints::matches(ShaderFingerprint::RtShadowPreBlurCs, hash) ||
+        shader_fingerprints::matches(
+            ShaderFingerprint::RtShadowTemporalStabilizationCs, hash);
     const bool launcher_diagnostic_dump =
-        hash == kTaauResolveComputeHash || taau_motion_writer ||
+        shader_fingerprints::matches(ShaderFingerprint::TaauResolveCs, hash) ||
+        taau_motion_writer ||
         rt_ao_history_shader || rt_shadow_history_shader;
     if ((!g_config.reverse_stereo_probe && !launcher_diagnostic_dump) ||
         stage == nullptr || hash == 0 ||
@@ -15435,10 +15441,14 @@ bool native_temporal_terrain_pipeline_matches(
         desc.GS.pShaderBytecode != nullptr || desc.GS.BytecodeLength != 0) {
         return false;
     }
-    return hash_shader_bytecode(desc.VS) == kNativeTemporalTerrainVsHash &&
+    return shader_fingerprints::matches(
+               ShaderFingerprint::NativeTemporalTerrainVs,
+               hash_shader_bytecode(desc.VS)) &&
         native_temporal_terrain_hs_hash_matches(
             hash_shader_bytecode(desc.HS)) &&
-        hash_shader_bytecode(desc.DS) == kNativeTemporalTerrainDsHash;
+        shader_fingerprints::matches(
+            ShaderFingerprint::NativeTemporalTerrainDs,
+            hash_shader_bytecode(desc.DS));
 }
 
 void register_native_temporal_terrain_replay_pso(
@@ -17924,8 +17934,7 @@ void create_focus_fire_horizontal_psos(
 
     // The canonical real-smoke pair is owned by V1080's position-only,
     // world-up geometry shader. Never layer the generic focus transform on it.
-    if (info.vs_hash == kRealSmokeVsHash &&
-        info.ps_hash == kRealSmokePsHash) {
+    if (real_smoke_shader_pair(info.vs_hash, info.ps_hash)) {
         return;
     }
 
@@ -19136,9 +19145,15 @@ struct ActiveNudgeTarget {
     size_t local_offset{};
     uint32_t component{};
     uint32_t slot{};
-    uint64_t vs_hash{};
-    uint64_t ps_hash{};
+    ShaderFingerprint vs{};
+    ShaderFingerprint ps{};
 };
+
+bool pipeline_matches_probe(
+    const PipelineInfo& pipeline_info, ShaderFingerprint vs, ShaderFingerprint ps) {
+    return shader_fingerprints::matches(vs, pipeline_info.vs_hash) &&
+        shader_fingerprints::matches(ps, pipeline_info.ps_hash);
+}
 
 bool active_nudge_target(ActiveNudgeTarget& target, const PipelineInfo& pipeline_info) {
     const auto frame = g_present_count.load();
@@ -19157,14 +19172,14 @@ bool active_nudge_target(ActiveNudgeTarget& target, const PipelineInfo& pipeline
     }
 
     static constexpr ActiveNudgeTarget targets[] = {
-        {10, 0x10, 12, 0, 0xEDFD76797EB58077ull, 0xBB5967B70E8594BFull},
-        {10, 0x90, 12, 1, 0xEDFD76797EB58077ull, 0xBB5967B70E8594BFull},
-        {13, 0x10, 12, 2, 0xA6D5EB4C9688AB1Bull, 0xA04F949CEF867EA0ull},
-        {13, 0x90, 12, 3, 0xA6D5EB4C9688AB1Bull, 0xA04F949CEF867EA0ull},
+        {10, 0x10, 12, 0, ShaderFingerprint::NudgeProbeAVs, ShaderFingerprint::NudgeProbeAPs},
+        {10, 0x90, 12, 1, ShaderFingerprint::NudgeProbeAVs, ShaderFingerprint::NudgeProbeAPs},
+        {13, 0x10, 12, 2, ShaderFingerprint::NudgeProbeBVs, ShaderFingerprint::NudgeProbeBPs},
+        {13, 0x90, 12, 3, ShaderFingerprint::NudgeProbeBVs, ShaderFingerprint::NudgeProbeBPs},
     };
 
     target = targets[cycle % std::size(targets)];
-    if (pipeline_info.vs_hash != target.vs_hash || pipeline_info.ps_hash != target.ps_hash) {
+    if (!pipeline_matches_probe(pipeline_info, target.vs, target.ps)) {
         return false;
     }
 
@@ -19174,33 +19189,35 @@ bool active_nudge_target(ActiveNudgeTarget& target, const PipelineInfo& pipeline
 
 bool active_nudge_pipeline_candidate(const PipelineInfo& pipeline_info) {
     return
-        (pipeline_info.vs_hash == 0xEDFD76797EB58077ull && pipeline_info.ps_hash == 0xBB5967B70E8594BFull) ||
-        (pipeline_info.vs_hash == 0xA6D5EB4C9688AB1Bull && pipeline_info.ps_hash == 0xA04F949CEF867EA0ull);
+        pipeline_matches_probe(pipeline_info,
+            ShaderFingerprint::NudgeProbeAVs, ShaderFingerprint::NudgeProbeAPs) ||
+        pipeline_matches_probe(pipeline_info,
+            ShaderFingerprint::NudgeProbeBVs, ShaderFingerprint::NudgeProbeBPs);
 }
 
 struct OrbitProbeTarget {
     UINT root{};
     size_t local_offset{};
     uint32_t slot{};
-    uint64_t vs_hash{};
-    uint64_t ps_hash{};
+    ShaderFingerprint vs{};
+    ShaderFingerprint ps{};
 };
 
 static constexpr OrbitProbeTarget k_orbit_probe_targets[] = {
-    {10, 0x10, 0, 0xEDFD76797EB58077ull, 0xBB5967B70E8594BFull},
-    {10, 0x90, 1, 0xEDFD76797EB58077ull, 0xBB5967B70E8594BFull},
-    {13, 0x10, 2, 0xA6D5EB4C9688AB1Bull, 0xA04F949CEF867EA0ull},
-    {13, 0x90, 3, 0xA6D5EB4C9688AB1Bull, 0xA04F949CEF867EA0ull},
-    {10, 0x240, 4, 0x5E2E73E55B072A74ull, 0x7FC495F2BB36CAC0ull},
-    {10, 0x280, 5, 0x5E2E73E55B072A74ull, 0x7FC495F2BB36CAC0ull},
-    {10, 0x2C0, 6, 0x5E2E73E55B072A74ull, 0x7FC495F2BB36CAC0ull},
-    {13, 0x10, 7, 0x5E2E73E55B072A74ull, 0x7FC495F2BB36CAC0ull},
-    {13, 0x90, 8, 0x5E2E73E55B072A74ull, 0x7FC495F2BB36CAC0ull},
+    {10, 0x10, 0, ShaderFingerprint::NudgeProbeAVs, ShaderFingerprint::NudgeProbeAPs},
+    {10, 0x90, 1, ShaderFingerprint::NudgeProbeAVs, ShaderFingerprint::NudgeProbeAPs},
+    {13, 0x10, 2, ShaderFingerprint::NudgeProbeBVs, ShaderFingerprint::NudgeProbeBPs},
+    {13, 0x90, 3, ShaderFingerprint::NudgeProbeBVs, ShaderFingerprint::NudgeProbeBPs},
+    {10, 0x240, 4, ShaderFingerprint::DistantTreesVs, ShaderFingerprint::DistantTreesPs},
+    {10, 0x280, 5, ShaderFingerprint::DistantTreesVs, ShaderFingerprint::DistantTreesPs},
+    {10, 0x2C0, 6, ShaderFingerprint::DistantTreesVs, ShaderFingerprint::DistantTreesPs},
+    {13, 0x10, 7, ShaderFingerprint::DistantTreesVs, ShaderFingerprint::DistantTreesPs},
+    {13, 0x90, 8, ShaderFingerprint::DistantTreesVs, ShaderFingerprint::DistantTreesPs},
 };
 
 bool orbit_probe_pipeline_candidate(const PipelineInfo& pipeline_info) {
     for (const auto& target : k_orbit_probe_targets) {
-        if (pipeline_info.vs_hash == target.vs_hash && pipeline_info.ps_hash == target.ps_hash) {
+        if (pipeline_matches_probe(pipeline_info, target.vs, target.ps)) {
             return true;
         }
     }
@@ -19229,8 +19246,7 @@ void maybe_log_orbit_matrix(
 
     for (const auto& target : k_orbit_probe_targets) {
         if (target.root != root_index ||
-            target.vs_hash != pipeline_info.vs_hash ||
-            target.ps_hash != pipeline_info.ps_hash) {
+            !pipeline_matches_probe(pipeline_info, target.vs, target.ps)) {
             continue;
         }
 
@@ -21847,11 +21863,13 @@ HRESULT STDMETHODCALLTYPE hook_create_graphics_pipeline_state(
     create_native_temporal_terrain_motion_replay_pso(device, pso, *desc);
 
     const auto stereo_dump_candidate =
-        (info.vs_hash == 0xEDFD76797EB58077ull && info.ps_hash == 0xBB5967B70E8594BFull) ||
-        (info.vs_hash == 0xA6D5EB4C9688AB1Bull && info.ps_hash == 0xA04F949CEF867EA0ull) ||
-        (info.vs_hash == 0x9503CB0CCE8D37AFull && info.ps_hash == 0x835BD7C8E1E8FD93ull);
-    if (info.vs_hash == kRealSmokeVsHash &&
-        info.ps_hash == kRealSmokePsHash) {
+        pipeline_matches_probe(info,
+            ShaderFingerprint::NudgeProbeAVs, ShaderFingerprint::NudgeProbeAPs) ||
+        pipeline_matches_probe(info,
+            ShaderFingerprint::NudgeProbeBVs, ShaderFingerprint::NudgeProbeBPs) ||
+        pipeline_matches_probe(info, ShaderFingerprint::TaauMotionWriterVs,
+            ShaderFingerprint::TaauMotionWriterPs);
+    if (real_smoke_shader_pair(info.vs_hash, info.ps_hash)) {
         g_real_smoke_pipeline.store(pso, std::memory_order_release);
         if (desc->GS.pShaderBytecode == nullptr &&
             desc->GS.BytecodeLength == 0 &&
@@ -21868,8 +21886,8 @@ HRESULT STDMETHODCALLTYPE hook_create_graphics_pipeline_state(
             ensure_real_smoke_projection_psos();
         }
     }
-    if (info.vs_hash == 0x9503CB0CCE8D37AFull &&
-        info.ps_hash == 0x835BD7C8E1E8FD93ull) {
+    if (pipeline_matches_probe(info, ShaderFingerprint::TaauMotionWriterVs,
+            ShaderFingerprint::TaauMotionWriterPs)) {
         uint64_t expected = UINT64_MAX;
         const auto present = g_present_count.load(std::memory_order_relaxed);
         if (g_gameplay_world_pipeline_present.compare_exchange_strong(
@@ -21894,8 +21912,8 @@ HRESULT STDMETHODCALLTYPE hook_create_graphics_pipeline_state(
     // specialized world-up geometry shader already owns that draw.
     create_focus_fire_horizontal_psos(device, desc, pso, info);
 
-    if (info.vs_hash == 0x84F8A283C01E56D2ull &&
-        info.ps_hash == 0x051248978BCC3943ull &&
+    if (pipeline_matches_probe(info, ShaderFingerprint::HudCompositeVs,
+            ShaderFingerprint::HudCompositePs) &&
         g_hud_composite_original_pso.load(std::memory_order_acquire) == nullptr) {
         std::scoped_lock creation_lock{g_hud_composite_pso_creation_mutex};
         if (g_hud_composite_original_pso.load(std::memory_order_acquire) == nullptr) {
@@ -22460,10 +22478,12 @@ HRESULT STDMETHODCALLTYPE hook_create_compute_pipeline_state(
     info.cs_hash = hash_shader_bytecode(desc->CS);
     info.root_signature = desc->pRootSignature;
     info.root_hash = fnv1a64(&desc->pRootSignature, sizeof(desc->pRootSignature));
-    if (info.cs_hash == kTaauResolveComputeHash) {
+    if (shader_fingerprints::matches(
+            ShaderFingerprint::TaauResolveCs, info.cs_hash)) {
         g_taau_resolve_pipeline.store(pso, std::memory_order_release);
     }
-    if (g_config.runtime_diagnostics && info.cs_hash == kTaauResolveComputeHash) {
+    if (g_config.runtime_diagnostics && shader_fingerprints::matches(
+            ShaderFingerprint::TaauResolveCs, info.cs_hash)) {
         dump_shader_bytecode("cs", info.cs_hash, desc->CS);
         std::scoped_lock lock{g_reverse_mutex};
         const auto root_it = g_root_signature_infos.find(desc->pRootSignature);
@@ -22487,33 +22507,30 @@ HRESULT STDMETHODCALLTYPE hook_create_compute_pipeline_state(
     }
     const bool tiled_culling_target =
         asymmetric_tiled_culling_fix_needed() &&
-        (info.cs_hash == kTiledLightResolveComputeHash ||
-            info.cs_hash == kTiledDimmerCullComputeHash);
+        tiled_culling_compute_shader(info.cs_hash);
     // Track the exact temporal reader/PostBlur writer pair used by the
     // complete three-plane AO bundle.
-    constexpr uint64_t kRtAoHistoryReaderCs = 0xB023FC3C1198AD08ull;
-    constexpr uint64_t kRtAoHistoryWriterCs = 0x060788714B3B371Bull;
     const bool rt_ao_history_target =
         rt_symmetric_dlss_per_eye_ao_history_active() &&
-        (info.cs_hash == kRtAoHistoryReaderCs ||
-            info.cs_hash == kRtAoHistoryWriterCs);
+        (shader_fingerprints::matches(
+             ShaderFingerprint::RtAoHistoryReaderCs, info.cs_hash) ||
+            shader_fingerprints::matches(
+                ShaderFingerprint::RtAoHistoryWriterCs, info.cs_hash));
     // Track only the exact SIGMA reader/public-writer pair.
-    constexpr uint64_t kRtShadowHistoryReaderCs =
-        0x64C9E098A7C07F3Aull;
-    constexpr uint64_t kRtShadowHistoryWriterCs =
-        0x365D2AB2D6ED60B2ull;
     const bool rt_shadow_history_target =
         rt_symmetric_dlss_per_eye_ao_history_active() &&
-        (info.cs_hash == kRtShadowHistoryReaderCs ||
-            info.cs_hash == kRtShadowHistoryWriterCs);
+        (shader_fingerprints::matches(
+             ShaderFingerprint::RtShadowPreBlurCs, info.cs_hash) ||
+            shader_fingerprints::matches(
+                ShaderFingerprint::RtShadowTemporalStabilizationCs,
+                info.cs_hash));
     // Only the exact reflected REBLUR temporal reader is required. Its stable
     // SRVs are also
     // the publication authority for the complete previous-eye bundle.
-    constexpr uint64_t kRtSpecularHistoryReaderCs =
-        0x208C44DC77E1FAD9ull;
     const bool rt_specular_history_target =
         rt_symmetric_dlss_per_eye_ao_history_active() &&
-        info.cs_hash == kRtSpecularHistoryReaderCs;
+        shader_fingerprints::matches(
+            ShaderFingerprint::RtSpecularTemporalAccumulationCs, info.cs_hash);
     if (tiled_culling_target ||
         rt_ao_history_target || rt_shadow_history_target ||
         rt_specular_history_target) {
@@ -23856,8 +23873,8 @@ void sample_aim_pso_probe(
     auto* pipeline = load_command_list_pipeline(command_list);
     if (functional_candidate && pipeline != nullptr) {
         const auto pipeline_info = lookup_pipeline_info(pipeline);
-        if (pipeline_info.vs_hash == 0xA1EFA1FD7AF9F39Full &&
-            pipeline_info.ps_hash == 0x383D662D669D2C2Cull) {
+        if (pipeline_matches_probe(pipeline_info,
+                ShaderFingerprint::AimProbeVs, ShaderFingerprint::AimProbePs)) {
             g_aim_crosshair_last_present.store(present);
         }
     }
@@ -23932,8 +23949,8 @@ void sample_draw_cbvs(
             {
                 std::scoped_lock lock{g_reverse_mutex};
                 for (const auto& target : k_orbit_probe_targets) {
-                    if (target.vs_hash != orbit_pipeline_info.vs_hash ||
-                        target.ps_hash != orbit_pipeline_info.ps_hash ||
+                    if (!pipeline_matches_probe(
+                            orbit_pipeline_info, target.vs, target.ps) ||
                         target.root >= static_cast<UINT>(g_config.reverse_max_roots)) {
                         continue;
                     }
@@ -23947,8 +23964,8 @@ void sample_draw_cbvs(
             }
 
             for (const auto& target : k_orbit_probe_targets) {
-                if (target.vs_hash == orbit_pipeline_info.vs_hash &&
-                    target.ps_hash == orbit_pipeline_info.ps_hash &&
+                if (pipeline_matches_probe(
+                        orbit_pipeline_info, target.vs, target.ps) &&
                     target.root < static_cast<UINT>(g_config.reverse_max_roots)) {
                     watch_camera_cbv_gpu_va(
                         orbit_snapshot.graphics_cbv[target.root] + target.local_offset,
@@ -29095,7 +29112,8 @@ void STDMETHODCALLTYPE hook_dispatch(
         if (pipeline != nullptr) {
             const auto pipeline_info = lookup_pipeline_info(pipeline);
             const uint64_t dispatch_serial = g_taau_dispatch_serial.fetch_add(1) + 1;
-            if (pipeline_info.cs_hash == kTaauResolveComputeHash) {
+            if (shader_fingerprints::matches(
+                    ShaderFingerprint::TaauResolveCs, pipeline_info.cs_hash)) {
                 log_taau_compute_bindings(command_list, present);
                 ResourceDescriptorInfo t7{};
                 SIZE_T t7_cpu{};

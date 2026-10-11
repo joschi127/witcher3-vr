@@ -115,3 +115,9 @@ See `remaster-porting-analysis.md` §6. In short:
     middle, so most offsets moved.
 - Next: resolve the ambiguous matches, then list for each feature which constant-buffer offsets
   it reads and whether they moved.
+- Central fingerprint table `src/shader_fingerprints.h` (one entry per recognized shader, hash per
+  build). All call sites go through `matches()`. 5.01 hashes are mapped where the feature's other
+  assumptions were checked: terrain motion replay, smoke, foliage snapshot, aim probe. Not yet
+  mapped: HUD composite (two render targets), tiled culling (moved offsets), nudge probes
+  (ambiguous), RT history (not compared), TAAU (removed in 5.01). Unverified at runtime; the
+  census logs `build=5.01` sightings.

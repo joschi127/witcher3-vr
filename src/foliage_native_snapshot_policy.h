@@ -2,20 +2,19 @@
 
 #include <cstdint>
 
-namespace w3vr::foliage_native_snapshot {
+#include "shader_fingerprints.h"
 
-inline constexpr uint64_t kDistantTreesVsHash = 0x5E2E73E55B072A74ull;
-inline constexpr uint64_t kDistantTreesPsHash = 0x7FC495F2BB36CAC0ull;
-inline constexpr uint64_t kNearFrondsVsHash = 0xF9282625E62BCC6Aull;
-inline constexpr uint64_t kNearFrondsPsHash = 0x5B6F5C6CA86B8C9Dull;
+namespace w3vr::foliage_native_snapshot {
 
 [[nodiscard]] constexpr bool shader_pair_is_owner(
     uint64_t vs_hash,
     uint64_t ps_hash) {
+    using shader_fingerprints::Id;
+    using shader_fingerprints::matches;
     return
-        (vs_hash == kDistantTreesVsHash &&
-            ps_hash == kDistantTreesPsHash) ||
-        (vs_hash == kNearFrondsVsHash && ps_hash == kNearFrondsPsHash);
+        (matches(Id::DistantTreesVs, vs_hash) &&
+            matches(Id::DistantTreesPs, ps_hash)) ||
+        (matches(Id::NearFrondsVs, vs_hash) && matches(Id::NearFrondsPs, ps_hash));
 }
 
 [[nodiscard]] constexpr bool is_owner(
