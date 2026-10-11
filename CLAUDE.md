@@ -76,7 +76,7 @@ resources/PSOs (FNV-1a hash of shader bytecode), game-internal hooks at fixed RV
 camera/stereo logic, OpenXR session + D3D12 swapchains submit in Present. Modes: Mono, Stereo
 (engine frame factory called twice per Present), AER+AFW (alternate eye + PureDark reprojection).
 Witcher scripts in `support/mod*` talk to the DLL through hooked native script functions.
-Details and the full list of build-dependent code: `docs/porting-analysis.md`.
+Details and the full list of build-dependent code: `docs/remaster-porting-analysis.md`.
 
 ## Porting rules
 
@@ -84,7 +84,7 @@ Details and the full list of build-dependent code: `docs/porting-analysis.md`.
   Its game hooks are raw RVAs patched blindly, and six are installed unconditionally at
   startup. This fork's build guard (`src/game_build.h`) disables engine hooks on unknown or
   unsupported builds. Only builds that contain it may be used on 5.01. Progress log:
-  `docs/port-status.md`.
+  `docs/remaster-port-status.md`.
 - Keep the two game installations strictly separate. Never copy mod files into the wrong one.
   Both share `Documents\The Witcher 3` (saves, `dx12user.settings`), so back it up before
   switching versions or using the launcher's "Configure Settings for VR".
@@ -122,7 +122,7 @@ same). The material they were derived from is not.
 - `remaster` is the working branch for the port. Commit directly to it in small, self-contained
   commits (easy to cherry-pick for upstream PRs later). Every commit must build.
 - Which commit was verified in the game (5.01, plus a 4.04 regression check where relevant) is
-  recorded in `docs/port-status.md`, including open checks. That is the reference for "known good".
+  recorded in `docs/remaster-port-status.md`, including open checks. That is the reference for "known good".
 - Separate branches only for experiments that will likely be thrown away.
 - **No `Co-Authored-By: Claude` (or other AI attribution) trailers in commit messages or PR
   descriptions.** Commits are authored by the repository owner only. The point is not to hide

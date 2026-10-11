@@ -1,6 +1,6 @@
 # Remaster port: status log
 
-Chronological record of what has been verified. Details live in `porting-analysis.md` (code
+Chronological record of what has been verified. Details live in `remaster-porting-analysis.md` (code
 dependencies, runtime findings) and `remaster-research.md` (public information). Raw logs,
 reverse-engineering output and machine-specific data stay out of the repository.
 
@@ -24,7 +24,7 @@ reverse-engineering output and machine-specific data stay out of the repository.
   - DLSS/DLAA are unavailable on AMD, so TAAU is the reference AA path on 4.04.
 
 ### Settings comparison (fresh defaults 4.04 vs 5.01)
-See `porting-analysis.md` §6. In short:
+See `remaster-porting-analysis.md` §6. In short:
 - TAAU settings are gone in 5.01, `AAMode` semantics changed, and RT plus wider distances
   are on by default.
 - The launcher's 4.04 VR profile must not be applied to 5.01.
