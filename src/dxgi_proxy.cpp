@@ -701,6 +701,9 @@ struct Config {
     // optimized DLL follows the normal low-overhead gaming path.
     bool logging_enabled{false};
     bool runtime_diagnostics{false};
+    // [DIAG:SHADER-FINGERPRINT-CENSUS] Also write every distinct shader's
+    // bytecode to witcher3vr_shaders\ for offline matching between builds.
+    bool shader_inventory_dump{false};
     // Lightweight ten-second CPU/GPU phase recorder. Independent from broad
     // Diagnostic Logging; the shared F3 action is the only file writer.
     bool pipeline_flight_recorder{false};
@@ -14665,6 +14668,8 @@ void load_config() {
         g_config.logging_enabled = read_ini_bool(
             "debug", "logging_enabled", false);
         g_config.runtime_diagnostics = read_ini_bool("debug", "runtime_diagnostics", false);
+        g_config.shader_inventory_dump =
+            read_ini_bool("debug", "shader_inventory_dump", false);
         g_config.pipeline_flight_recorder = read_ini_bool(
             "debug", "pipeline_flight_recorder", false);
         g_config.route_flight_recorder = read_ini_bool(
@@ -15030,9 +15035,31 @@ FILE* shader_census_inventory_locked() {
     return g_shader_census.inventory;
 }
 
+void shader_census_dump_bytecode(
+    const char* stage, uint64_t hash, const D3D12_SHADER_BYTECODE& bytecode) {
+    char path[MAX_PATH]{};
+    GetModuleFileNameA(nullptr, path, sizeof(path));
+    auto* slash = strrchr(path, '\\');
+    if (slash == nullptr) {
+        return;
+    }
+    slash[1] = '\0';
+    strcat_s(path, "witcher3vr_shaders");
+    CreateDirectoryA(path, nullptr);
+    char file_path[MAX_PATH]{};
+    sprintf_s(file_path, "%s\\%s_%016llX.dxil", path, stage,
+        static_cast<unsigned long long>(hash));
+    FILE* file{};
+    if (fopen_s(&file, file_path, "wb") == 0 && file != nullptr) {
+        std::fwrite(bytecode.pShaderBytecode, 1, bytecode.BytecodeLength, file);
+        std::fclose(file);
+    }
+}
+
 // Caller holds g_shader_census.mutex.
-void shader_census_note_shader_locked(
-    const char* kind, const char* stage, uint64_t hash, SIZE_T size) {
+void shader_census_note_shader_locked(const char* kind, const char* stage,
+    uint64_t hash, const D3D12_SHADER_BYTECODE& bytecode) {
+    const SIZE_T size = bytecode.BytecodeLength;
     if (hash == 0 || !g_shader_census.shaders.insert(hash).second) {
         return;
     }
@@ -15040,6 +15067,9 @@ void shader_census_note_shader_locked(
         std::fprintf(inventory, "shader stage=%s hash=%016llX size=%zu\n",
             stage, static_cast<unsigned long long>(hash),
             static_cast<size_t>(size));
+    }
+    if (g_config.shader_inventory_dump) {
+        shader_census_dump_bytecode(stage, hash, bytecode);
     }
     const int known = shader_census::find_known(hash);
     if (known < 0) {
@@ -15066,11 +15096,11 @@ void shader_census_note_graphics_pipeline(
             (static_cast<uint64_t>(desc.DSVFormat) << 24)};
     std::scoped_lock lock{g_shader_census.mutex};
     g_shader_census.pipelines.insert(pipeline);
-    shader_census_note_shader_locked("graphics", "vs", vs, desc.VS.BytecodeLength);
-    shader_census_note_shader_locked("graphics", "hs", hs, desc.HS.BytecodeLength);
-    shader_census_note_shader_locked("graphics", "ds", ds, desc.DS.BytecodeLength);
-    shader_census_note_shader_locked("graphics", "gs", gs, desc.GS.BytecodeLength);
-    shader_census_note_shader_locked("graphics", "ps", ps, desc.PS.BytecodeLength);
+    shader_census_note_shader_locked("graphics", "vs", vs, desc.VS);
+    shader_census_note_shader_locked("graphics", "hs", hs, desc.HS);
+    shader_census_note_shader_locked("graphics", "ds", ds, desc.DS);
+    shader_census_note_shader_locked("graphics", "gs", gs, desc.GS);
+    shader_census_note_shader_locked("graphics", "ps", ps, desc.PS);
     if (!g_shader_census.combinations.insert(fnv1a64(key, sizeof(key))).second) {
         return;
     }
@@ -15092,7 +15122,7 @@ void shader_census_note_compute_pipeline(
     const uint64_t cs = hash_shader_bytecode(desc.CS);
     std::scoped_lock lock{g_shader_census.mutex};
     g_shader_census.pipelines.insert(pipeline);
-    shader_census_note_shader_locked("compute", "cs", cs, desc.CS.BytecodeLength);
+    shader_census_note_shader_locked("compute", "cs", cs, desc.CS);
 }
 
 void shader_census_note_bind(const void* pipeline) {
