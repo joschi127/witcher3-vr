@@ -86,6 +86,8 @@ See `porting-analysis.md` §6. In short:
     patching.
   - No list had an entry differing from the first remembered one.
   - Draws are now counted (about 1,900 indexed draws per frame in free roaming, 0 before).
-- Open: 4.04 regression run with this build, then compare the 28 shader fingerprints on 5.01.
-  The first recording of a newly created list (before its first Reset/submission) is not yet
+- Verified on 4.04 with the same build (commit `ac8cd7f`), Pico 4 over Virtual Desktop, Stereo +
+  TAAU: no table is patched (shared vtables), OpenXR setup, draw counts, log message kinds and
+  frame pacing match the earlier reference run. No visible difference.
+- Open: compare the 28 shader fingerprints on 5.01. The first recording of a newly created list (before its first Reset/submission) is not yet
   intercepted. Hook `CreateCommandList`/`CreateCommandList1` if that turns out to matter.

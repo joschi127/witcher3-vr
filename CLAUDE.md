@@ -97,6 +97,8 @@ Allowed in git: source, tests, and docs whose content is derivable from the publ
 
 Never commit (keep under `local/` or in `CLAUDE.local.md`, both git-ignored):
 - game files/assets, game or NVIDIA DLLs, save files
+- user settings files from `Documents\The Witcher 3`: `dx12user.settings` contains an account
+  refresh token (`[Galaxy] tokenRefA`)
 - runtime logs (`witcher3vr.log`, OpenXR API dumps, crash dumps), screenshots with HUD/game content
 - reverse-engineering artifacts: Ghidra/IDA projects, decompiled code, byte dumps, exe hashes
 - machine/user data: local paths, user names, exact hardware identification (driver versions,
