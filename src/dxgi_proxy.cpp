@@ -2261,6 +2261,8 @@ DrawIndexedInstancedFn g_draw_indexed_instanced{};
 // [DIAG:COMMAND-LIST-VTABLE-MODULE] Address the DrawIndexedInstanced detour was
 // installed on, compared against the game's own command lists at submission.
 std::atomic<void*> g_draw_indexed_instanced_hook_target{};
+// [PORT:EMBEDDED-COMMAND-LIST-TABLE] Defined next to install_command_list_hooks.
+void set_embedded_command_list_hook_enabled(void* target, bool enabled);
 DrawInstancedFn g_draw_instanced{};
 DispatchFn g_dispatch{};
 CopyBufferRegionFn g_copy_buffer_region{};
@@ -6599,6 +6601,7 @@ void update_taau_hot_hook_state() {
         } else {
             MH_DisableHook(target);
         }
+        set_embedded_command_list_hook_enabled(target, enabled);
     };
 
     if (core_needed != g_taau_core_hooks_enabled) {
@@ -19654,6 +19657,153 @@ void install_resource_hooks(ID3D12Resource* resource) {
     }
 }
 
+// [PORT:EMBEDDED-COMMAND-LIST-TABLE] The Agility SDK runtime shipped with the
+// Remaster gives each command list its own function table, stored inside the
+// object, whose entries point straight into the GPU driver. Inline detours on
+// the runtime's shared implementation never see those calls. Each registered
+// slot therefore gets its hook written into every embedded table at Reset and
+// ExecuteCommandLists, and the original pointer used by the hooks (g_xxx)
+// becomes a dispatcher that calls the driver entry for embedded-table lists
+// and the MinHook trampoline for lists with a shared vtable (4.04, wrappers).
+void log_module_for_address(const char* label, const void* address);
+
+struct EmbeddedCommandListSlot {
+    std::atomic<bool> registered{};
+    std::atomic<bool> enabled{};
+    std::atomic<bool> mismatch_logged{};
+    void* target{};
+    void* hook{};
+    void* trampoline{};
+    std::atomic<void*> direct{};
+};
+
+constexpr size_t kEmbeddedCommandListSlotCount = 64;
+constexpr uintptr_t kEmbeddedCommandListTableWindow = 0x1000;
+EmbeddedCommandListSlot g_embedded_command_list_slots[kEmbeddedCommandListSlotCount];
+std::atomic<uint32_t> g_embedded_command_list_patch_log_count{};
+
+void** embedded_command_list_table(const void* list) {
+    if (list == nullptr) {
+        return nullptr;
+    }
+    void** const table = *reinterpret_cast<void** const*>(list);
+    const uintptr_t offset = reinterpret_cast<uintptr_t>(table) -
+        reinterpret_cast<uintptr_t>(list);
+    return offset != 0 && offset < kEmbeddedCommandListTableWindow &&
+            (offset % sizeof(void*)) == 0 ?
+        table :
+        nullptr;
+}
+
+void* embedded_command_list_original(const void* list, size_t index) {
+    auto& slot = g_embedded_command_list_slots[index];
+    void** const table = embedded_command_list_table(list);
+    if (table == nullptr) {
+        return slot.trampoline;
+    }
+    void* const entry = table[index];
+    if (entry == slot.hook) {
+        return slot.direct.load(std::memory_order_acquire);
+    }
+    // An embedded entry that still points at the detoured runtime function
+    // must not be called directly, or the detour would recurse.
+    return entry == slot.target ? slot.trampoline : entry;
+}
+
+template <size_t Index, typename R, typename... Args>
+R STDMETHODCALLTYPE embedded_command_list_dispatch(
+    ID3D12GraphicsCommandList* list, Args... args) {
+    using Fn = R(STDMETHODCALLTYPE*)(ID3D12GraphicsCommandList*, Args...);
+    return reinterpret_cast<Fn>(
+        embedded_command_list_original(list, Index))(list, args...);
+}
+
+// Call right after MH_CreateHook succeeded for |target|, so |*original| still
+// holds the trampoline.
+template <size_t Index, typename R, typename... Args>
+void register_embedded_command_list_slot(void* target, void* hook,
+    R(STDMETHODCALLTYPE** original)(ID3D12GraphicsCommandList*, Args...),
+    bool enabled) {
+    static_assert(Index < kEmbeddedCommandListSlotCount);
+    auto& slot = g_embedded_command_list_slots[Index];
+    if (slot.registered.load(std::memory_order_acquire) || original == nullptr ||
+        *original == nullptr) {
+        return;
+    }
+    slot.target = target;
+    slot.hook = hook;
+    slot.trampoline = reinterpret_cast<void*>(*original);
+    slot.enabled.store(enabled, std::memory_order_release);
+    *original = &embedded_command_list_dispatch<Index, R, Args...>;
+    slot.registered.store(true, std::memory_order_release);
+}
+
+void set_embedded_command_list_hook_enabled(void* target, bool enabled) {
+    for (auto& slot : g_embedded_command_list_slots) {
+        if (slot.registered.load(std::memory_order_acquire) &&
+            slot.target == target) {
+            slot.enabled.store(enabled, std::memory_order_release);
+        }
+    }
+}
+
+// Brings an embedded table in line with the registered hooks. Lists are only
+// synced while they are not recording (after Reset, at submission), and every
+// entry is a single aligned pointer store.
+void sync_embedded_command_list_table(const void* list) {
+    void** const table = embedded_command_list_table(list);
+    if (table == nullptr) {
+        return;
+    }
+    uint32_t patched{};
+    for (size_t index = 0; index < kEmbeddedCommandListSlotCount; ++index) {
+        auto& slot = g_embedded_command_list_slots[index];
+        if (!slot.registered.load(std::memory_order_acquire)) {
+            continue;
+        }
+        void* const entry = table[index];
+        if (entry == slot.target) {
+            continue;
+        }
+        const bool enabled = slot.enabled.load(std::memory_order_acquire);
+        if (entry == slot.hook) {
+            if (!enabled) {
+                table[index] = slot.direct.load(std::memory_order_acquire);
+            }
+            continue;
+        }
+        if (!enabled) {
+            continue;
+        }
+        void* expected{};
+        if (slot.direct.compare_exchange_strong(expected, entry,
+                std::memory_order_acq_rel)) {
+            char label[96]{};
+            std::snprintf(label, sizeof(label),
+                "Embedded command-list table: slot %zu direct entry", index);
+            log_module_for_address(label, entry);
+        } else if (expected != entry) {
+            if (!slot.mismatch_logged.exchange(true)) {
+                log_line("Embedded command-list table: slot %zu list=%p entry=%p "
+                         "differs from direct=%p, slot left unpatched",
+                    index, list, entry, expected);
+            }
+            continue;
+        }
+        table[index] = slot.hook;
+        ++patched;
+    }
+    if (patched != 0 &&
+        g_embedded_command_list_patch_log_count.fetch_add(1) < 8) {
+        log_line("Embedded command-list table patched list=%p table=%p "
+                 "offset=0x%zX slots=%u",
+            list, table,
+            static_cast<size_t>(reinterpret_cast<uintptr_t>(table) -
+                reinterpret_cast<uintptr_t>(list)),
+            patched);
+    }
+}
+
 void install_command_list_hooks() {
     if (!renderer_hook_installation_needed() || g_command_list_hooks_installed ||
         g_d3d12_device == nullptr) {
@@ -19672,6 +19822,9 @@ void install_command_list_hooks() {
     }
 
     command_list->Close();
+    log_line("Command-list hook source list=%p table=%p embedded=%d",
+        command_list, *reinterpret_cast<void**>(command_list),
+        embedded_command_list_table(command_list) != nullptr ? 1 : 0);
 
     const bool command_state_hooks = graphics_binding_hooks_needed();
     const bool graphics_cbv_hooks =
@@ -19689,6 +19842,8 @@ void install_command_list_hooks() {
             log_line(
                 "Renderer hooked ID3D12GraphicsCommandList::Reset at %p",
                 target);
+            register_embedded_command_list_slot<10>(target,
+                reinterpret_cast<void*>(&hook_reset_command_list), &g_reset_command_list, true);
         }
     }
 
@@ -19697,6 +19852,8 @@ void install_command_list_hooks() {
         if (MH_CreateHook(target, reinterpret_cast<void*>(&hook_draw_instanced), reinterpret_cast<void**>(&g_draw_instanced)) == MH_OK &&
             MH_EnableHook(target) == MH_OK) {
             log_line("Reverse hooked ID3D12GraphicsCommandList::DrawInstanced at %p", target);
+            register_embedded_command_list_slot<12>(target,
+                reinterpret_cast<void*>(&hook_draw_instanced), &g_draw_instanced, true);
         }
     }
 
@@ -19707,6 +19864,8 @@ void install_command_list_hooks() {
             g_draw_indexed_instanced_hook_target.store(
                 target, std::memory_order_release);
             log_line("Reverse hooked ID3D12GraphicsCommandList::DrawIndexedInstanced at %p", target);
+            register_embedded_command_list_slot<13>(target,
+                reinterpret_cast<void*>(&hook_draw_indexed_instanced), &g_draw_indexed_instanced, true);
         }
     }
 
@@ -19716,6 +19875,8 @@ void install_command_list_hooks() {
                 reinterpret_cast<void**>(&g_dispatch)) == MH_OK) {
             g_dispatch_hook_target = target;
             log_line("Reverse created disabled ID3D12GraphicsCommandList::Dispatch hook at %p", target);
+            register_embedded_command_list_slot<14>(target,
+                reinterpret_cast<void*>(&hook_dispatch), &g_dispatch, false);
         }
     }
 
@@ -19726,6 +19887,8 @@ void install_command_list_hooks() {
                 reinterpret_cast<void**>(&g_om_set_render_targets)) == MH_OK) {
             g_om_render_targets_hook_target = target;
             log_line("Reverse created disabled ID3D12GraphicsCommandList::OMSetRenderTargets hook at %p", target);
+            register_embedded_command_list_slot<46>(target,
+                reinterpret_cast<void*>(&hook_om_set_render_targets), &g_om_set_render_targets, false);
         }
     }
 
@@ -19734,6 +19897,8 @@ void install_command_list_hooks() {
         if (MH_CreateHook(target, reinterpret_cast<void*>(&hook_copy_buffer_region), reinterpret_cast<void**>(&g_copy_buffer_region)) == MH_OK &&
             MH_EnableHook(target) == MH_OK) {
             log_line("Reverse hooked ID3D12GraphicsCommandList::CopyBufferRegion at %p", target);
+            register_embedded_command_list_slot<15>(target,
+                reinterpret_cast<void*>(&hook_copy_buffer_region), &g_copy_buffer_region, true);
         }
     }
 
@@ -19742,6 +19907,8 @@ void install_command_list_hooks() {
         if (MH_CreateHook(target, reinterpret_cast<void*>(&hook_set_descriptor_heaps), reinterpret_cast<void**>(&g_set_descriptor_heaps)) == MH_OK &&
             MH_EnableHook(target) == MH_OK) {
             log_line("Reverse hooked ID3D12GraphicsCommandList::SetDescriptorHeaps at %p", target);
+            register_embedded_command_list_slot<28>(target,
+                reinterpret_cast<void*>(&hook_set_descriptor_heaps), &g_set_descriptor_heaps, true);
         }
     }
 
@@ -19750,6 +19917,8 @@ void install_command_list_hooks() {
         if (MH_CreateHook(target, reinterpret_cast<void*>(&hook_set_graphics_root_descriptor_table), reinterpret_cast<void**>(&g_set_graphics_root_descriptor_table)) == MH_OK &&
             MH_EnableHook(target) == MH_OK) {
             log_line("Reverse hooked ID3D12GraphicsCommandList::SetGraphicsRootDescriptorTable at %p", target);
+            register_embedded_command_list_slot<32>(target,
+                reinterpret_cast<void*>(&hook_set_graphics_root_descriptor_table), &g_set_graphics_root_descriptor_table, true);
         }
     }
 
@@ -19759,6 +19928,8 @@ void install_command_list_hooks() {
                 reinterpret_cast<void**>(&g_set_compute_root_descriptor_table)) == MH_OK) {
             g_compute_table_hook_target = target;
             log_line("Reverse created disabled ID3D12GraphicsCommandList::SetComputeRootDescriptorTable hook at %p", target);
+            register_embedded_command_list_slot<31>(target,
+                reinterpret_cast<void*>(&hook_set_compute_root_descriptor_table), &g_set_compute_root_descriptor_table, false);
         }
     }
 
@@ -19770,6 +19941,8 @@ void install_command_list_hooks() {
         if (MH_CreateHook(target, reinterpret_cast<void*>(&hook_set_graphics_root_cbv), reinterpret_cast<void**>(&g_set_graphics_root_cbv)) == MH_OK &&
             MH_EnableHook(target) == MH_OK) {
             log_line("Reverse hooked ID3D12GraphicsCommandList::SetGraphicsRootConstantBufferView at %p", target);
+            register_embedded_command_list_slot<38>(target,
+                reinterpret_cast<void*>(&hook_set_graphics_root_cbv), &g_set_graphics_root_cbv, true);
         }
     }
 
@@ -19779,6 +19952,8 @@ void install_command_list_hooks() {
                 reinterpret_cast<void**>(&g_set_compute_root_cbv)) == MH_OK) {
             g_compute_cbv_hook_target = target;
             log_line("Reverse created disabled ID3D12GraphicsCommandList::SetComputeRootConstantBufferView hook at %p", target);
+            register_embedded_command_list_slot<37>(target,
+                reinterpret_cast<void*>(&hook_set_compute_root_cbv), &g_set_compute_root_cbv, false);
         }
     }
 
@@ -19788,6 +19963,8 @@ void install_command_list_hooks() {
                 reinterpret_cast<void**>(&g_set_compute_root_32bit_constant)) == MH_OK) {
             g_compute_constant_hook_target = target;
             log_line("Reverse created disabled ID3D12GraphicsCommandList::SetComputeRoot32BitConstant hook at %p", target);
+            register_embedded_command_list_slot<33>(target,
+                reinterpret_cast<void*>(&hook_set_compute_root_32bit_constant), &g_set_compute_root_32bit_constant, false);
         }
     }
 
@@ -19797,6 +19974,8 @@ void install_command_list_hooks() {
                 reinterpret_cast<void**>(&g_set_compute_root_32bit_constants)) == MH_OK) {
             g_compute_constants_hook_target = target;
             log_line("Reverse created disabled ID3D12GraphicsCommandList::SetComputeRoot32BitConstants hook at %p", target);
+            register_embedded_command_list_slot<35>(target,
+                reinterpret_cast<void*>(&hook_set_compute_root_32bit_constants), &g_set_compute_root_32bit_constants, false);
         }
     }
 
@@ -19805,6 +19984,8 @@ void install_command_list_hooks() {
         if (MH_CreateHook(target, reinterpret_cast<void*>(&hook_set_pipeline_state), reinterpret_cast<void**>(&g_set_pipeline_state)) == MH_OK &&
             MH_EnableHook(target) == MH_OK) {
             log_line("Reverse hooked ID3D12GraphicsCommandList::SetPipelineState at %p", target);
+            register_embedded_command_list_slot<25>(target,
+                reinterpret_cast<void*>(&hook_set_pipeline_state), &g_set_pipeline_state, true);
         }
     }
 
@@ -19813,6 +19994,8 @@ void install_command_list_hooks() {
         if (MH_CreateHook(target, reinterpret_cast<void*>(&hook_set_graphics_root_signature), reinterpret_cast<void**>(&g_set_graphics_root_signature)) == MH_OK &&
             MH_EnableHook(target) == MH_OK) {
             log_line("Reverse hooked ID3D12GraphicsCommandList::SetGraphicsRootSignature at %p", target);
+            register_embedded_command_list_slot<30>(target,
+                reinterpret_cast<void*>(&hook_set_graphics_root_signature), &g_set_graphics_root_signature, true);
         }
     }
 
@@ -19822,6 +20005,8 @@ void install_command_list_hooks() {
                 reinterpret_cast<void**>(&g_set_compute_root_signature)) == MH_OK) {
             g_compute_signature_hook_target = target;
             log_line("Reverse created disabled ID3D12GraphicsCommandList::SetComputeRootSignature hook at %p", target);
+            register_embedded_command_list_slot<29>(target,
+                reinterpret_cast<void*>(&hook_set_compute_root_signature), &g_set_compute_root_signature, false);
         }
     }
 
@@ -20762,6 +20947,10 @@ void STDMETHODCALLTYPE hook_execute_command_lists(
     UINT num_command_lists,
     ID3D12CommandList* const* command_lists) {
     diagnose_command_list_vtables(num_command_lists, command_lists);
+    for (UINT index = 0; command_lists != nullptr && index < num_command_lists;
+        ++index) {
+        sync_embedded_command_list_table(command_lists[index]);
+    }
     // [TRIAL:RESHADE-IMMEDIATE-LIST-ISOLATION V23001 4/4] The official
     // D3D12 queue wrapper flushes its named immediate list as a separate raw
     // ExecuteCommandLists call before the game's submission. Preserve that GPU
@@ -22552,6 +22741,7 @@ HRESULT STDMETHODCALLTYPE hook_reset_command_list(
     if (FAILED(result)) {
         return result;
     }
+    sync_embedded_command_list_table(command_list);
 
     // Reset discards recorded draws. Release any private foliage upload slot
     // owned by this abandoned recording instead of waiting for a queue fence
@@ -29192,6 +29382,8 @@ void install_streamline_resource_barrier_probe() {
             reinterpret_cast<void**>(&g_resource_barrier)) == MH_OK &&
         MH_EnableHook(target) == MH_OK) {
         log_line("Streamline output ResourceBarrier probe hooked at %p", target);
+        register_embedded_command_list_slot<26>(target,
+            reinterpret_cast<void*>(&hook_resource_barrier), &g_resource_barrier, true);
     }
     command_list->Close();
     command_list->Release();
