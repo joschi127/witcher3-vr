@@ -1,0 +1,20 @@
+# Smoke test: start, skip intros, Continue the latest save, walk, open the game menu, quit.
+# Times are ms since the first Present (see src/test_input_script.h). Derived from a manual
+# gamepad recording on Next-Gen 4.04 with generous margins; loading times vary per machine.
+# Use with [test] input_script=<this file> in witcher3vr.ini (path relative to the game exe).
+
+7000 tap A            # "press any key": switch the game to gamepad input
+15000 tap X           # skip intro part 1
+22000 tap X           # skip intro part 2
+32000 tap A           # main menu: Continue (latest save)
+
+55000 capture         # loaded, standing
+56000 stick L 0 1     # walk forward
+59000 stick L 0 0
+60000 capture         # after walking
+
+62000 tap START       # game menu (map, inventory, quests ...)
+65000 capture
+66000 tap B           # close the game menu
+
+70000 quit            # close the game window
