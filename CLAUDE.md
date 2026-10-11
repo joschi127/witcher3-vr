@@ -113,9 +113,11 @@ same). The material they were derived from is not.
 - Remotes: `origin` = the fork (https://github.com/joschi127/witcher3-vr), default push target.
   `upstream` = tig3rmast3r/witcher3-vr, fetch only. Never push to `upstream`.
 - `main` mirrors `upstream/main` and gets fast-forwards only, no fork commits.
-- `remaster` is the integration branch for the port. It must build and must keep 4.04 working.
-- Each port step lives on a short-lived `port/<topic>` branch off `remaster`. It is merged
-  after it has been verified in the game (5.01, plus a 4.04 regression check where relevant).
+- `remaster` is the working branch for the port. Commit directly to it in small, self-contained
+  commits (easy to cherry-pick for upstream PRs later). Every commit must build.
+- Which commit was verified in the game (5.01, plus a 4.04 regression check where relevant) is
+  recorded in `docs/port-status.md`, including open checks. That is the reference for "known good".
+- Separate branches only for experiments that will likely be thrown away.
 - **No `Co-Authored-By: Claude` (or other AI attribution) trailers in commit messages or PR
   descriptions.** Commits are authored by the repository owner only. The point is not to hide
   the use of Claude. GitHub would list Claude as a contributor otherwise.
