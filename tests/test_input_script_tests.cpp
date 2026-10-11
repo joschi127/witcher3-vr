@@ -93,6 +93,18 @@ int main() {
     require(parse_script(replay, events, error) && events.size() == 3,
         "recorded lines parse as a script");
 
+    require(to_gameinput_buttons(0x1000) == 0x00000004, "A maps to GameInput A");
+    require(to_gameinput_buttons(0x0010 | 0x0020) == 0x00000003,
+        "START/BACK map to Menu/View");
+    require(from_gameinput_buttons(0x00000010 | 0x00000800) == (0x4000 | 0x0200),
+        "GameInput X and right shoulder map back");
+    require(from_gameinput_buttons(0x00010000) == 0,
+        "GameInput-only trigger button has no XInput mask");
+    for (const auto& button : kButtons) {
+        require(from_gameinput_buttons(to_gameinput_buttons(button.mask)) == button.mask,
+            "every script button round-trips through GameInput");
+    }
+
     if (failures != 0) {
         std::fprintf(stderr, "%d failure(s)\n", failures);
         return 1;

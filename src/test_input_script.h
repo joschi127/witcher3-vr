@@ -80,6 +80,40 @@ inline const char* button_name(uint16_t mask) {
     return "?";
 }
 
+// XInput button masks (kButtons) <-> GameInput v3 GameInputGamepadButtons.
+struct GameInputButtonMapping {
+    uint16_t xinput;
+    uint32_t gameinput;
+};
+
+inline constexpr GameInputButtonMapping kGameInputButtons[] = {
+    {0x0001, 0x00000040}, {0x0002, 0x00000080}, {0x0004, 0x00000100},
+    {0x0008, 0x00000200}, {0x0010, 0x00000001}, {0x0020, 0x00000002},
+    {0x0040, 0x00001000}, {0x0080, 0x00002000}, {0x0100, 0x00000400},
+    {0x0200, 0x00000800}, {0x1000, 0x00000004}, {0x2000, 0x00000008},
+    {0x4000, 0x00000010}, {0x8000, 0x00000020},
+};
+
+constexpr uint32_t to_gameinput_buttons(uint16_t xinput) {
+    uint32_t result = 0;
+    for (const auto& mapping : kGameInputButtons) {
+        if ((xinput & mapping.xinput) != 0) {
+            result |= mapping.gameinput;
+        }
+    }
+    return result;
+}
+
+constexpr uint16_t from_gameinput_buttons(uint32_t gameinput) {
+    uint16_t result = 0;
+    for (const auto& mapping : kGameInputButtons) {
+        if ((gameinput & mapping.gameinput) != 0) {
+            result = static_cast<uint16_t>(result | mapping.xinput);
+        }
+    }
+    return result;
+}
+
 namespace detail {
 inline std::vector<std::string_view> split_words(std::string_view line) {
     std::vector<std::string_view> words;

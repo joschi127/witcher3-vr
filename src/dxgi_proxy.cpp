@@ -29960,12 +29960,9 @@ void __fastcall hook_engine_view_constants(void* self, void* view_data, char fla
     g_engine_view_constants(self, view_data, flags);
 }
 
-// Every install_engine_* / initialize_engine_* routine patches or reads
-// witcher3.exe at fixed RVAs that are only valid for one game build. Identify
-// the build once from the PE header and fail closed on anything else, so an
-// unsupported exe keeps the D3D12/DXGI/OpenXR layers without engine patches.
-bool engine_build_supported() {
-    static const bool supported = []() {
+// Identifies the running witcher3.exe once from its PE header.
+w3vr::game_build::Build running_game_build() {
+    static const w3vr::game_build::Build build = []() {
         const auto* module =
             reinterpret_cast<const uint8_t*>(GetModuleHandleW(nullptr));
         uint32_t time_date_stamp{};
@@ -29982,18 +29979,25 @@ bool engine_build_supported() {
                 }
             }
         }
-        const auto build =
+        const auto identified =
             w3vr::game_build::identify(time_date_stamp, size_of_image);
-        const bool hooks_supported =
-            w3vr::game_build::engine_hooks_supported(build);
         log_line(
             "Game build %s timestamp=0x%08X size_of_image=0x%08X "
             "engine_hooks=%s",
-            w3vr::game_build::name(build), time_date_stamp, size_of_image,
-            hooks_supported ? "enabled" : "disabled_unsupported_build");
-        return hooks_supported;
+            w3vr::game_build::name(identified), time_date_stamp, size_of_image,
+            w3vr::game_build::engine_hooks_supported(identified) ?
+                "enabled" : "disabled_unsupported_build");
+        return identified;
     }();
-    return supported;
+    return build;
+}
+
+// Every install_engine_* / initialize_engine_* routine patches or reads
+// witcher3.exe at fixed RVAs that are only valid for one game build. Fail
+// closed on anything else, so an unsupported exe keeps the D3D12/DXGI/OpenXR
+// layers without engine patches.
+bool engine_build_supported() {
+    return w3vr::game_build::engine_hooks_supported(running_game_build());
 }
 
 void install_engine_view_constants_hook() {
@@ -43998,6 +44002,11 @@ std::atomic<uint64_t> g_test_mode_start_tick{};
 // GameInput API, which bypasses the XInput hook.
 std::atomic<uint64_t> g_test_xinput_calls{};
 std::atomic<uint64_t> g_test_xinput_connected_calls{};
+std::atomic<uint64_t> g_test_gameinput_gamepad_calls{};
+std::atomic<uint64_t> g_test_gameinput_gamepad_valid{};
+std::atomic<uint64_t> g_test_gameinput_reading_calls{};
+std::atomic<uint64_t> g_test_gameinput_reading_hits{};
+std::atomic<uint32_t> g_test_gameinput_reading_kinds{};
 std::atomic<uint32_t> g_test_mode_packet{};
 
 bool test_mode_active() {
@@ -44068,10 +44077,18 @@ void test_mode_request_quit_locked(uint32_t now_ms, uint64_t frame) {
     }
     g_test_mode.quit_requested = true;
     log_line("Test mode input xinput_calls=%llu xinput_connected=%llu "
+             "gameinput_reading_calls=%llu gameinput_reading_hits=%llu "
+             "gameinput_kinds=0x%08X "
+             "gameinput_gamepad_calls=%llu gameinput_gamepad_valid=%llu "
              "gameinput_loaded=%d xinput9_loaded=%d xinput1_4_loaded=%d",
         static_cast<unsigned long long>(g_test_xinput_calls.load()),
         static_cast<unsigned long long>(g_test_xinput_connected_calls.load()),
-        GetModuleHandleW(L"GameInput.dll") != nullptr ? 1 : 0,
+        static_cast<unsigned long long>(g_test_gameinput_reading_calls.load()),
+        static_cast<unsigned long long>(g_test_gameinput_reading_hits.load()),
+        g_test_gameinput_reading_kinds.load(),
+        static_cast<unsigned long long>(g_test_gameinput_gamepad_calls.load()),
+        static_cast<unsigned long long>(g_test_gameinput_gamepad_valid.load()),
+        GetModuleHandleW(L"GameInputRedist.dll") != nullptr ? 1 : 0,
         GetModuleHandleW(L"XINPUT9_1_0.dll") != nullptr ? 1 : 0,
         GetModuleHandleW(L"xinput1_4.dll") != nullptr ? 1 : 0);
     log_line("Test mode quit at_ms=%u presents=%llu draws_indexed=%llu "
@@ -44124,27 +44141,15 @@ SHORT test_mode_stick_axis(float value) {
     return static_cast<SHORT>(std::clamp(value * 32767.0f, -32768.0f, 32767.0f));
 }
 
-DWORD test_mode_apply_xinput(DWORD user_index, XINPUT_STATE* state, DWORD result) {
-    if (state == nullptr || user_index != 0 || !test_mode_active()) {
-        return result;
-    }
-    g_test_xinput_calls.fetch_add(1, std::memory_order_relaxed);
-    if (result == ERROR_SUCCESS) {
-        g_test_xinput_connected_calls.fetch_add(1, std::memory_order_relaxed);
-    }
+// Records |physical| (nullptr: no controller) and returns the script pad to
+// merge into the game's input; false when no script is loaded. Shared by the
+// XInput (4.04) and GameInput (5.01) paths.
+bool test_mode_exchange_pad(const w3vr::test_input::PadState* physical,
+    w3vr::test_input::PadState& script_pad) {
     const uint32_t now_ms = test_mode_now_ms();
     std::scoped_lock lock{g_test_mode.mutex};
-    if (g_test_mode.recording != nullptr && result == ERROR_SUCCESS) {
-        const auto& gamepad = state->Gamepad;
-        w3vr::test_input::PadState physical{};
-        physical.buttons = gamepad.wButtons;
-        physical.lx = gamepad.sThumbLX / 32767.0f;
-        physical.ly = gamepad.sThumbLY / 32767.0f;
-        physical.rx = gamepad.sThumbRX / 32767.0f;
-        physical.ry = gamepad.sThumbRY / 32767.0f;
-        physical.lt = gamepad.bLeftTrigger / 255.0f;
-        physical.rt = gamepad.bRightTrigger / 255.0f;
-        const auto lines = g_test_mode.recorder.feed(now_ms, physical);
+    if (g_test_mode.recording != nullptr && physical != nullptr) {
+        const auto lines = g_test_mode.recorder.feed(now_ms, *physical);
         for (const auto& line : lines) {
             std::fprintf(g_test_mode.recording, "%s\n", line.c_str());
         }
@@ -44153,6 +44158,31 @@ DWORD test_mode_apply_xinput(DWORD user_index, XINPUT_STATE* state, DWORD result
         }
     }
     if (g_test_mode.player == nullptr) {
+        return false;
+    }
+    script_pad = g_test_mode.pad;
+    return true;
+}
+
+DWORD test_mode_apply_xinput(DWORD user_index, XINPUT_STATE* state, DWORD result) {
+    if (state == nullptr || user_index != 0 || !test_mode_active()) {
+        return result;
+    }
+    g_test_xinput_calls.fetch_add(1, std::memory_order_relaxed);
+    w3vr::test_input::PadState physical{};
+    if (result == ERROR_SUCCESS) {
+        g_test_xinput_connected_calls.fetch_add(1, std::memory_order_relaxed);
+        const auto& gamepad = state->Gamepad;
+        physical.buttons = gamepad.wButtons;
+        physical.lx = gamepad.sThumbLX / 32767.0f;
+        physical.ly = gamepad.sThumbLY / 32767.0f;
+        physical.rx = gamepad.sThumbRX / 32767.0f;
+        physical.ry = gamepad.sThumbRY / 32767.0f;
+        physical.lt = gamepad.bLeftTrigger / 255.0f;
+        physical.rt = gamepad.bRightTrigger / 255.0f;
+    }
+    w3vr::test_input::PadState pad{};
+    if (!test_mode_exchange_pad(result == ERROR_SUCCESS ? &physical : nullptr, pad)) {
         return result;
     }
     if (result != ERROR_SUCCESS) {
@@ -44160,7 +44190,6 @@ DWORD test_mode_apply_xinput(DWORD user_index, XINPUT_STATE* state, DWORD result
         *state = XINPUT_STATE{};
         result = ERROR_SUCCESS;
     }
-    const auto& pad = g_test_mode.pad;
     auto& gamepad = state->Gamepad;
     gamepad.wButtons |= pad.buttons;
     if (pad.lx != 0.0f || pad.ly != 0.0f) {
@@ -44615,6 +44644,188 @@ DWORD WINAPI hook_xinput_get_state(
     return result;
 }
 
+// [FEATURE:TEST-MODE-GAMEINPUT] Remaster 5.01 reads the gamepad through the
+// GameInput redistributable (GameInputRedist.dll, API v3 created with
+// GameInputInitialize) and never calls XInputGetState. Test scripts and input
+// recording therefore also hook IGameInputReading::GetGamepadState, reached
+// through the readings that IGameInput hands out. Interface layout from the
+// public GameInput v3 header (microsoftconnect/GameInput, include/GameInput.h).
+// Unlike the XInput path this cannot present a virtual controller: the script
+// is merged into the readings of a connected gamepad.
+struct GameInputGamepadStateV3 {
+    uint32_t buttons;
+    float left_trigger;
+    float right_trigger;
+    float left_x;
+    float left_y;
+    float right_x;
+    float right_y;
+};
+
+// {20EFC1C7-5D9A-43BA-B26F-B807FA48609C}: IGameInput, GameInput API v3.
+constexpr GUID kIGameInputV3 = {0x20EFC1C7, 0x5D9A, 0x43BA,
+    {0xB2, 0x6F, 0xB8, 0x07, 0xFA, 0x48, 0x60, 0x9C}};
+// vtable slots: IUnknown (0-2), then the methods in declaration order.
+constexpr size_t kGameInputGetCurrentReadingSlot = 4;
+constexpr size_t kGameInputGetNextReadingSlot = 5;
+constexpr size_t kGameInputReadingGetGamepadStateSlot = 18;
+
+using GameInputInitializeFn = HRESULT(WINAPI*)(REFIID, void**);
+using GameInputGetCurrentReadingFn =
+    HRESULT(STDMETHODCALLTYPE*)(void*, uint32_t, void*, void**);
+using GameInputGetNextReadingFn =
+    HRESULT(STDMETHODCALLTYPE*)(void*, void*, uint32_t, void*, void**);
+using GameInputReadingGetGamepadStateFn =
+    bool(STDMETHODCALLTYPE*)(void*, GameInputGamepadStateV3*);
+
+GameInputInitializeFn g_gameinput_initialize{};
+GameInputGetCurrentReadingFn g_gameinput_get_current_reading{};
+GameInputGetNextReadingFn g_gameinput_get_next_reading{};
+GameInputReadingGetGamepadStateFn g_gameinput_get_gamepad_state{};
+std::atomic<void*> g_gameinput_gamepad_state_target{};
+std::mutex g_gameinput_hook_mutex;
+
+bool STDMETHODCALLTYPE hook_gameinput_get_gamepad_state(
+    void* reading, GameInputGamepadStateV3* state) {
+    const bool valid = g_gameinput_get_gamepad_state(reading, state);
+    if (state == nullptr || !test_mode_active()) {
+        return valid;
+    }
+    g_test_gameinput_gamepad_calls.fetch_add(1, std::memory_order_relaxed);
+    w3vr::test_input::PadState physical{};
+    if (valid) {
+        g_test_gameinput_gamepad_valid.fetch_add(1, std::memory_order_relaxed);
+        physical.buttons = w3vr::test_input::from_gameinput_buttons(state->buttons);
+        physical.lx = state->left_x;
+        physical.ly = state->left_y;
+        physical.rx = state->right_x;
+        physical.ry = state->right_y;
+        physical.lt = state->left_trigger;
+        physical.rt = state->right_trigger;
+    }
+    w3vr::test_input::PadState pad{};
+    if (!valid || !test_mode_exchange_pad(&physical, pad)) {
+        return valid;
+    }
+    state->buttons |= w3vr::test_input::to_gameinput_buttons(pad.buttons);
+    if (pad.lx != 0.0f || pad.ly != 0.0f) {
+        state->left_x = pad.lx;
+        state->left_y = pad.ly;
+    }
+    if (pad.rx != 0.0f || pad.ry != 0.0f) {
+        state->right_x = pad.rx;
+        state->right_y = pad.ry;
+    }
+    state->left_trigger = std::max(state->left_trigger, pad.lt);
+    state->right_trigger = std::max(state->right_trigger, pad.rt);
+    return valid;
+}
+
+// Readings share one implementation; hook its GetGamepadState once.
+void hook_gameinput_reading(void* reading) {
+    if (reading == nullptr) {
+        return;
+    }
+    void* const target =
+        (*reinterpret_cast<void***>(reading))[kGameInputReadingGetGamepadStateSlot];
+    void* const hooked = g_gameinput_gamepad_state_target.load(std::memory_order_acquire);
+    if (hooked == target) {
+        return;
+    }
+    std::scoped_lock lock{g_gameinput_hook_mutex};
+    if (g_gameinput_gamepad_state_target.load(std::memory_order_acquire) != nullptr) {
+        static std::atomic<bool> logged{};
+        if (!logged.exchange(true)) {
+            log_line("GameInput reading with a different GetGamepadState=%p "
+                     "(hooked %p); left unhooked", target, hooked);
+        }
+        return;
+    }
+    const bool ok =
+        MH_CreateHook(target, reinterpret_cast<void*>(&hook_gameinput_get_gamepad_state),
+            reinterpret_cast<void**>(&g_gameinput_get_gamepad_state)) == MH_OK &&
+        MH_EnableHook(target) == MH_OK;
+    g_gameinput_gamepad_state_target.store(target, std::memory_order_release);
+    log_line("GameInput IGameInputReading::GetGamepadState hook %s target=%p",
+        ok ? "installed" : "failed", target);
+}
+
+HRESULT STDMETHODCALLTYPE hook_gameinput_get_current_reading(
+    void* self, uint32_t kind, void* device, void** reading) {
+    const HRESULT hr = g_gameinput_get_current_reading(self, kind, device, reading);
+    g_test_gameinput_reading_calls.fetch_add(1, std::memory_order_relaxed);
+    g_test_gameinput_reading_kinds.fetch_or(kind, std::memory_order_relaxed);
+    if (SUCCEEDED(hr)) {
+        g_test_gameinput_reading_hits.fetch_add(1, std::memory_order_relaxed);
+    }
+    if (SUCCEEDED(hr) && reading != nullptr) {
+        hook_gameinput_reading(*reading);
+    }
+    return hr;
+}
+
+HRESULT STDMETHODCALLTYPE hook_gameinput_get_next_reading(
+    void* self, void* reference, uint32_t kind, void* device, void** reading) {
+    const HRESULT hr =
+        g_gameinput_get_next_reading(self, reference, kind, device, reading);
+    g_test_gameinput_reading_calls.fetch_add(1, std::memory_order_relaxed);
+    g_test_gameinput_reading_kinds.fetch_or(kind, std::memory_order_relaxed);
+    if (SUCCEEDED(hr)) {
+        g_test_gameinput_reading_hits.fetch_add(1, std::memory_order_relaxed);
+    }
+    if (SUCCEEDED(hr) && reading != nullptr) {
+        hook_gameinput_reading(*reading);
+    }
+    return hr;
+}
+
+HRESULT WINAPI hook_gameinput_initialize(REFIID riid, void** object) {
+    const HRESULT hr = g_gameinput_initialize(riid, object);
+    wchar_t iid[64]{};
+    StringFromGUID2(riid, iid, static_cast<int>(std::size(iid)));
+    log_line("GameInput GameInputInitialize hr=0x%08X iid=%ls object=%p",
+        static_cast<unsigned>(hr), iid, object != nullptr ? *object : nullptr);
+    if (FAILED(hr) || object == nullptr || *object == nullptr ||
+        !IsEqualGUID(riid, kIGameInputV3)) {
+        return hr;
+    }
+    std::scoped_lock lock{g_gameinput_hook_mutex};
+    if (g_gameinput_get_current_reading != nullptr) {
+        return hr;
+    }
+    void** const vtable = *reinterpret_cast<void***>(*object);
+    const auto hook = [](void* target, void* detour, void** original, const char* name) {
+        const bool ok = MH_CreateHook(target, detour, original) == MH_OK &&
+            MH_EnableHook(target) == MH_OK;
+        log_line("GameInput IGameInput::%s hook %s target=%p", name,
+            ok ? "installed" : "failed", target);
+    };
+    hook(vtable[kGameInputGetCurrentReadingSlot],
+        reinterpret_cast<void*>(&hook_gameinput_get_current_reading),
+        reinterpret_cast<void**>(&g_gameinput_get_current_reading), "GetCurrentReading");
+    hook(vtable[kGameInputGetNextReadingSlot],
+        reinterpret_cast<void*>(&hook_gameinput_get_next_reading),
+        reinterpret_cast<void**>(&g_gameinput_get_next_reading), "GetNextReading");
+    return hr;
+}
+
+void install_gameinput_hooks() {
+    if (running_game_build() != w3vr::game_build::Build::Remaster501 ||
+        !test_mode_active()) {
+        return;
+    }
+    HMODULE module = LoadLibraryW(L"GameInputRedist.dll");
+    auto* target = module != nullptr ?
+        reinterpret_cast<void*>(GetProcAddress(module, "GameInputInitialize")) :
+        nullptr;
+    const bool ok = target != nullptr &&
+        MH_CreateHook(target, reinterpret_cast<void*>(&hook_gameinput_initialize),
+            reinterpret_cast<void**>(&g_gameinput_initialize)) == MH_OK &&
+        MH_EnableHook(target) == MH_OK;
+    log_line("GameInput GameInputInitialize hook %s target=%p",
+        ok ? "installed" : "failed", target);
+}
+
 void install_xinput_snap_turn_hook() {
     if (g_xinput_get_state != nullptr) {
         return;
@@ -44664,6 +44875,7 @@ void ensure_initialized() {
         initialize_focus_projection_shader_file();
         reset_asymmetric_authority_audit();
         install_xinput_snap_turn_hook();
+        install_gameinput_hooks();
         install_ngx_dlaa_loader_hooks();
         initialize_performance_cpu_sets();
         install_engine_view_constants_hook();
