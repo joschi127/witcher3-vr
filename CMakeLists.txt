@@ -68,6 +68,9 @@ target_link_libraries(witcher3vr_dxgi PRIVATE
     dxguid
     # WaitOnAddress/WakeByAddressAll for the engine pair producer barrier.
     Synchronization
+    # Test mode PNG captures.
+    windowscodecs
+    ole32
 )
 set_target_properties(witcher3vr_dxgi PROPERTIES OUTPUT_NAME dxgi)
 target_link_options(witcher3vr_dxgi PRIVATE /MAP)

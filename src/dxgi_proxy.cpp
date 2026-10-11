@@ -10,6 +10,7 @@
 #include <renderdoc_app.h>
 #include <MinHook.h>
 #include <Xinput.h>
+#include <wincodec.h>
 #include <intrin.h>
 
 #define XR_USE_PLATFORM_WIN32
@@ -43987,6 +43988,11 @@ struct TestModeState {
 };
 
 TestModeState g_test_mode;
+// Frames still to capture for pending "capture" actions, and the script time
+// that requested them (used in the file names).
+std::atomic<uint32_t> g_test_capture_frames_pending{};
+std::atomic<uint32_t> g_test_capture_request_ms{};
+std::atomic<uint32_t> g_test_capture_sequence{};
 std::atomic<uint64_t> g_test_mode_start_tick{};
 std::atomic<uint32_t> g_test_mode_packet{};
 
@@ -44092,6 +44098,9 @@ void test_mode_on_present(uint64_t frame) {
     const auto due = g_test_mode.player->advance(now_ms);
     g_test_mode.pad = g_test_mode.player->state();
     if (due.captures != 0) {
+        // Two consecutive frames: in flat stereo the eyes alternate per frame.
+        g_test_capture_request_ms.store(now_ms, std::memory_order_relaxed);
+        g_test_capture_frames_pending.store(2, std::memory_order_release);
         log_line("Test mode capture requested at_ms=%u present=%llu", now_ms,
             static_cast<unsigned long long>(frame));
     }
@@ -44154,6 +44163,207 @@ DWORD test_mode_apply_xinput(DWORD user_index, XINPUT_STATE* state, DWORD result
     // Games skip polling results whose packet number did not change.
     state->dwPacketNumber += g_test_mode_packet.fetch_add(1) + 1;
     return result;
+}
+
+// [FEATURE:TEST-MODE] Writes the swapchain image that is about to be
+// presented to witcher3vr_captures\ as PNG. The copy runs on the swapchain
+// queue after the game's work for the frame and is waited for synchronously,
+// which is acceptable for the few frames a test requests.
+bool test_mode_write_png(const std::wstring& path, UINT width, UINT height,
+    const std::vector<uint8_t>& bgra) {
+    const HRESULT co = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    IWICImagingFactory* factory{};
+    IWICStream* stream{};
+    IWICBitmapEncoder* encoder{};
+    IWICBitmapFrameEncode* frame{};
+    bool ok = SUCCEEDED(CoCreateInstance(CLSID_WICImagingFactory, nullptr,
+                  CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory))) &&
+        SUCCEEDED(factory->CreateStream(&stream)) &&
+        SUCCEEDED(stream->InitializeFromFilename(path.c_str(), GENERIC_WRITE)) &&
+        SUCCEEDED(factory->CreateEncoder(GUID_ContainerFormatPng, nullptr, &encoder)) &&
+        SUCCEEDED(encoder->Initialize(stream, WICBitmapEncoderNoCache)) &&
+        SUCCEEDED(encoder->CreateNewFrame(&frame, nullptr)) &&
+        SUCCEEDED(frame->Initialize(nullptr)) &&
+        SUCCEEDED(frame->SetSize(width, height));
+    WICPixelFormatGUID format = GUID_WICPixelFormat32bppBGRA;
+    ok = ok && SUCCEEDED(frame->SetPixelFormat(&format)) &&
+        IsEqualGUID(format, GUID_WICPixelFormat32bppBGRA) &&
+        SUCCEEDED(frame->WritePixels(height, width * 4,
+            static_cast<UINT>(bgra.size()), const_cast<BYTE*>(bgra.data()))) &&
+        SUCCEEDED(frame->Commit()) && SUCCEEDED(encoder->Commit());
+    if (frame != nullptr) frame->Release();
+    if (encoder != nullptr) encoder->Release();
+    if (stream != nullptr) stream->Release();
+    if (factory != nullptr) factory->Release();
+    if (SUCCEEDED(co)) {
+        CoUninitialize();
+    }
+    return ok;
+}
+
+// Converts one row of a supported swapchain format to opaque BGRA8.
+bool test_mode_convert_row(DXGI_FORMAT format, const uint8_t* source, uint8_t* target,
+    UINT width) {
+    switch (format) {
+    case DXGI_FORMAT_R8G8B8A8_UNORM:
+    case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+        for (UINT x = 0; x < width; ++x) {
+            target[x * 4 + 0] = source[x * 4 + 2];
+            target[x * 4 + 1] = source[x * 4 + 1];
+            target[x * 4 + 2] = source[x * 4 + 0];
+            target[x * 4 + 3] = 255;
+        }
+        return true;
+    case DXGI_FORMAT_B8G8R8A8_UNORM:
+    case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
+        for (UINT x = 0; x < width; ++x) {
+            std::memcpy(target + x * 4, source + x * 4, 3);
+            target[x * 4 + 3] = 255;
+        }
+        return true;
+    case DXGI_FORMAT_R10G10B10A2_UNORM:
+        for (UINT x = 0; x < width; ++x) {
+            uint32_t packed{};
+            std::memcpy(&packed, source + x * 4, 4);
+            target[x * 4 + 0] = static_cast<uint8_t>(((packed >> 20) & 0x3FF) >> 2);
+            target[x * 4 + 1] = static_cast<uint8_t>(((packed >> 10) & 0x3FF) >> 2);
+            target[x * 4 + 2] = static_cast<uint8_t>((packed & 0x3FF) >> 2);
+            target[x * 4 + 3] = 255;
+        }
+        return true;
+    default:
+        return false;
+    }
+}
+
+void test_mode_capture_if_pending(IDXGISwapChain* swapchain) {
+    if (g_test_capture_frames_pending.load(std::memory_order_acquire) == 0 ||
+        swapchain == nullptr || g_d3d12_device == nullptr ||
+        g_command_queue == nullptr || g_execute_command_lists == nullptr) {
+        return;
+    }
+    const uint32_t frame_index =
+        2 - g_test_capture_frames_pending.fetch_sub(1, std::memory_order_acq_rel);
+    const uint32_t request_ms =
+        g_test_capture_request_ms.load(std::memory_order_relaxed);
+
+    IDXGISwapChain3* swapchain3{};
+    ID3D12Resource* backbuffer{};
+    if (FAILED(swapchain->QueryInterface(IID_PPV_ARGS(&swapchain3))) ||
+        FAILED(swapchain3->GetBuffer(swapchain3->GetCurrentBackBufferIndex(),
+            IID_PPV_ARGS(&backbuffer)))) {
+        if (swapchain3 != nullptr) swapchain3->Release();
+        log_line("Test mode capture failed: no back buffer");
+        return;
+    }
+    swapchain3->Release();
+
+    const D3D12_RESOURCE_DESC desc = backbuffer->GetDesc();
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+    UINT64 total_bytes{};
+    g_d3d12_device->GetCopyableFootprints(
+        &desc, 0, 1, 0, &footprint, nullptr, nullptr, &total_bytes);
+
+    D3D12_HEAP_PROPERTIES heap{};
+    heap.Type = D3D12_HEAP_TYPE_READBACK;
+    D3D12_RESOURCE_DESC buffer_desc{};
+    buffer_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    buffer_desc.Width = total_bytes;
+    buffer_desc.Height = 1;
+    buffer_desc.DepthOrArraySize = 1;
+    buffer_desc.MipLevels = 1;
+    buffer_desc.SampleDesc.Count = 1;
+    buffer_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+
+    ID3D12Resource* readback{};
+    ID3D12CommandAllocator* allocator{};
+    ID3D12GraphicsCommandList* list{};
+    ID3D12Fence* fence{};
+    HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    bool ok = event != nullptr &&
+        SUCCEEDED(g_d3d12_device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE,
+            &buffer_desc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+            IID_PPV_ARGS(&readback))) &&
+        SUCCEEDED(g_d3d12_device->CreateCommandAllocator(
+            D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator))) &&
+        SUCCEEDED(g_d3d12_device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+            allocator, nullptr, IID_PPV_ARGS(&list))) &&
+        SUCCEEDED(g_d3d12_device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
+            IID_PPV_ARGS(&fence)));
+    if (ok) {
+        D3D12_RESOURCE_BARRIER barrier{};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource = backbuffer;
+        barrier.Transition.Subresource = 0;
+        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
+        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        list->ResourceBarrier(1, &barrier);
+        D3D12_TEXTURE_COPY_LOCATION source{};
+        source.pResource = backbuffer;
+        source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        D3D12_TEXTURE_COPY_LOCATION target{};
+        target.pResource = readback;
+        target.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        target.PlacedFootprint = footprint;
+        list->CopyTextureRegion(&target, 0, 0, 0, &source, nullptr);
+        std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
+        list->ResourceBarrier(1, &barrier);
+        ok = SUCCEEDED(list->Close());
+    }
+    if (ok) {
+        ID3D12CommandList* lists[] = {list};
+        // The trampoline keeps this private copy out of the mod's own
+        // submission bookkeeping.
+        g_execute_command_lists(g_command_queue, 1, lists);
+        ok = SUCCEEDED(g_command_queue->Signal(fence, 1)) &&
+            SUCCEEDED(fence->SetEventOnCompletion(1, event)) &&
+            WaitForSingleObject(event, 5000) == WAIT_OBJECT_0;
+    }
+
+    const UINT width = static_cast<UINT>(desc.Width);
+    const UINT height = desc.Height;
+    std::vector<uint8_t> bgra;
+    void* mapped{};
+    if (ok && SUCCEEDED(readback->Map(0, nullptr, &mapped))) {
+        bgra.resize(static_cast<size_t>(width) * height * 4);
+        for (UINT y = 0; y < height && ok; ++y) {
+            ok = test_mode_convert_row(desc.Format,
+                static_cast<const uint8_t*>(mapped) + footprint.Offset +
+                    static_cast<size_t>(y) * footprint.Footprint.RowPitch,
+                bgra.data() + static_cast<size_t>(y) * width * 4, width);
+        }
+        readback->Unmap(0, nullptr);
+    } else {
+        ok = false;
+    }
+
+    std::wstring directory;
+    {
+        wchar_t path[MAX_PATH]{};
+        GetModuleFileNameW(nullptr, path, MAX_PATH);
+        if (auto* slash = wcsrchr(path, L'\\')) {
+            slash[1] = L'\0';
+        }
+        directory = std::wstring(path) + L"witcher3vr_captures";
+    }
+    CreateDirectoryW(directory.c_str(), nullptr);
+    wchar_t name[96]{};
+    swprintf_s(name, L"\\capture_%03u_%07ums_f%u.png",
+        g_test_capture_sequence.fetch_add(1), request_ms, frame_index);
+    const std::wstring file = directory + name;
+    if (ok) {
+        ok = test_mode_write_png(file, width, height, bgra);
+    }
+    log_line("Test mode capture %s frame=%u at_ms=%u size=%ux%u format=%d file=%ls",
+        ok ? "written" : "failed", frame_index, request_ms, width, height,
+        static_cast<int>(desc.Format), file.c_str());
+
+    if (fence != nullptr) fence->Release();
+    if (list != nullptr) list->Release();
+    if (allocator != nullptr) allocator->Release();
+    if (readback != nullptr) readback->Release();
+    if (event != nullptr) CloseHandle(event);
+    backbuffer->Release();
 }
 
 // [FEATURE:FIRST-PERSON-SNAP-TURN 5/5] Read the physical right-stick X, turn
@@ -53373,6 +53583,7 @@ HRESULT STDMETHODCALLTYPE hook_present(IDXGISwapChain* swapchain, UINT sync_inte
     const auto frame = ++g_present_count;
     record_route_flight_present(frame);
     test_mode_on_present(frame);
+    test_mode_capture_if_pending(swapchain);
     w3vr::pipeline_flight::begin_frame(
         frame, g_config.openxr_mode,
         static_cast<int>(g_config.temporal_backend),
@@ -54094,6 +54305,7 @@ HRESULT STDMETHODCALLTYPE hook_present1(
     const auto frame = ++g_present_count;
     record_route_flight_present(frame);
     test_mode_on_present(frame);
+    test_mode_capture_if_pending(swapchain);
     w3vr::pipeline_flight::begin_frame(
         frame, g_config.openxr_mode,
         static_cast<int>(g_config.temporal_backend),
