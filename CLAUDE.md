@@ -37,6 +37,10 @@ Dev install procedure:
    so a `dxgi.dll` placed directly in `bin\x64_dx12` may be overwritten.
 3. Replace changed `support/` scripts in `mods\` as needed.
 
+Windows Defender may flag self-built `dxgi.dll` files as `Trojan:Win32/Wacatac.C!ml` (ML false
+positive for an unsigned hooking proxy DLL) and quarantine them from the build output and the
+game folder. Add Defender exclusions for the build directory and the installed `dxgi.dll` paths.
+
 ## Tests: what they do and do not cover
 
 - `tests/*.cpp`: unit tests of header-only policy modules (eye geometry, AER scheduling,
