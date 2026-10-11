@@ -99,7 +99,11 @@ Never commit (keep under `local/` or in `CLAUDE.local.md`, both git-ignored):
 - game files/assets, game or NVIDIA DLLs, save files
 - runtime logs (`witcher3vr.log`, OpenXR API dumps, crash dumps), screenshots with HUD/game content
 - reverse-engineering artifacts: Ghidra/IDA projects, decompiled code, byte dumps, exe hashes
-- machine/user data: local paths, hardware details, Claude session transcripts
+- machine/user data: local paths, user names, exact hardware identification (driver versions,
+  serial numbers, device IDs), Claude session transcripts
+
+The test setup may be named at the level needed to interpret a result: GPU vendor or model,
+headset model, OpenXR runtime, driver module names (e.g. "AMD GPU, Pico 4 over Virtual Desktop").
 
 Address constants and byte patterns needed by the code are fine in source (upstream does the
 same). The material they were derived from is not.
@@ -116,7 +120,7 @@ same). The material they were derived from is not.
   descriptions.** Commits are authored by the repository owner only. The point is not to hide
   the use of Claude. GitHub would list Claude as a contributor otherwise.
 - Check before every push: no files from the data-hygiene "never commit" list, no binaries,
-  no local paths or hardware details in the outgoing commits.
+  no local paths or exact hardware identification in the outgoing commits.
 
 ## Port roadmap (agreed with the user)
 
