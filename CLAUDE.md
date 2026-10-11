@@ -104,6 +104,20 @@ Never commit (keep under `local/` or in `CLAUDE.local.md`, both git-ignored):
 Address constants and byte patterns needed by the code are fine in source (upstream does the
 same). The material they were derived from is not.
 
+## Git workflow
+
+- Remotes: `origin` = the fork (https://github.com/joschi127/witcher3-vr), default push target.
+  `upstream` = tig3rmast3r/witcher3-vr, fetch only. Never push to `upstream`.
+- `main` mirrors `upstream/main` and gets fast-forwards only, no fork commits.
+- `remaster` is the integration branch for the port. It must build and must keep 4.04 working.
+- Each port step lives on a short-lived `port/<topic>` branch off `remaster`. It is merged
+  after it has been verified in the game (5.01, plus a 4.04 regression check where relevant).
+- **No `Co-Authored-By: Claude` (or other AI attribution) trailers in commit messages or PR
+  descriptions.** Commits are authored by the repository owner only. The point is not to hide
+  the use of Claude. GitHub would list Claude as a contributor otherwise.
+- Check before every push: no files from the data-hygiene "never commit" list, no binaries,
+  no local paths or hardware details in the outgoing commits.
+
 ## Port roadmap (agreed with the user)
 
 - **Build guard** (`src/game_build.h`, `engine_build_supported()` in `dxgi_proxy.cpp`): engine
