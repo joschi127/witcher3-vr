@@ -66,3 +66,26 @@ See `porting-analysis.md` §6. In short:
   it after running the tests.
 - With `[openxr] enabled=0`, set `render_width`/`render_height` to 0. Otherwise the proxy
   forces the swapchain to the VR per-eye size and the flat image is stretched.
+
+## 2026-10-11
+
+### Embedded command-list tables patched (branch `port/embedded-command-list-table`)
+- Mechanism: every command-list hook slot is registered. After `Reset` and at
+  `ExecuteCommandLists`, the hook is written into each list's embedded function table. The
+  original pointers used by the hooks dispatch per list: the remembered embedded entry for
+  embedded-table lists, the MinHook trampoline otherwise. 4.04 lists have a shared vtable and
+  keep the old path.
+- Verified on 5.01, flat (no OpenXR), AMD GPU: stable, no visible issues, no errors in the log.
+  - The dummy list used to place the detours has a shared vtable. The game's lists have
+    embedded tables at object + 0x5C8.
+  - Patched slots: DrawInstanced, DrawIndexedInstanced, Dispatch, SetPipelineState,
+    SetDescriptorHeaps, SetCompute/GraphicsRootSignature, SetCompute/GraphicsRootDescriptorTable,
+    SetGraphicsRootConstantBufferView. Embedded entries point into the driver (`amdxc64.dll`),
+    except SetDescriptorHeaps, which points to a separate `D3D12Core.dll` function.
+  - The embedded `Reset` entry is the detoured runtime function, so the Reset hook fires without
+    patching.
+  - No list had an entry differing from the first remembered one.
+  - Draws are now counted (about 1,900 indexed draws per frame in free roaming, 0 before).
+- Open: 4.04 regression run with this build, then compare the 28 shader fingerprints on 5.01.
+  The first recording of a newly created list (before its first Reset/submission) is not yet
+  intercepted. Hook `CreateCommandList`/`CreateCommandList1` if that turns out to matter.
