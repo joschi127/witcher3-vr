@@ -59,6 +59,11 @@ game folder. Add Defender exclusions for the build directory and the installed `
   about whether hooks, offsets or shader hashes match a game build. That needs the smoke test
   (planned: `scripts/smoke-test.ps1`: build, start game with diagnostic logging, ~60 s,
   quit, evaluate `witcher3vr.log`, exit code) and finally a headset run by the user.
+- In-game test mode (`[test]` in `witcher3vr.ini`, logic in `src/test_input_script.h`):
+  `record_input=1` records the physical gamepad to `witcher3vr-input-recording.txt`,
+  `input_script=<file>` replays a script (same format) through the XInput hook, also without
+  a controller, and its `quit` action closes the game window. Times are ms since the first
+  Present. Diagnostic census and inventory files from `[debug]` complement it.
 
 ## Launcher behaviour worth knowing
 

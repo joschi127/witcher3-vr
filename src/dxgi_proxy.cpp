@@ -31,6 +31,7 @@
 #include "foliage_native_snapshot_policy.h"
 #include "game_build.h"
 #include "shader_fingerprints.h"
+#include "test_input_script.h"
 #include "focus_fire_projection_policy.h"
 #include "hmd_camera_orientation.h"
 #include "mode3_transport_policy.h"
@@ -704,6 +705,11 @@ struct Config {
     // [DIAG:SHADER-FINGERPRINT-CENSUS] Also write every distinct shader's
     // bytecode to witcher3vr_shaders\ for offline matching between builds.
     bool shader_inventory_dump{false};
+    // [FEATURE:TEST-MODE] [test] record_input writes the physical gamepad to
+    // witcher3vr-input-recording.txt; input_script replays a script file next
+    // to the exe on top of it (see test_input_script.h).
+    bool test_record_input{false};
+    std::string test_input_script;
     // Lightweight ten-second CPU/GPU phase recorder. Independent from broad
     // Diagnostic Logging; the shared F3 action is the only file writer.
     bool pipeline_flight_recorder{false};
@@ -14673,6 +14679,8 @@ void load_config() {
         g_config.runtime_diagnostics = read_ini_bool("debug", "runtime_diagnostics", false);
         g_config.shader_inventory_dump =
             read_ini_bool("debug", "shader_inventory_dump", false);
+        g_config.test_record_input = read_ini_bool("test", "record_input", false);
+        g_config.test_input_script = read_ini_string("test", "input_script", "");
         g_config.pipeline_flight_recorder = read_ini_bool(
             "debug", "pipeline_flight_recorder", false);
         g_config.route_flight_recorder = read_ini_bool(
@@ -43963,6 +43971,191 @@ void remap_first_person_snap_locomotion_heading(XINPUT_STATE* state) {
     }
 }
 
+// [FEATURE:TEST-MODE] Unattended test runs. The clock starts at the first
+// Present. A script (test_input_script.h) drives a synthetic gamepad that is
+// merged into XInputGetState for user 0, also when no controller is connected;
+// "quit" closes the game window normally. record_input writes the physical
+// controller in the same format so a manual run can be replayed.
+struct TestModeState {
+    std::mutex mutex;
+    bool initialized{};
+    std::unique_ptr<w3vr::test_input::Player> player;
+    w3vr::test_input::PadState pad{};
+    w3vr::test_input::Recorder recorder;
+    FILE* recording{};
+    bool quit_requested{};
+};
+
+TestModeState g_test_mode;
+std::atomic<uint64_t> g_test_mode_start_tick{};
+std::atomic<uint32_t> g_test_mode_packet{};
+
+bool test_mode_active() {
+    return g_config.test_record_input || !g_config.test_input_script.empty();
+}
+
+uint32_t test_mode_now_ms() {
+    const uint64_t start = g_test_mode_start_tick.load(std::memory_order_acquire);
+    return start == 0 ? 0 : static_cast<uint32_t>(GetTickCount64() - start);
+}
+
+std::string test_mode_exe_relative_path(const std::string& file) {
+    char path[MAX_PATH]{};
+    GetModuleFileNameA(nullptr, path, sizeof(path));
+    if (auto* slash = strrchr(path, '\\')) {
+        slash[1] = '\0';
+    }
+    return std::string(path) + file;
+}
+
+// Caller holds g_test_mode.mutex.
+void initialize_test_mode_locked() {
+    g_test_mode.initialized = true;
+    if (!g_config.test_input_script.empty()) {
+        const auto path = test_mode_exe_relative_path(g_config.test_input_script);
+        std::string text;
+        FILE* file{};
+        if (fopen_s(&file, path.c_str(), "rb") == 0 && file != nullptr) {
+            char buffer[4096];
+            size_t read{};
+            while ((read = std::fread(buffer, 1, sizeof(buffer), file)) != 0) {
+                text.append(buffer, read);
+            }
+            std::fclose(file);
+            std::vector<w3vr::test_input::Event> events;
+            std::string error;
+            if (w3vr::test_input::parse_script(text, events, error)) {
+                log_line("Test mode script loaded path=%s events=%zu",
+                    path.c_str(), events.size());
+                g_test_mode.player =
+                    std::make_unique<w3vr::test_input::Player>(std::move(events));
+            } else {
+                log_line("Test mode script rejected path=%s %s", path.c_str(),
+                    error.c_str());
+            }
+        } else {
+            log_line("Test mode script not found path=%s", path.c_str());
+        }
+    }
+    if (g_config.test_record_input) {
+        const auto path = test_mode_exe_relative_path("witcher3vr-input-recording.txt");
+        if (fopen_s(&g_test_mode.recording, path.c_str(), "w") == 0 &&
+            g_test_mode.recording != nullptr) {
+            std::fprintf(g_test_mode.recording,
+                "# witcher3vr input recording, ms since first Present\n");
+            std::fflush(g_test_mode.recording);
+            log_line("Test mode recording input to %s", path.c_str());
+        } else {
+            log_line("Test mode could not open %s", path.c_str());
+        }
+    }
+}
+
+// Caller holds g_test_mode.mutex.
+void test_mode_request_quit_locked(uint32_t now_ms, uint64_t frame) {
+    if (g_test_mode.quit_requested) {
+        return;
+    }
+    g_test_mode.quit_requested = true;
+    log_line("Test mode quit at_ms=%u presents=%llu draws_indexed=%llu "
+             "draws_nonindexed=%llu window=%p",
+        now_ms, static_cast<unsigned long long>(frame),
+        static_cast<unsigned long long>(
+            g_fingerprint_indexed_draw_count.load(std::memory_order_relaxed)),
+        static_cast<unsigned long long>(
+            g_fingerprint_nonindexed_draw_count.load(std::memory_order_relaxed)),
+        g_game_hwnd);
+    if (g_test_mode.recording != nullptr) {
+        std::fprintf(g_test_mode.recording, "%u quit\n", now_ms);
+        std::fflush(g_test_mode.recording);
+    }
+    if (g_game_hwnd != nullptr) {
+        PostMessageW(g_game_hwnd, WM_CLOSE, 0, 0);
+    }
+}
+
+void test_mode_on_present(uint64_t frame) {
+    if (!test_mode_active()) {
+        return;
+    }
+    uint64_t expected = 0;
+    g_test_mode_start_tick.compare_exchange_strong(
+        expected, GetTickCount64(), std::memory_order_acq_rel);
+    const uint32_t now_ms = test_mode_now_ms();
+    std::scoped_lock lock{g_test_mode.mutex};
+    if (!g_test_mode.initialized) {
+        initialize_test_mode_locked();
+    }
+    if (g_test_mode.player == nullptr) {
+        return;
+    }
+    const auto due = g_test_mode.player->advance(now_ms);
+    g_test_mode.pad = g_test_mode.player->state();
+    if (due.captures != 0) {
+        log_line("Test mode capture requested at_ms=%u present=%llu", now_ms,
+            static_cast<unsigned long long>(frame));
+    }
+    if (due.quit) {
+        test_mode_request_quit_locked(now_ms, frame);
+    }
+}
+
+SHORT test_mode_stick_axis(float value) {
+    return static_cast<SHORT>(std::clamp(value * 32767.0f, -32768.0f, 32767.0f));
+}
+
+DWORD test_mode_apply_xinput(DWORD user_index, XINPUT_STATE* state, DWORD result) {
+    if (state == nullptr || user_index != 0 || !test_mode_active()) {
+        return result;
+    }
+    const uint32_t now_ms = test_mode_now_ms();
+    std::scoped_lock lock{g_test_mode.mutex};
+    if (g_test_mode.recording != nullptr && result == ERROR_SUCCESS) {
+        const auto& gamepad = state->Gamepad;
+        w3vr::test_input::PadState physical{};
+        physical.buttons = gamepad.wButtons;
+        physical.lx = gamepad.sThumbLX / 32767.0f;
+        physical.ly = gamepad.sThumbLY / 32767.0f;
+        physical.rx = gamepad.sThumbRX / 32767.0f;
+        physical.ry = gamepad.sThumbRY / 32767.0f;
+        physical.lt = gamepad.bLeftTrigger / 255.0f;
+        physical.rt = gamepad.bRightTrigger / 255.0f;
+        const auto lines = g_test_mode.recorder.feed(now_ms, physical);
+        for (const auto& line : lines) {
+            std::fprintf(g_test_mode.recording, "%s\n", line.c_str());
+        }
+        if (!lines.empty()) {
+            std::fflush(g_test_mode.recording);
+        }
+    }
+    if (g_test_mode.player == nullptr) {
+        return result;
+    }
+    if (result != ERROR_SUCCESS) {
+        // No physical controller: present a virtual one for the script.
+        *state = XINPUT_STATE{};
+        result = ERROR_SUCCESS;
+    }
+    const auto& pad = g_test_mode.pad;
+    auto& gamepad = state->Gamepad;
+    gamepad.wButtons |= pad.buttons;
+    if (pad.lx != 0.0f || pad.ly != 0.0f) {
+        gamepad.sThumbLX = test_mode_stick_axis(pad.lx);
+        gamepad.sThumbLY = test_mode_stick_axis(pad.ly);
+    }
+    if (pad.rx != 0.0f || pad.ry != 0.0f) {
+        gamepad.sThumbRX = test_mode_stick_axis(pad.rx);
+        gamepad.sThumbRY = test_mode_stick_axis(pad.ry);
+    }
+    gamepad.bLeftTrigger = std::max(gamepad.bLeftTrigger,
+        static_cast<BYTE>(std::clamp(pad.lt * 255.0f, 0.0f, 255.0f)));
+    gamepad.bRightTrigger = std::max(gamepad.bRightTrigger,
+        static_cast<BYTE>(std::clamp(pad.rt * 255.0f, 0.0f, 255.0f)));
+    // Games skip polling results whose packet number did not change.
+    state->dwPacketNumber += g_test_mode_packet.fetch_add(1) + 1;
+    return result;
+}
+
 // [FEATURE:FIRST-PERSON-SNAP-TURN 5/5] Read the physical right-stick X, turn
 // its threshold crossing into one synthetic native stick transaction, then
 // release it when the measured REDengine yaw reaches the configured angle.
@@ -43973,7 +44166,8 @@ DWORD WINAPI hook_xinput_get_state(
         return ERROR_DEVICE_NOT_CONNECTED;
     }
 
-    const DWORD result = g_xinput_get_state(user_index, state);
+    DWORD result = g_xinput_get_state(user_index, state);
+    result = test_mode_apply_xinput(user_index, state, result);
     if (result != ERROR_SUCCESS || state == nullptr) {
         DWORD selected = user_index;
         g_first_person_snap_controller.compare_exchange_strong(
@@ -53178,6 +53372,7 @@ HRESULT STDMETHODCALLTYPE hook_present(IDXGISwapChain* swapchain, UINT sync_inte
 
     const auto frame = ++g_present_count;
     record_route_flight_present(frame);
+    test_mode_on_present(frame);
     w3vr::pipeline_flight::begin_frame(
         frame, g_config.openxr_mode,
         static_cast<int>(g_config.temporal_backend),
@@ -53898,6 +54093,7 @@ HRESULT STDMETHODCALLTYPE hook_present1(
     handle_puredark_afw_visual_debug_hotkey();
     const auto frame = ++g_present_count;
     record_route_flight_present(frame);
+    test_mode_on_present(frame);
     w3vr::pipeline_flight::begin_frame(
         frame, g_config.openxr_mode,
         static_cast<int>(g_config.temporal_backend),

@@ -272,6 +272,15 @@ if(BUILD_TESTING)
         COMMAND w3vr_shader_fingerprints_tests
     )
 
+    add_executable(w3vr_test_input_script_tests
+        tests/test_input_script_tests.cpp
+    )
+    target_include_directories(w3vr_test_input_script_tests PRIVATE src)
+    add_test(
+        NAME test_input_script
+        COMMAND w3vr_test_input_script_tests
+    )
+
     add_executable(w3vr_camera_follow_policy_tests
         tests/camera_follow_policy_tests.cpp
     )
