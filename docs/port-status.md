@@ -91,3 +91,27 @@ See `porting-analysis.md` §6. In short:
   frame pacing match the earlier reference run. No visible difference.
 - Open: compare the 28 shader fingerprints on 5.01. The first recording of a newly created list (before its first Reset/submission) is not yet
   intercepted. Hook `CreateCommandList`/`CreateCommandList1` if that turns out to matter.
+
+### Shader fingerprint census (4.04 vs 5.01)
+- New diagnostic: `[DIAG:SHADER-FINGERPRINT-CENSUS]` with a table of the 29 fingerprints in
+  `src/shader_fingerprint_census.h`, a per-run shader inventory file and an optional bytecode dump
+  (`[debug] shader_inventory_dump=1`). Same route on both builds (main menu, load, outdoor view
+  with trees, Witcher Senses, map).
+- 4.04: 21/29 known fingerprints seen. Missing: the six RT shaders (RT off) and the TAAU motion
+  writer pair (not created on this route).
+- 5.01: **0/29.** No shader hash of 4.04 occurs in 5.01; every shader was recompiled (newer DXIL
+  with native 16-bit types). Shader and pipeline counts are of the same order, and no bound
+  pipeline escaped the creation hooks on either build, so no extra creation path needs hooking.
+- Offline matching of the bytecode dumps (signatures, resource bindings, thread groups, DXIL op
+  histograms) finds plausible 5.01 counterparts for most of the 21 fingerprints. Several are
+  still ambiguous and need a closer check before new hashes go into the code.
+- Shared constant buffers grew in 5.01:
+  - `CameraShaderConsts` (b6, mirrored by the mod's replacement HLSL): append-only, all 4.04
+    offsets unchanged, two matrices and one vector added at the end.
+  - `SharedPixelConsts`: unchanged up to 0x7F0. One array there grew by 0x100, so everything
+    after it moved by 0x100, and new members were appended. The tiled-culling path checks the
+    4.04 size (4608 bytes, 4368 aligned to 256) and therefore falls back safely on 5.01.
+  - `CSConstants` (tiled light/dimmer compute): members inserted near the start and in the
+    middle, so most offsets moved.
+- Next: resolve the ambiguous matches, then list for each feature which constant-buffer offsets
+  it reads and whether they moved.
