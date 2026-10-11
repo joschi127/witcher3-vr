@@ -139,6 +139,30 @@ the user-config-matrix XML and the HUD editor script path. There is no version d
 - With `[openxr] enabled=0`, the proxy still forces the swapchain to `render_width/height`
   when those INI values are non-zero. Set them to 0 for flat tests.
 
+## Renderer fingerprints on the Remaster (2026-10-11)
+
+Method: shader census plus bytecode dumps on the same route in both builds, matched offline with
+`dxc -dumpbin` (signatures, resource bindings, thread groups, DXIL op histograms) and through whole
+pipeline combinations (stage hashes, render-target count/format, DSV format, topology).
+
+All shaders were recompiled (newer DXIL, native 16-bit types), so every fingerprint needs a 5.01
+hash. Per feature (the mod's assumptions beyond the hash, and their status on 5.01):
+
+| Feature | 5.01 counterpart | Mod assumptions | 5.01 status |
+|---|---|---|---|
+| Terrain motion replay (VS/HS×2/DS) | found, high confidence (two HS like 4.04) | b1 camera rows 0-7, DS output signature, 4 RTs incl. RGBA16F velocity | DS output signature identical, CameraShaderConsts append-only: hashes only |
+| Smoke world-up GS (VS/PS) | found, high confidence | camera CBV in graphics root table 3, offset 1, size >= 0x24C, camera position +0x240, VS output TEXCOORD0-7 | VS output signature identical, used rows unchanged: hashes only |
+| Foliage snapshot (2 VS/PS pairs) | found, high confidence | root table 3: VS b0 size 772-1024, b12 size 160-256, copied verbatim | sizes 776/484 still inside the windows: hashes only |
+| HUD composite (VS/PS) | PS found (bindings identical), VS likely | replacement PS: t0, t1, s1, b3 offsets 0x10/0x20, SV_Target0 | **pipeline now has 2 render targets** (4.04: 1); replacement PSO needs review |
+| Aim probe (VS/PS) | found, high confidence | non-indexed draw, 6 vertices, 1 instance | hashes only |
+| Tiled light / dimmer culling (2 CS) | likely | SharedPixelConsts in CBV slot 12, exact size 4608, patches 0xCF0/0xD00/0xD20 | **offsets moved by +0x100, size 5632 expected**; currently falls back safely on the size check |
+| TAAU resolve / motion writer | n/a | | TAAU removed in 5.01 |
+| RT/NRD history (6 CS) | not checked (RT off) | exact cb0 sizes, fixed patch offsets | open |
+| Nudge/orbit probes (2 pairs) | B likely, A ambiguous (PS) | roots 10/13, offsets < 0x7F0 | reverse-engineering diagnostics only |
+
+All features fail safe when an assumption does not hold (log and native draw). Most features only
+need their 5.01 hashes; HUD composite and tiled culling need code changes as well.
+
 ## Approach and effort (rough, high uncertainty)
 
 1. **Build guard.** Identify the exe build at startup and disable game hooks on unknown builds.
