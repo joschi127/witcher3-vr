@@ -131,5 +131,9 @@ See `remaster-porting-analysis.md` §6. In short:
 - **5.01 reads the gamepad through GameInput** (the game loads `GameInputRedist.dll`; the exe also
   references ScePad). It never calls `XInputGetState` (0 calls in a full run), so the XInput hook
   sees nothing: test scripts cannot drive 5.01 yet, and the first-person snap-turn/head-follow
-  input remap (XInput) has no effect there. Options: hook GameInput readings, or drive tests
-  with synthetic keyboard input.
+  input remap (XInput) has no effect there.
+- Test mode now also hooks GameInput on 5.01 (`GameInputInitialize` → IGameInput v3
+  `GetCurrentReading`/`GetNextReading` → `IGameInputReading::GetGamepadState`). Verified: with a
+  connected gamepad every reading goes through the hook and the game switches to gamepad prompts.
+  Without a connected gamepad GameInput returns no readings, so 5.01 runs need a controller.
+  Open: the 4.04 smoke timings do not fit the longer 5.01 startup; a 5.01 recording is next.
