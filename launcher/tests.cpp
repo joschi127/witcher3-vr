@@ -1624,8 +1624,14 @@ void TestFirstRunConfiguration(const fs::path& root) {
 
 void TestVrBaselineAndRestore(const w3vr::ConfigPaths& paths) {
     WriteBaseFixtures(paths);
+    Write(paths.game_settings, Read(paths.game_settings) +
+        "[Input]\r\n"
+        "InvertCameraY=true\r\n");
     const std::string original = Read(paths.game_settings);
     const std::string profile =
+        "[Input]\r\n"
+        "InvertCameraX=false\r\n"
+        "InvertCameraY=false\r\n"
         "[Localization]\r\n"
         "SpeechLanguage=EN\r\n"
         "TextLanguage=IT\r\n"
@@ -1651,6 +1657,9 @@ void TestVrBaselineAndRestore(const w3vr::ConfigPaths& paths) {
     Require(configured->Get("Localization", "SpeechLanguage") == "DE" &&
         configured->Get("Localization", "TextLanguage") == "DE",
         "target language settings were not preserved");
+    Require(configured->Get("Input", "InvertCameraY") == "true" &&
+        configured->Get("Input", "InvertCameraX") == "false",
+        "user camera inversion was not preserved");
 
     Require(w3vr::ConfigureGameSettingsForVr(paths, profile, error),
         "repeated VR baseline install failed");

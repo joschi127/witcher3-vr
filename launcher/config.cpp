@@ -2077,6 +2077,14 @@ bool ConfigureGameSettingsForVr(const ConfigPaths& paths,
     for (const auto& [key, value] : current->Entries("Localization")) {
         configured.Set("Localization", key, value);
     }
+    // Camera inversion is a personal control preference, not a VR graphics
+    // choice. Keep whatever the user has set instead of the profile default.
+    for (const char* key : {"InvertCameraX", "InvertCameraY",
+             "InvertCameraXOnMouse", "InvertCameraYOnMouse"}) {
+        if (const auto value = current->Get("Input", key)) {
+            configured.Set("Input", key, *value);
+        }
+    }
 
     const auto backup = OriginalSettingsBackupPath(paths);
     if (!HasOriginalSettingsBackup(paths) &&

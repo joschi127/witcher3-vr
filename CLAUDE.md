@@ -60,8 +60,8 @@ Dev install procedure:
 
 "Configure Settings for VR" (`ConfigureGameSettingsForVr`, `launcher/config.cpp`) replaces
 `Documents\The Witcher 3\dx12user.settings` with the bundled `launcher/vr_dx12user.settings`.
-Only the `[Galaxy]` and `[Localization]` sections are preserved, so user preferences such as
-`InvertCameraY` are reset. A one-time original backup is created and is restored by
+Only the `[Galaxy]` and `[Localization]` sections and the camera inversion keys in `[Input]`
+(`InvertCameraX/Y`, `...OnMouse`) are preserved. Other user preferences are reset. A one-time original backup is created and is restored by
 "Restore Original Settings".
 
 ## Architecture (short)
