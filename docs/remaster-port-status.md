@@ -139,4 +139,10 @@ See `remaster-porting-analysis.md` §6. In short:
 - 5.01 smoke script (`scripts/test-input/smoke-continue-remaster.txt`, derived from a manual
   5.01 recording) runs unattended with a switched-on gamepad: intros, Continue, walk, camera
   turn, Witcher Senses, game menu, then EXIT through the system menu (the game closes itself,
-  the `quit` fallback is not needed). Open: runs without a switched-on gamepad.
+  the `quit` fallback is not needed).
+- Virtual gamepad for 5.01 test runs: the game registers one GameInput device callback for
+  gamepads and then queries `GetCurrentReading(Gamepad, device)` for each reported device. With
+  a script loaded and no real gamepad reported 3 s after the first Present, the test mode reports
+  a virtual device through that callback and answers its queries with a reading that carries the
+  script pad. The game only calls `GetDeviceInfo` on it. Verified: the full smoke script runs
+  with the gamepad switched off and disconnected.

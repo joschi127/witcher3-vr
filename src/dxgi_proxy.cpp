@@ -44108,20 +44108,16 @@ void test_mode_request_quit_locked(uint32_t now_ms, uint64_t frame) {
     }
 }
 
-void test_mode_on_present(uint64_t frame) {
-    if (!test_mode_active()) {
-        return;
-    }
-    uint64_t expected = 0;
-    g_test_mode_start_tick.compare_exchange_strong(
-        expected, GetTickCount64(), std::memory_order_acq_rel);
-    const uint32_t now_ms = test_mode_now_ms();
+void gameinput_virtual_pad_tick(uint32_t now_ms);
+
+// Returns whether a script is playing.
+bool test_mode_advance(uint64_t frame, uint32_t now_ms) {
     std::scoped_lock lock{g_test_mode.mutex};
     if (!g_test_mode.initialized) {
         initialize_test_mode_locked();
     }
     if (g_test_mode.player == nullptr) {
-        return;
+        return false;
     }
     const auto due = g_test_mode.player->advance(now_ms);
     g_test_mode.pad = g_test_mode.player->state();
@@ -44134,6 +44130,22 @@ void test_mode_on_present(uint64_t frame) {
     }
     if (due.quit) {
         test_mode_request_quit_locked(now_ms, frame);
+    }
+    return true;
+}
+
+void test_mode_on_present(uint64_t frame) {
+    if (!test_mode_active()) {
+        return;
+    }
+    uint64_t expected = 0;
+    g_test_mode_start_tick.compare_exchange_strong(
+        expected, GetTickCount64(), std::memory_order_acq_rel);
+    const uint32_t now_ms = test_mode_now_ms();
+    // Outside the test-mode lock: the virtual pad calls back into the game,
+    // which may read the pad (and take the lock) right away.
+    if (test_mode_advance(frame, now_ms)) {
+        gameinput_virtual_pad_tick(now_ms);
     }
 }
 
@@ -44685,6 +44697,511 @@ GameInputReadingGetGamepadStateFn g_gameinput_get_gamepad_state{};
 std::atomic<void*> g_gameinput_gamepad_state_target{};
 std::mutex g_gameinput_hook_mutex;
 
+// [DIAG:TEST-MODE-GAMEINPUT-DEVICES] How 5.01 finds its gamepad, as input for a
+// virtual gamepad in runs without a connected controller: device arguments and
+// results of the reading queries, device/reading callbacks, and which reading
+// methods the game calls. Slots follow the GameInput v3 declaration order.
+constexpr HRESULT kGameInputReadingNotFound = static_cast<HRESULT>(0x838A0003L);
+constexpr size_t kGameInputGetPreviousReadingSlot = 6;
+constexpr size_t kGameInputRegisterReadingCallbackSlot = 7;
+constexpr size_t kGameInputRegisterDeviceCallbackSlot = 8;
+constexpr size_t kGameInputRegisterSystemButtonCallbackSlot = 9;
+constexpr size_t kGameInputCreateDispatcherSlot = 13;
+constexpr size_t kGameInputFindDeviceFromIdSlot = 14;
+constexpr size_t kGameInputReadingGetInputKindSlot = 3;
+constexpr size_t kGameInputReadingGetDeviceSlot = 5;
+constexpr size_t kGameInputDeviceGetDeviceStatusSlot = 5;
+
+using GameInputDeviceCallbackFn = void(CALLBACK*)(
+    uint64_t, void*, void*, uint64_t, uint32_t, uint32_t);
+using GameInputRegisterDeviceCallbackFn = HRESULT(STDMETHODCALLTYPE*)(
+    void*, void*, uint32_t, uint32_t, uint32_t, void*, GameInputDeviceCallbackFn, uint64_t*);
+using GameInputRegisterReadingCallbackFn = HRESULT(STDMETHODCALLTYPE*)(
+    void*, void*, uint32_t, void*, void*, uint64_t*);
+using GameInputRegisterSystemButtonCallbackFn = HRESULT(STDMETHODCALLTYPE*)(
+    void*, void*, uint32_t, void*, void*, uint64_t*);
+using GameInputCreateDispatcherFn = HRESULT(STDMETHODCALLTYPE*)(void*, void**);
+using GameInputFindDeviceFromIdFn = HRESULT(STDMETHODCALLTYPE*)(void*, const void*, void**);
+using GameInputReadingGetInputKindFn = uint32_t(STDMETHODCALLTYPE*)(void*);
+using GameInputReadingGetDeviceFn = void(STDMETHODCALLTYPE*)(void*, void**);
+using GameInputDeviceGetDeviceStatusFn = uint32_t(STDMETHODCALLTYPE*)(void*);
+
+GameInputGetNextReadingFn g_gameinput_get_previous_reading{};
+GameInputRegisterDeviceCallbackFn g_gameinput_register_device_callback{};
+GameInputRegisterReadingCallbackFn g_gameinput_register_reading_callback{};
+GameInputRegisterSystemButtonCallbackFn g_gameinput_register_system_button_callback{};
+GameInputCreateDispatcherFn g_gameinput_create_dispatcher{};
+GameInputFindDeviceFromIdFn g_gameinput_find_device_from_id{};
+GameInputReadingGetInputKindFn g_gameinput_reading_get_input_kind{};
+GameInputReadingGetDeviceFn g_gameinput_reading_get_device{};
+
+struct GameInputDiag {
+    std::atomic<uint64_t> null_device{};
+    std::atomic<uint64_t> with_device{};
+    std::atomic<uint64_t> not_found{};
+    std::atomic<uint64_t> other_failure{};
+    std::atomic<uint64_t> next_calls{};
+    std::atomic<uint64_t> previous_calls{};
+    std::atomic<uint64_t> input_kind_calls{};
+    std::atomic<uint64_t> get_device_calls{};
+    std::atomic<uint64_t> device_callbacks{};
+    std::atomic<uint32_t> logged_queries{};
+    std::atomic<uint32_t> logged_transitions{};
+    std::atomic<uint32_t> logged_devices{};
+    std::atomic<int> last_found{-1};
+    std::atomic<void*> last_reading_device{};
+    std::atomic<uint32_t> last_summary_ms{};
+};
+GameInputDiag g_gameinput_diag;
+
+// [FEATURE:TEST-MODE-GAMEINPUT-VIRTUAL-PAD] Without a connected controller
+// GameInput reports no gamepad and 5.01 never asks for readings, so scripts
+// cannot drive it. 5.01 registers one device callback for gamepads and then
+// queries GetCurrentReading(Gamepad, device) for each reported device. When a
+// script is loaded and no real gamepad has been reported shortly after the
+// first Present, report a virtual device through that callback and answer its
+// queries with a virtual reading that carries the script pad. Both objects are
+// static and never freed, so AddRef/Release are no-ops.
+constexpr uint32_t kGameInputKindGamepad = 0x00040000;
+constexpr uint32_t kGameInputDeviceConnected = 0x00000001;
+constexpr uint32_t kGameInputVirtualPadDelayMs = 3000;
+constexpr size_t kGameInputDeviceMethodCount = 15;
+constexpr size_t kGameInputReadingMethodCount = 18;
+
+struct GameInputVirtualPad {
+    void* gameinput{};
+    GameInputDeviceCallbackFn callback{};
+    void* context{};
+    uint64_t token{};
+    std::atomic<bool> real_device{};
+    std::atomic<bool> announced{};
+    std::atomic<uint64_t> readings{};
+    std::atomic<uint32_t> logged_calls[kGameInputDeviceMethodCount + 3]{};
+};
+GameInputVirtualPad g_gameinput_virtual_pad;
+
+// GameInputDeviceInfo (v3) is 256 bytes on x64; the tail leaves room for
+// readers that expect a larger struct. Family at 92, supportedInput at 96.
+alignas(8) uint8_t g_gameinput_virtual_device_info[512]{};
+alignas(8) uint8_t g_gameinput_virtual_gamepad_info[512]{};
+constexpr char kGameInputVirtualPadName[] = "witcher3vr test pad";
+
+struct GameInputVirtualObject {
+    void** vtable;
+};
+void* g_gameinput_virtual_device_vtable[3 + kGameInputDeviceMethodCount]{};
+void* g_gameinput_virtual_reading_vtable[3 + kGameInputReadingMethodCount]{};
+GameInputVirtualObject g_gameinput_virtual_device{g_gameinput_virtual_device_vtable};
+GameInputVirtualObject g_gameinput_virtual_reading{g_gameinput_virtual_reading_vtable};
+
+void gameinput_virtual_log_call(size_t slot, const char* name) {
+    if (slot < std::size(g_gameinput_virtual_pad.logged_calls) &&
+        g_gameinput_virtual_pad.logged_calls[slot].fetch_add(1) == 0) {
+        log_line("GameInput virtual device %s called", name);
+    }
+}
+
+HRESULT STDMETHODCALLTYPE gameinput_virtual_query_interface(void* self, REFIID, void** out) {
+    if (out != nullptr) {
+        *out = self;
+    }
+    return S_OK;
+}
+ULONG STDMETHODCALLTYPE gameinput_virtual_add_ref(void*) { return 1; }
+ULONG STDMETHODCALLTYPE gameinput_virtual_release(void*) { return 1; }
+
+HRESULT STDMETHODCALLTYPE gameinput_virtual_get_device_info(void*, const void** info) {
+    gameinput_virtual_log_call(3, "GetDeviceInfo");
+    if (info != nullptr) {
+        *info = g_gameinput_virtual_device_info;
+    }
+    return S_OK;
+}
+HRESULT STDMETHODCALLTYPE gameinput_virtual_not_implemented_1(void*, void*) {
+    gameinput_virtual_log_call(4, "GetHapticInfo");
+    return E_NOTIMPL;
+}
+uint32_t STDMETHODCALLTYPE gameinput_virtual_get_device_status(void*) {
+    gameinput_virtual_log_call(5, "GetDeviceStatus");
+    return kGameInputDeviceConnected;
+}
+HRESULT STDMETHODCALLTYPE gameinput_virtual_create_force_feedback_effect(
+    void*, uint32_t, const void*, void** effect) {
+    gameinput_virtual_log_call(6, "CreateForceFeedbackEffect");
+    if (effect != nullptr) {
+        *effect = nullptr;
+    }
+    return E_NOTIMPL;
+}
+bool STDMETHODCALLTYPE gameinput_virtual_is_motor_powered_on(void*, uint32_t) {
+    gameinput_virtual_log_call(7, "IsForceFeedbackMotorPoweredOn");
+    return false;
+}
+void STDMETHODCALLTYPE gameinput_virtual_set_motor_gain(void*, uint32_t, float) {
+    gameinput_virtual_log_call(8, "SetForceFeedbackMotorGain");
+}
+void STDMETHODCALLTYPE gameinput_virtual_set_rumble_state(void*, const void*) {
+    gameinput_virtual_log_call(9, "SetRumbleState");
+}
+HRESULT STDMETHODCALLTYPE gameinput_virtual_direct_input_escape(
+    void*, uint32_t, const void*, uint32_t, void*, uint32_t, uint32_t* written) {
+    gameinput_virtual_log_call(10, "DirectInputEscape");
+    if (written != nullptr) {
+        *written = 0;
+    }
+    return E_NOTIMPL;
+}
+HRESULT STDMETHODCALLTYPE gameinput_virtual_create_input_mapper(void*, void** mapper) {
+    gameinput_virtual_log_call(11, "CreateInputMapper");
+    if (mapper != nullptr) {
+        *mapper = nullptr;
+    }
+    return E_NOTIMPL;
+}
+HRESULT STDMETHODCALLTYPE gameinput_virtual_get_extra_axis_count(
+    void*, uint32_t, uint32_t* count) {
+    gameinput_virtual_log_call(12, "GetExtraAxisCount");
+    if (count != nullptr) {
+        *count = 0;
+    }
+    return S_OK;
+}
+HRESULT STDMETHODCALLTYPE gameinput_virtual_get_extra_button_count(
+    void*, uint32_t, uint32_t* count) {
+    gameinput_virtual_log_call(13, "GetExtraButtonCount");
+    if (count != nullptr) {
+        *count = 0;
+    }
+    return S_OK;
+}
+HRESULT STDMETHODCALLTYPE gameinput_virtual_get_extra_axis_indexes(
+    void*, uint32_t, uint32_t, uint8_t*) {
+    gameinput_virtual_log_call(14, "GetExtraAxisIndexes");
+    return S_OK;
+}
+HRESULT STDMETHODCALLTYPE gameinput_virtual_get_extra_button_indexes(
+    void*, uint32_t, uint32_t, uint8_t*) {
+    gameinput_virtual_log_call(15, "GetExtraButtonIndexes");
+    return S_OK;
+}
+HRESULT STDMETHODCALLTYPE gameinput_virtual_create_raw_device_report(
+    void*, uint32_t, uint32_t, void** report) {
+    gameinput_virtual_log_call(16, "CreateRawDeviceReport");
+    if (report != nullptr) {
+        *report = nullptr;
+    }
+    return E_NOTIMPL;
+}
+HRESULT STDMETHODCALLTYPE gameinput_virtual_send_raw_device_output(void*, void*) {
+    gameinput_virtual_log_call(17, "SendRawDeviceOutput");
+    return E_NOTIMPL;
+}
+
+uint32_t STDMETHODCALLTYPE gameinput_virtual_reading_get_input_kind(void*) {
+    return kGameInputKindGamepad;
+}
+uint64_t STDMETHODCALLTYPE gameinput_virtual_reading_get_timestamp(void*) {
+    using GetCurrentTimestampFn = uint64_t(STDMETHODCALLTYPE*)(void*);
+    void* const gameinput = g_gameinput_virtual_pad.gameinput;
+    return reinterpret_cast<GetCurrentTimestampFn>(
+        (*reinterpret_cast<void***>(gameinput))[3])(gameinput);
+}
+void STDMETHODCALLTYPE gameinput_virtual_reading_get_device(void*, void** device) {
+    if (device != nullptr) {
+        *device = &g_gameinput_virtual_device;
+    }
+}
+// Axis, button, switch and key counts/states, and the other device kinds.
+uint32_t STDMETHODCALLTYPE gameinput_virtual_reading_zero_0(void*) { return 0; }
+uint32_t STDMETHODCALLTYPE gameinput_virtual_reading_zero_2(void*, uint32_t, void*) {
+    return 0;
+}
+bool STDMETHODCALLTYPE gameinput_virtual_reading_false(void*, void*) { return false; }
+bool STDMETHODCALLTYPE gameinput_virtual_reading_get_raw_report(void*, void** report) {
+    if (report != nullptr) {
+        *report = nullptr;
+    }
+    return false;
+}
+bool STDMETHODCALLTYPE gameinput_virtual_reading_get_gamepad_state(
+    void*, GameInputGamepadStateV3* state) {
+    if (state == nullptr) {
+        return false;
+    }
+    *state = {};
+    g_gameinput_virtual_pad.readings.fetch_add(1, std::memory_order_relaxed);
+    w3vr::test_input::PadState pad{};
+    if (test_mode_exchange_pad(nullptr, pad)) {
+        state->buttons = w3vr::test_input::to_gameinput_buttons(pad.buttons);
+        state->left_x = pad.lx;
+        state->left_y = pad.ly;
+        state->right_x = pad.rx;
+        state->right_y = pad.ry;
+        state->left_trigger = pad.lt;
+        state->right_trigger = pad.rt;
+    }
+    return true;
+}
+
+void gameinput_virtual_pad_initialize() {
+    static std::once_flag once;
+    std::call_once(once, [] {
+        void** d = g_gameinput_virtual_device_vtable;
+        d[0] = reinterpret_cast<void*>(&gameinput_virtual_query_interface);
+        d[1] = reinterpret_cast<void*>(&gameinput_virtual_add_ref);
+        d[2] = reinterpret_cast<void*>(&gameinput_virtual_release);
+        d[3] = reinterpret_cast<void*>(&gameinput_virtual_get_device_info);
+        d[4] = reinterpret_cast<void*>(&gameinput_virtual_not_implemented_1);
+        d[5] = reinterpret_cast<void*>(&gameinput_virtual_get_device_status);
+        d[6] = reinterpret_cast<void*>(&gameinput_virtual_create_force_feedback_effect);
+        d[7] = reinterpret_cast<void*>(&gameinput_virtual_is_motor_powered_on);
+        d[8] = reinterpret_cast<void*>(&gameinput_virtual_set_motor_gain);
+        d[9] = reinterpret_cast<void*>(&gameinput_virtual_set_rumble_state);
+        d[10] = reinterpret_cast<void*>(&gameinput_virtual_direct_input_escape);
+        d[11] = reinterpret_cast<void*>(&gameinput_virtual_create_input_mapper);
+        d[12] = reinterpret_cast<void*>(&gameinput_virtual_get_extra_axis_count);
+        d[13] = reinterpret_cast<void*>(&gameinput_virtual_get_extra_button_count);
+        d[14] = reinterpret_cast<void*>(&gameinput_virtual_get_extra_axis_indexes);
+        d[15] = reinterpret_cast<void*>(&gameinput_virtual_get_extra_button_indexes);
+        d[16] = reinterpret_cast<void*>(&gameinput_virtual_create_raw_device_report);
+        d[17] = reinterpret_cast<void*>(&gameinput_virtual_send_raw_device_output);
+
+        void** r = g_gameinput_virtual_reading_vtable;
+        r[0] = d[0];
+        r[1] = d[1];
+        r[2] = d[2];
+        r[3] = reinterpret_cast<void*>(&gameinput_virtual_reading_get_input_kind);
+        r[4] = reinterpret_cast<void*>(&gameinput_virtual_reading_get_timestamp);
+        r[5] = reinterpret_cast<void*>(&gameinput_virtual_reading_get_device);
+        r[6] = reinterpret_cast<void*>(&gameinput_virtual_reading_zero_0);   // AxisCount
+        r[7] = reinterpret_cast<void*>(&gameinput_virtual_reading_zero_2);   // AxisState
+        r[8] = reinterpret_cast<void*>(&gameinput_virtual_reading_zero_0);   // ButtonCount
+        r[9] = reinterpret_cast<void*>(&gameinput_virtual_reading_zero_2);   // ButtonState
+        r[10] = reinterpret_cast<void*>(&gameinput_virtual_reading_zero_0);  // SwitchCount
+        r[11] = reinterpret_cast<void*>(&gameinput_virtual_reading_zero_2);  // SwitchState
+        r[12] = reinterpret_cast<void*>(&gameinput_virtual_reading_zero_0);  // KeyCount
+        r[13] = reinterpret_cast<void*>(&gameinput_virtual_reading_zero_2);  // KeyState
+        for (size_t slot = 14; slot <= 17; ++slot) {  // Mouse, Sensors, Arcade, Flight
+            r[slot] = reinterpret_cast<void*>(&gameinput_virtual_reading_false);
+        }
+        r[18] = reinterpret_cast<void*>(&gameinput_virtual_reading_get_gamepad_state);
+        r[19] = reinterpret_cast<void*>(&gameinput_virtual_reading_false);  // RacingWheel
+        r[20] = reinterpret_cast<void*>(&gameinput_virtual_reading_get_raw_report);
+
+        auto* const info = g_gameinput_virtual_device_info;
+        const int32_t family_virtual = -1;
+        std::memcpy(info + 92, &family_virtual, sizeof(family_virtual));
+        std::memcpy(info + 96, &kGameInputKindGamepad, sizeof(kGameInputKindGamepad));
+        const char* const name = kGameInputVirtualPadName;
+        std::memcpy(info + 128, &name, sizeof(name));  // displayName
+        const void* const gamepad_info = g_gameinput_virtual_gamepad_info;
+        std::memcpy(info + 192, &gamepad_info, sizeof(gamepad_info));  // gamepadInfo
+    });
+}
+
+bool gameinput_is_virtual_device(const void* device) {
+    return device == &g_gameinput_virtual_device;
+}
+
+HRESULT gameinput_virtual_current_reading(uint32_t kind, void** reading) {
+    if (reading == nullptr) {
+        return E_POINTER;
+    }
+    if ((kind & kGameInputKindGamepad) == 0) {
+        *reading = nullptr;
+        return kGameInputReadingNotFound;
+    }
+    *reading = &g_gameinput_virtual_reading;
+    return S_OK;
+}
+
+// Called on every Present while a test script is playing, without the
+// test-mode lock held.
+void gameinput_virtual_pad_tick(uint32_t now_ms) {
+    auto& pad = g_gameinput_virtual_pad;
+    if (pad.callback == nullptr || pad.real_device.load(std::memory_order_acquire) ||
+        pad.announced.load(std::memory_order_acquire) ||
+        now_ms < kGameInputVirtualPadDelayMs) {
+        return;
+    }
+    if (pad.announced.exchange(true)) {
+        return;
+    }
+    gameinput_virtual_pad_initialize();
+    log_line("GameInput virtual pad announced at_ms=%u device=%p (no real gamepad reported)",
+        now_ms, static_cast<void*>(&g_gameinput_virtual_device));
+    using GetCurrentTimestampFn = uint64_t(STDMETHODCALLTYPE*)(void*);
+    const uint64_t timestamp = reinterpret_cast<GetCurrentTimestampFn>(
+        (*reinterpret_cast<void***>(pad.gameinput))[3])(pad.gameinput);
+    pad.callback(pad.token, pad.context, &g_gameinput_virtual_device, timestamp,
+        kGameInputDeviceConnected, 0);
+}
+
+void gameinput_diag_summary_if_due() {
+    const uint32_t now = test_mode_now_ms();
+    uint32_t last = g_gameinput_diag.last_summary_ms.load(std::memory_order_relaxed);
+    if (now < last + 10000 ||
+        !g_gameinput_diag.last_summary_ms.compare_exchange_strong(last, now)) {
+        return;
+    }
+    const auto u = [](const std::atomic<uint64_t>& v) {
+        return static_cast<unsigned long long>(v.load(std::memory_order_relaxed));
+    };
+    log_line("GameInput diag at_ms=%u queries_null_device=%llu queries_with_device=%llu "
+             "not_found=%llu other_failure=%llu next=%llu previous=%llu "
+             "reading_kind_calls=%llu reading_device_calls=%llu device_callbacks=%llu "
+             "gamepad_calls=%llu gamepad_valid=%llu last_reading_device=%p",
+        now, u(g_gameinput_diag.null_device), u(g_gameinput_diag.with_device),
+        u(g_gameinput_diag.not_found), u(g_gameinput_diag.other_failure),
+        u(g_gameinput_diag.next_calls), u(g_gameinput_diag.previous_calls),
+        u(g_gameinput_diag.input_kind_calls), u(g_gameinput_diag.get_device_calls),
+        u(g_gameinput_diag.device_callbacks), u(g_test_gameinput_gamepad_calls),
+        u(g_test_gameinput_gamepad_valid),
+        g_gameinput_diag.last_reading_device.load(std::memory_order_relaxed));
+}
+
+void gameinput_diag_query(const char* fn, uint32_t kind, void* device, HRESULT hr,
+    void* reading) {
+    (device == nullptr ? g_gameinput_diag.null_device : g_gameinput_diag.with_device)
+        .fetch_add(1, std::memory_order_relaxed);
+    if (hr == kGameInputReadingNotFound) {
+        g_gameinput_diag.not_found.fetch_add(1, std::memory_order_relaxed);
+    } else if (FAILED(hr)) {
+        g_gameinput_diag.other_failure.fetch_add(1, std::memory_order_relaxed);
+    }
+    const int found = SUCCEEDED(hr) ? 1 : 0;
+    const int previous = g_gameinput_diag.last_found.exchange(found);
+    const bool first = g_gameinput_diag.logged_queries.fetch_add(1) < 12;
+    const bool transition = previous != found &&
+        g_gameinput_diag.logged_transitions.fetch_add(1) < 40;
+    if (first || transition) {
+        log_line("GameInput query%s fn=%s at_ms=%u kind=0x%08X device=%p hr=0x%08X reading=%p",
+            transition && !first ? " changed" : "", fn, test_mode_now_ms(), kind, device,
+            static_cast<unsigned>(hr), reading);
+    }
+    gameinput_diag_summary_if_due();
+}
+
+struct GameInputDeviceCallbackWrap {
+    GameInputDeviceCallbackFn func;
+    void* context;
+};
+
+void CALLBACK gameinput_diag_device_callback(uint64_t token, void* context, void* device,
+    uint64_t timestamp, uint32_t current, uint32_t previous) {
+    auto* const wrap = static_cast<GameInputDeviceCallbackWrap*>(context);
+    g_gameinput_diag.device_callbacks.fetch_add(1, std::memory_order_relaxed);
+    if ((current & kGameInputDeviceConnected) != 0) {
+        g_gameinput_virtual_pad.real_device.store(true, std::memory_order_release);
+    }
+    if (g_gameinput_diag.logged_devices.fetch_add(1) < 40) {
+        log_line("GameInput device callback at_ms=%u token=%llu device=%p status=0x%08X "
+                 "previous=0x%08X",
+            test_mode_now_ms(), static_cast<unsigned long long>(token), device, current,
+            previous);
+    }
+    wrap->func(token, wrap->context, device, timestamp, current, previous);
+}
+
+HRESULT STDMETHODCALLTYPE hook_gameinput_register_device_callback(void* self, void* device,
+    uint32_t kind, uint32_t status_filter, uint32_t enumeration, void* context,
+    GameInputDeviceCallbackFn callback, uint64_t* token) {
+    log_line("GameInput RegisterDeviceCallback device=%p kind=0x%08X status_filter=0x%08X "
+             "enumeration=%u callback=%p",
+        device, kind, status_filter, enumeration, reinterpret_cast<void*>(callback));
+    if (callback == nullptr) {
+        return g_gameinput_register_device_callback(
+            self, device, kind, status_filter, enumeration, context, callback, token);
+    }
+    // Leaked on purpose: lives as long as the registration, which the game
+    // keeps for the whole session.
+    auto* const wrap = new GameInputDeviceCallbackWrap{callback, context};
+    const HRESULT hr = g_gameinput_register_device_callback(self, device, kind,
+        status_filter, enumeration, wrap, &gameinput_diag_device_callback, token);
+    log_line("GameInput RegisterDeviceCallback hr=0x%08X token=%llu",
+        static_cast<unsigned>(hr),
+        static_cast<unsigned long long>(token != nullptr ? *token : 0));
+    if (SUCCEEDED(hr) && device == nullptr && (kind & kGameInputKindGamepad) != 0 &&
+        g_gameinput_virtual_pad.callback == nullptr) {
+        g_gameinput_virtual_pad.gameinput = self;
+        g_gameinput_virtual_pad.context = context;
+        g_gameinput_virtual_pad.token = token != nullptr ? *token : 0;
+        g_gameinput_virtual_pad.callback = callback;
+    }
+    return hr;
+}
+
+HRESULT STDMETHODCALLTYPE hook_gameinput_register_reading_callback(void* self, void* device,
+    uint32_t kind, void* context, void* callback, uint64_t* token) {
+    const HRESULT hr =
+        g_gameinput_register_reading_callback(self, device, kind, context, callback, token);
+    log_line("GameInput RegisterReadingCallback device=%p kind=0x%08X hr=0x%08X", device,
+        kind, static_cast<unsigned>(hr));
+    return hr;
+}
+
+HRESULT STDMETHODCALLTYPE hook_gameinput_register_system_button_callback(void* self,
+    void* device, uint32_t buttons, void* context, void* callback, uint64_t* token) {
+    const HRESULT hr = g_gameinput_register_system_button_callback(
+        self, device, buttons, context, callback, token);
+    log_line("GameInput RegisterSystemButtonCallback device=%p buttons=0x%08X hr=0x%08X",
+        device, buttons, static_cast<unsigned>(hr));
+    return hr;
+}
+
+HRESULT STDMETHODCALLTYPE hook_gameinput_create_dispatcher(void* self, void** dispatcher) {
+    const HRESULT hr = g_gameinput_create_dispatcher(self, dispatcher);
+    log_line("GameInput CreateDispatcher hr=0x%08X", static_cast<unsigned>(hr));
+    return hr;
+}
+
+HRESULT STDMETHODCALLTYPE hook_gameinput_find_device_from_id(void* self, const void* id,
+    void** device) {
+    const HRESULT hr = g_gameinput_find_device_from_id(self, id, device);
+    log_line("GameInput FindDeviceFromId hr=0x%08X device=%p", static_cast<unsigned>(hr),
+        SUCCEEDED(hr) && device != nullptr ? *device : nullptr);
+    return hr;
+}
+
+HRESULT STDMETHODCALLTYPE hook_gameinput_get_previous_reading(
+    void* self, void* reference, uint32_t kind, void* device, void** reading) {
+    g_gameinput_diag.previous_calls.fetch_add(1, std::memory_order_relaxed);
+    if (gameinput_is_virtual_device(device) || reference == &g_gameinput_virtual_reading) {
+        if (reading != nullptr) {
+            *reading = nullptr;
+        }
+        return kGameInputReadingNotFound;
+    }
+    return g_gameinput_get_previous_reading(self, reference, kind, device, reading);
+}
+
+uint32_t STDMETHODCALLTYPE hook_gameinput_reading_get_input_kind(void* reading) {
+    g_gameinput_diag.input_kind_calls.fetch_add(1, std::memory_order_relaxed);
+    return g_gameinput_reading_get_input_kind(reading);
+}
+
+void STDMETHODCALLTYPE hook_gameinput_reading_get_device(void* reading, void** device) {
+    g_gameinput_reading_get_device(reading, device);
+    g_gameinput_diag.get_device_calls.fetch_add(1, std::memory_order_relaxed);
+    if (device == nullptr || *device == nullptr) {
+        return;
+    }
+    void* const previous = g_gameinput_diag.last_reading_device.exchange(*device);
+    if (previous != *device) {
+        const auto status = reinterpret_cast<GameInputDeviceGetDeviceStatusFn>(
+            (*reinterpret_cast<void***>(*device))[kGameInputDeviceGetDeviceStatusSlot]);
+        log_line("GameInput reading device at_ms=%u device=%p status=0x%08X",
+            test_mode_now_ms(), *device, status(*device));
+    }
+}
+
+void gameinput_diag_hook(void* target, void* detour, void** original, const char* name) {
+    const bool ok = MH_CreateHook(target, detour, original) == MH_OK &&
+        MH_EnableHook(target) == MH_OK;
+    log_line("GameInput diag %s hook %s target=%p", name, ok ? "installed" : "failed",
+        target);
+}
+
 bool STDMETHODCALLTYPE hook_gameinput_get_gamepad_state(
     void* reading, GameInputGamepadStateV3* state) {
     const bool valid = g_gameinput_get_gamepad_state(reading, state);
@@ -44748,17 +45265,30 @@ void hook_gameinput_reading(void* reading) {
     g_gameinput_gamepad_state_target.store(target, std::memory_order_release);
     log_line("GameInput IGameInputReading::GetGamepadState hook %s target=%p",
         ok ? "installed" : "failed", target);
+    void** const vtable = *reinterpret_cast<void***>(reading);
+    gameinput_diag_hook(vtable[kGameInputReadingGetInputKindSlot],
+        reinterpret_cast<void*>(&hook_gameinput_reading_get_input_kind),
+        reinterpret_cast<void**>(&g_gameinput_reading_get_input_kind),
+        "IGameInputReading::GetInputKind");
+    gameinput_diag_hook(vtable[kGameInputReadingGetDeviceSlot],
+        reinterpret_cast<void*>(&hook_gameinput_reading_get_device),
+        reinterpret_cast<void**>(&g_gameinput_reading_get_device),
+        "IGameInputReading::GetDevice");
 }
 
 HRESULT STDMETHODCALLTYPE hook_gameinput_get_current_reading(
     void* self, uint32_t kind, void* device, void** reading) {
-    const HRESULT hr = g_gameinput_get_current_reading(self, kind, device, reading);
+    const HRESULT hr = gameinput_is_virtual_device(device) ?
+        gameinput_virtual_current_reading(kind, reading) :
+        g_gameinput_get_current_reading(self, kind, device, reading);
+    gameinput_diag_query("current", kind, device, hr,
+        SUCCEEDED(hr) && reading != nullptr ? *reading : nullptr);
     g_test_gameinput_reading_calls.fetch_add(1, std::memory_order_relaxed);
     g_test_gameinput_reading_kinds.fetch_or(kind, std::memory_order_relaxed);
     if (SUCCEEDED(hr)) {
         g_test_gameinput_reading_hits.fetch_add(1, std::memory_order_relaxed);
     }
-    if (SUCCEEDED(hr) && reading != nullptr) {
+    if (SUCCEEDED(hr) && reading != nullptr && !gameinput_is_virtual_device(device)) {
         hook_gameinput_reading(*reading);
     }
     return hr;
@@ -44766,8 +45296,15 @@ HRESULT STDMETHODCALLTYPE hook_gameinput_get_current_reading(
 
 HRESULT STDMETHODCALLTYPE hook_gameinput_get_next_reading(
     void* self, void* reference, uint32_t kind, void* device, void** reading) {
+    if (gameinput_is_virtual_device(device) || reference == &g_gameinput_virtual_reading) {
+        if (reading != nullptr) {
+            *reading = nullptr;
+        }
+        return kGameInputReadingNotFound;
+    }
     const HRESULT hr =
         g_gameinput_get_next_reading(self, reference, kind, device, reading);
+    g_gameinput_diag.next_calls.fetch_add(1, std::memory_order_relaxed);
     g_test_gameinput_reading_calls.fetch_add(1, std::memory_order_relaxed);
     g_test_gameinput_reading_kinds.fetch_or(kind, std::memory_order_relaxed);
     if (SUCCEEDED(hr)) {
@@ -44806,6 +45343,27 @@ HRESULT WINAPI hook_gameinput_initialize(REFIID riid, void** object) {
     hook(vtable[kGameInputGetNextReadingSlot],
         reinterpret_cast<void*>(&hook_gameinput_get_next_reading),
         reinterpret_cast<void**>(&g_gameinput_get_next_reading), "GetNextReading");
+    hook(vtable[kGameInputGetPreviousReadingSlot],
+        reinterpret_cast<void*>(&hook_gameinput_get_previous_reading),
+        reinterpret_cast<void**>(&g_gameinput_get_previous_reading), "GetPreviousReading");
+    hook(vtable[kGameInputRegisterReadingCallbackSlot],
+        reinterpret_cast<void*>(&hook_gameinput_register_reading_callback),
+        reinterpret_cast<void**>(&g_gameinput_register_reading_callback),
+        "RegisterReadingCallback");
+    hook(vtable[kGameInputRegisterDeviceCallbackSlot],
+        reinterpret_cast<void*>(&hook_gameinput_register_device_callback),
+        reinterpret_cast<void**>(&g_gameinput_register_device_callback),
+        "RegisterDeviceCallback");
+    hook(vtable[kGameInputRegisterSystemButtonCallbackSlot],
+        reinterpret_cast<void*>(&hook_gameinput_register_system_button_callback),
+        reinterpret_cast<void**>(&g_gameinput_register_system_button_callback),
+        "RegisterSystemButtonCallback");
+    hook(vtable[kGameInputCreateDispatcherSlot],
+        reinterpret_cast<void*>(&hook_gameinput_create_dispatcher),
+        reinterpret_cast<void**>(&g_gameinput_create_dispatcher), "CreateDispatcher");
+    hook(vtable[kGameInputFindDeviceFromIdSlot],
+        reinterpret_cast<void*>(&hook_gameinput_find_device_from_id),
+        reinterpret_cast<void**>(&g_gameinput_find_device_from_id), "FindDeviceFromId");
     return hr;
 }
 
