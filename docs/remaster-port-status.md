@@ -242,3 +242,13 @@ Layout changes that block a direct port:
   alternately per frame (two consecutive captures show the expected horizontal offset), as the
   4.04 flat stereo run does. The real dual render (two frames per Present) only starts with a
   valid HMD pose, so it needs an OpenXR run with the headset.
+- 4.04 regression of this build (commit `328679e`, flat stereo `mode=3`): passed; the alternating
+  eyes show the same offset as before and stay sharp (the mod's per-eye TAAU history).
+- On 5.01 the alternating eyes blur: the game's own temporal anti-aliasing blends left and right
+  frames, and the per-eye history only exists for 4.04 TAAU. The 5.01 VR baseline should use FXAA
+  (no temporal history); the strict pair mode renders both eyes per Present, but consecutive
+  frames still alternate eyes, so temporal AA would mix them there as well.
+- Not ported yet: frame builder and temporal writer, which 4.04 needs for the asymmetric
+  projection (`native_stereo=1`). On 5.01 the engine itself applies the centre offset at
+  view[0x130] when building the projection, so a first headset test should start with symmetric
+  projection (`native_stereo=0`) and then compare.
