@@ -146,3 +146,31 @@ See `remaster-porting-analysis.md` §6. In short:
   a virtual device through that callback and answers its queries with a reading that carries the
   script pad. The game only calls `GetDeviceInfo` on it. Verified: the full smoke script runs
   with the gamepad switched off and disconnected.
+
+## 2026-10-12
+
+### Smoke test
+- `scripts/smoke-test.ps1` runs the 5.01 smoke script unattended (no controller needed) and
+  checks the log: script loaded, all captures written, no hook failure or signature mismatch,
+  no timeout. A full run takes about 90 s.
+
+### First engine hooks on 5.01 (per-build address table)
+- `src/engine_addresses.h` holds per-build RVAs. 4.04 keeps its original values. A 5.01 entry
+  also carries the expected function bytes, which are checked at runtime before hooking
+  (`engine_function_target()`); a mismatch disables that hook. Hooks resolved this way run on
+  5.01 although `engine_build_supported()` is still false for it.
+- Method: the 5.01 address comes from the earlier exe matching; the 4.04 function bytes must
+  occur exactly once in the 5.01 exe, at that address. Struct offsets the hook (or code
+  mirroring it) relies on must be visible and unchanged in those bytes.
+- `IsAnyMenu` (5.01 RVA 0x01DF41A0, whole 35-byte function identical): verified on 5.01, the menu
+  state toggles while loading and with the game menu (START/B).
+- `IsLoadingScreenVideoPlaying` (5.01 RVA 0x0227A0F0, identical incl. the +0x198/+0x38/vtable
+  +0x18 layout mirrored by `poll_engine_loading_screen_video_state()`): moved out of the
+  camera-authority installer into its own installer.
+- Also unique and byte-identical in 5.01, not yet enabled: `Actor.IsInGameplayScene` 0x0210B410
+  (+0x2F3), `Actor.IsInNonGameplayCutscene` 0x0210B430 (+0x2F2),
+  `Game.IsPlayingNonGameplayScene` 0x022753C0 (+0x11F). `GetTopmostCameraObject` 0x023825D0 is
+  compiled differently but uses the same director layout (+0x58 entries, +0x60 count, stride
+  0x28). `EnableManualControl` is not located yet.
+- Open: 4.04 regression run of this build (the 4.04 path only changed from inline RVAs to the
+  table with the same values).

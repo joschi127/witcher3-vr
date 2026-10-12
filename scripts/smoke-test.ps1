@@ -131,7 +131,8 @@ $written = @($lines | Where-Object { $_ -match 'Test mode capture written' }).Co
 if ($written -ne $expectedCaptures) {
     $failures.Add("captures written $written, expected $expectedCaptures")
 }
-$hookFailures = @($lines | Where-Object { $_ -match '\bhook\b.*\bfailed\b|\bfailed\b.*\bhook\b' })
+$hookFailures = @($lines | Where-Object {
+    $_ -match '\bhook\b.*\bfailed\b|\bfailed\b.*\bhook\b|signature mismatch' })
 foreach ($line in ($hookFailures | Select-Object -First 10)) {
     $failures.Add('hook failure: ' + ($line -replace '^\[[^\]]*\]\s*', ''))
 }

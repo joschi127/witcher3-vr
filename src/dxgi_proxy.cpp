@@ -30,6 +30,7 @@
 #include "first_person_anchor_smoothing.h"
 #include "first_person_horse_gallop_offset.h"
 #include "foliage_native_snapshot_policy.h"
+#include "engine_addresses.h"
 #include "game_build.h"
 #include "shader_fingerprints.h"
 #include "test_input_script.h"
@@ -30000,6 +30001,35 @@ bool engine_build_supported() {
     return w3vr::game_build::engine_hooks_supported(running_game_build());
 }
 
+// Target of |function| on the running build, or nullptr when its address is
+// unknown there or the code at that address is not the expected one. Hooks
+// resolved this way may run on builds without full engine-hook support.
+uint8_t* engine_function_target(w3vr::engine_addresses::Function function) {
+    namespace addresses = w3vr::engine_addresses;
+    const auto build = running_game_build();
+    const char* const name = addresses::entry(function).name;
+    const uintptr_t rva = addresses::rva(build, function);
+    auto* module = reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr));
+    if (rva == 0 || module == nullptr) {
+        log_line("Engine function %s unavailable on build %s", name,
+            w3vr::game_build::name(build));
+        return nullptr;
+    }
+    auto* target = module + rva;
+    const auto expected = addresses::signature(build, function);
+    if (!addresses::signature_matches(target, expected)) {
+        log_line("Engine function %s signature mismatch on build %s RVA=0x%llX; hook disabled",
+            name, w3vr::game_build::name(build), static_cast<unsigned long long>(rva));
+        return nullptr;
+    }
+    if (expected.size != 0) {
+        log_line("Engine function %s signature verified on build %s RVA=0x%llX bytes=%zu",
+            name, w3vr::game_build::name(build), static_cast<unsigned long long>(rva),
+            expected.size);
+    }
+    return target;
+}
+
 void install_engine_view_constants_hook() {
     if (!engine_build_supported()) {
         return;
@@ -39767,7 +39797,6 @@ void install_engine_native_camera_authority_hooks() {
     constexpr uintptr_t kGameIsPlayingNonGameplaySceneRva = 0x01549800;
     constexpr uintptr_t kCameraEnableManualControlRva = 0x01F580E0;
     constexpr uintptr_t kTopmostCameraObjectRva = 0x0161B9C0;
-    constexpr uintptr_t kIsLoadingScreenVideoPlayingRva = 0x0154EED0;
 
     auto* gameplay_scene_target =
         module + kActorIsInGameplaySceneRva;
@@ -39828,25 +39857,6 @@ void install_engine_native_camera_authority_hooks() {
             global_non_gameplay_target);
     }
 
-    auto* loading_video_target =
-        module + kIsLoadingScreenVideoPlayingRva;
-    if (MH_CreateHook(
-            loading_video_target,
-            reinterpret_cast<void*>(
-                &hook_engine_is_loading_screen_video_playing),
-            reinterpret_cast<void**>(
-                &g_engine_is_loading_screen_video_playing)) == MH_OK &&
-        MH_EnableHook(loading_video_target) == MH_OK) {
-        log_line(
-            "Hooked native Game.IsLoadingScreenVideoPlaying RVA=0x%llX",
-            static_cast<unsigned long long>(
-                kIsLoadingScreenVideoPlayingRva));
-    } else {
-        log_line(
-            "Failed native Game.IsLoadingScreenVideoPlaying hook target=%p",
-            loading_video_target);
-    }
-
     auto* manual_control_target =
         module + kCameraEnableManualControlRva;
     if (MH_CreateHook(
@@ -39886,6 +39896,31 @@ void install_engine_native_camera_authority_hooks() {
             "Failed native CameraDirector.GetTopmostCameraObject "
             "hook target=%p",
             topmost_camera_target);
+    }
+}
+
+// Per-build address table: also runs on 5.01, where the function and the
+// loading-screen layout that poll_engine_loading_screen_video_state() mirrors
+// (+0x198, +0x38, vtable +0x18) are unchanged.
+void install_engine_loading_screen_video_hook() {
+    if (g_engine_is_loading_screen_video_playing != nullptr) {
+        return;
+    }
+    auto* target = engine_function_target(
+        w3vr::engine_addresses::Function::IsLoadingScreenVideoPlaying);
+    if (target == nullptr) {
+        return;
+    }
+    if (MH_CreateHook(
+            target,
+            reinterpret_cast<void*>(
+                &hook_engine_is_loading_screen_video_playing),
+            reinterpret_cast<void**>(
+                &g_engine_is_loading_screen_video_playing)) == MH_OK &&
+        MH_EnableHook(target) == MH_OK) {
+        log_line("Hooked native Game.IsLoadingScreenVideoPlaying target=%p", target);
+    } else {
+        log_line("Failed native Game.IsLoadingScreenVideoPlaying hook target=%p", target);
     }
 }
 
@@ -41443,26 +41478,23 @@ void __fastcall hook_engine_is_any_menu(void* gui_manager, void* script_context,
         "changed");
 }
 
+// Per-build address table: also runs on 5.01, where the function is unchanged.
 void install_engine_menu_state_probe() {
-    if (!engine_build_supported()) {
-        return;
-    }
     if (!g_config.engine_menu_state_probe || g_engine_is_any_menu != nullptr) {
         return;
     }
 
-    constexpr uintptr_t kEngineIsAnyMenuRva = 0x01F3C5C0;
-    auto* module = reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr));
-    auto* target = module != nullptr ? module + kEngineIsAnyMenuRva : nullptr;
-    if (target != nullptr &&
-        MH_CreateHook(target, reinterpret_cast<void*>(&hook_engine_is_any_menu),
+    auto* target =
+        engine_function_target(w3vr::engine_addresses::Function::IsAnyMenu);
+    if (target == nullptr) {
+        return;
+    }
+    if (MH_CreateHook(target, reinterpret_cast<void*>(&hook_engine_is_any_menu),
             reinterpret_cast<void**>(&g_engine_is_any_menu)) == MH_OK &&
         MH_EnableHook(target) == MH_OK) {
-        log_line("Engine IsAnyMenu probe hooked RVA=0x%llX target=%p",
-            static_cast<unsigned long long>(kEngineIsAnyMenuRva), target);
+        log_line("Engine IsAnyMenu probe hooked target=%p", target);
     } else {
-        log_line("Engine IsAnyMenu probe hook failed RVA=0x%llX target=%p",
-            static_cast<unsigned long long>(kEngineIsAnyMenuRva), target);
+        log_line("Engine IsAnyMenu probe hook failed target=%p", target);
     }
 }
 
@@ -45445,6 +45477,7 @@ void ensure_initialized() {
         install_engine_view_factory_probe();
         install_engine_render_proxy_distance_scale_hook();
         install_engine_native_camera_authority_hooks();
+        install_engine_loading_screen_video_hook();
         install_engine_native_head_pose_hooks();
         install_engine_camera_direction_hook();
         initialize_engine_player_pose_helpers();
