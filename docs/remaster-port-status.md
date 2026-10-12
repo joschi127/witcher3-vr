@@ -191,7 +191,11 @@ See `remaster-porting-analysis.md` §6. In short:
   script natives, or teach the trampoline builder VEX instruction lengths. Left 4.04-only.
 - Still 4.04-only in the camera-authority installer: `GetTopmostCameraObject` (5.01 candidate
   0x023825D0, compiled differently but same director layout: +0x58 entries, +0x60 count,
-  stride 0x28) and `EnableManualControl` (no 5.01 match for the 4.04 code or a setter touching
-  +0x259; needs the structural comparison).
+  stride 0x28) and `EnableManualControl` (5.01 RVA 0x01E0D800 by registered script name, plain
+  prologue). Comparing `EnableManualControl` shows the **custom-camera fields moved by +0x10**
+  in 5.01: manual-control flag 0x259 → 0x269, float pairs 0x248/0x250 → 0x258/0x260; the +0x1C0
+  pointer is unchanged. The hook and `read_native_camera_authority_snapshot()` read 0x259, so
+  enabling them needs a per-build field offset. Worth doing together with the view/frame
+  hooks that consume the snapshot.
 - Open: 4.04 regression run of this build (the 4.04 path only changed from inline RVAs to the
   table with the same values).
