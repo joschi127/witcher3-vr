@@ -30001,6 +30001,15 @@ bool engine_build_supported() {
     return w3vr::game_build::engine_hooks_supported(running_game_build());
 }
 
+// First of the four view-array floats holding the projection centre offset (x, y)
+// and the viewport size (u32 width, height): 0x100 on 4.04, 0x130 on 5.01, where
+// 0x100..0x12F hold matrix copies.
+size_t engine_view_centre() {
+    static const size_t index = static_cast<size_t>(w3vr::engine_addresses::value(
+        running_game_build(), w3vr::engine_addresses::Value::ViewCentreIndex));
+    return index != 0 ? index : 0x100;
+}
+
 // Target of |function| on the running build, or nullptr when its address is
 // unknown there or the code at that address is not the expected one. Hooks
 // resolved this way may run on builds without full engine-hook support.
@@ -30090,10 +30099,10 @@ bool read_asymmetric_descriptor_snapshot(
             view + 0x468, &candidate.alternate_fov,
             sizeof(candidate.alternate_fov)) ||
         !safe_copy_asymmetric_authority(
-            view + 0x400, candidate.jitter.data(),
+            view + engine_view_centre() * sizeof(float), candidate.jitter.data(),
             sizeof(candidate.jitter)) ||
         !safe_copy_asymmetric_authority(
-            view + 0x408, candidate.viewport.data(),
+            view + (engine_view_centre() + 2) * sizeof(float), candidate.viewport.data(),
             sizeof(candidate.viewport)) ||
         !safe_copy_asymmetric_authority(
             view + 0x180, candidate.matrix_180.data(),
@@ -32678,10 +32687,9 @@ void __fastcall hook_engine_gameplay_frame_entry(void* frame_task) {
         flight_hook_frame);
 }
 
+// Per-build address table: the hook reads only frame_task +0x8/+0x10,
+// unchanged in 5.01.
 void install_engine_gameplay_entry_probe() {
-    if (!engine_build_supported()) {
-        return;
-    }
     if ((!g_config.engine_gameplay_entry_probe &&
             !g_engine_dual_render_active.load() &&
             !clean_mono_transport_active()) ||
@@ -32689,18 +32697,17 @@ void install_engine_gameplay_entry_probe() {
         return;
     }
 
-    constexpr uintptr_t kEngineGameplayEntryRva = 0x01D00260;
-    auto* module = reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr));
-    auto* target = module != nullptr ? module + kEngineGameplayEntryRva : nullptr;
-    if (target != nullptr &&
-        MH_CreateHook(target, reinterpret_cast<void*>(&hook_engine_gameplay_frame_entry),
+    auto* target =
+        engine_function_target(w3vr::engine_addresses::Function::GameplayEntry);
+    if (target == nullptr) {
+        return;
+    }
+    if (MH_CreateHook(target, reinterpret_cast<void*>(&hook_engine_gameplay_frame_entry),
             reinterpret_cast<void**>(&g_engine_gameplay_frame_entry)) == MH_OK &&
         MH_EnableHook(target) == MH_OK) {
-        log_line("Engine gameplay entry probe hooked RVA=0x%llX target=%p",
-            static_cast<unsigned long long>(kEngineGameplayEntryRva), target);
+        log_line("Engine gameplay entry probe hooked target=%p", target);
     } else {
-        log_line("Engine gameplay entry probe hook failed RVA=0x%llX target=%p",
-            static_cast<unsigned long long>(kEngineGameplayEntryRva), target);
+        log_line("Engine gameplay entry probe hook failed target=%p", target);
     }
 }
 
@@ -32932,25 +32939,22 @@ void __fastcall hook_engine_render_scene_setup(void* renderer, float delta_time)
         flight_hook_frame);
 }
 
+// Per-build address table: the hook only paces producer pairs.
 void install_engine_render_scene_setup_probe() {
-    if (!engine_build_supported()) {
-        return;
-    }
     if (g_engine_render_scene_setup != nullptr) {
         return;
     }
-    constexpr uintptr_t kEngineRenderSceneSetupRva = 0x01553070;
-    auto* module = reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr));
-    auto* target = module != nullptr ? module + kEngineRenderSceneSetupRva : nullptr;
-    if (target != nullptr &&
-        MH_CreateHook(target, reinterpret_cast<void*>(&hook_engine_render_scene_setup),
+    auto* target =
+        engine_function_target(w3vr::engine_addresses::Function::RenderSceneSetup);
+    if (target == nullptr) {
+        return;
+    }
+    if (MH_CreateHook(target, reinterpret_cast<void*>(&hook_engine_render_scene_setup),
             reinterpret_cast<void**>(&g_engine_render_scene_setup)) == MH_OK &&
         MH_EnableHook(target) == MH_OK) {
-        log_line("Engine render-scene producer barrier hooked RVA=0x%llX target=%p",
-            static_cast<unsigned long long>(kEngineRenderSceneSetupRva), target);
+        log_line("Engine render-scene producer barrier hooked target=%p", target);
     } else {
-        log_line("Engine render-scene producer barrier hook failed RVA=0x%llX target=%p",
-            static_cast<unsigned long long>(kEngineRenderSceneSetupRva), target);
+        log_line("Engine render-scene producer barrier hook failed target=%p", target);
     }
 }
 
@@ -33311,10 +33315,10 @@ bool capture_asymmetric_temporal_authority(
         AsymmetricDescriptorAuditSnapshot value{};
         if (view == nullptr ||
             !safe_copy_asymmetric_authority(
-                view + 0x400, value.jitter.data(),
+                view + engine_view_centre() * sizeof(float), value.jitter.data(),
                 sizeof(value.jitter)) ||
             !safe_copy_asymmetric_authority(
-                view + 0x408, value.viewport.data(),
+                view + (engine_view_centre() + 2) * sizeof(float), value.viewport.data(),
                 sizeof(value.viewport)) ||
             !safe_copy_asymmetric_authority(
                 view + 0x200, value.matrix_200.data(),
@@ -34339,9 +34343,9 @@ bool prepare_full_vr_frame_camera(
             }
             corrected[7] = asymmetric_projection.vertical_fov_degrees;
             corrected[10] = asymmetric_projection.aspect;
-            corrected[0x100] =
+            corrected[engine_view_centre()] =
                 asymmetric_projection.redengine_center_offset_px_x;
-            corrected[0x101] =
+            corrected[engine_view_centre() + 1] =
                 asymmetric_projection.redengine_center_offset_px_y;
             memcpy(
                 corrected.data() + 0x102, &g_game_render_width,
@@ -34434,12 +34438,12 @@ bool prepare_full_vr_frame_camera(
             present > g_dual_render_activation_present.load() + 300);
     if (native_projection_ready && g_game_render_width > 0 &&
         g_game_render_height > 0) {
-        corrected[0x100] = eye == 1
+        corrected[engine_view_centre()] = eye == 1
             ? static_cast<float>(g_config.engine_native_projection_shift_px)
             : -static_cast<float>(g_config.engine_native_projection_shift_px);
-        corrected[0x101] = 0.0f;
-        corrected[0x102] = static_cast<float>(g_game_render_width);
-        corrected[0x103] = static_cast<float>(g_game_render_height);
+        corrected[engine_view_centre() + 1] = 0.0f;
+        corrected[engine_view_centre() + 2] = static_cast<float>(g_game_render_width);
+        corrected[engine_view_centre() + 3] = static_cast<float>(g_game_render_height);
     }
 
     const float runtime_eye_baseline =
@@ -37036,7 +37040,13 @@ struct NativeCameraAuthoritySnapshot {
     char top_type[64]{"unknown"};
 };
 
-constexpr uintptr_t kNativeCustomCameraVtableRva = 0x02D645B0;
+// CCustomCamera vtable of the subobject at +0x170, the pointer the camera
+// director lists (4.04 0x02D645B0, 5.01 0x03810198).
+uintptr_t native_custom_camera_vtable_rva() {
+    static const uintptr_t rva = w3vr::engine_addresses::value(
+        running_game_build(), w3vr::engine_addresses::Value::CustomCameraVtable);
+    return rva;
+}
 
 NativeCameraAuthoritySnapshot read_native_camera_authority_snapshot() {
     NativeCameraAuthoritySnapshot snapshot{};
@@ -37245,11 +37255,25 @@ void* __fastcall hook_engine_temporal_camera_build(
     return result;
 }
 
+// Return addresses of the view rebuild inside the frame factory and inside the
+// view-copy wrapper (4.04 0x0162196D / 0x015FF863, 5.01 0x022C101A / 0x02292EA7).
+uintptr_t view_factory_return_rva() {
+    static const uintptr_t rva = w3vr::engine_addresses::value(
+        running_game_build(), w3vr::engine_addresses::Value::ViewFactoryReturn);
+    return rva;
+}
+
+uintptr_t view_copy_rebuild_return_rva() {
+    static const uintptr_t rva = w3vr::engine_addresses::value(
+        running_game_build(), w3vr::engine_addresses::Value::ViewCopyRebuildReturn);
+    return rva;
+}
+
 bool prepare_engine_per_eye_native_temporal_history(
     float* view,
     uintptr_t caller_rva,
     bool temporal_scene_camera) {
-    constexpr uintptr_t kViewFactoryReturnRva = 0x0162196D;
+    const uintptr_t kViewFactoryReturnRva = view_factory_return_rva();
     const bool mode3_taau_full_motion =
         mode3_taau_native_full_motion_active();
     if (view == nullptr || caller_rva != kViewFactoryReturnRva ||
@@ -37331,8 +37355,8 @@ bool prepare_engine_per_eye_native_temporal_history(
 }
 
 void __fastcall hook_engine_view_rebuild(float* view) {
-    constexpr uintptr_t kViewFactoryReturnRva = 0x0162196D;
-    constexpr uintptr_t kViewCopyRebuildReturnRva = 0x015FF863;
+    const uintptr_t kViewFactoryReturnRva = view_factory_return_rva();
+    const uintptr_t kViewCopyRebuildReturnRva = view_copy_rebuild_return_rva();
     const float cinema_projection_aspect = g_config.cinema_aspect_ratio;
     const auto module = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
     const auto caller_rva = reinterpret_cast<uintptr_t>(_ReturnAddress()) - module;
@@ -37406,7 +37430,7 @@ void __fastcall hook_engine_view_rebuild(float* view) {
     const bool native_gameplay_camera_authority =
         factory_perspective_camera &&
         native_camera_authority.top_vtable_rva ==
-            kNativeCustomCameraVtableRva &&
+            native_custom_camera_vtable_rva() &&
         native_camera_authority.player_non_gameplay_cutscene == 0 &&
         native_camera_authority.game_non_gameplay_scene == 0;
     // [FIX:RENDER-PROXY-FOV-DISTANCE-AUTHORITY V1122 1/4] Capture the native
@@ -37498,8 +37522,8 @@ void __fastcall hook_engine_view_rebuild(float* view) {
         __try {
             uint32_t viewport_width{};
             uint32_t viewport_height{};
-            memcpy(&viewport_width, view + 0x102, sizeof(viewport_width));
-            memcpy(&viewport_height, view + 0x103, sizeof(viewport_height));
+            memcpy(&viewport_width, view + engine_view_centre() + 2, sizeof(viewport_width));
+            memcpy(&viewport_height, view + engine_view_centre() + 3, sizeof(viewport_height));
             const auto* bytes = reinterpret_cast<const uint8_t*>(view);
             log_line(
                 "Projection class present=%llu caller=0x%llX eye=%d kind=%s "
@@ -37511,7 +37535,7 @@ void __fastcall hook_engine_view_rebuild(float* view) {
                 view[7] == 0.0f ? "ortho" : "perspective",
                 view[0], view[1], view[2], view[7], view[10], view[11], view[12], view[13],
                 view[0x11a], bytes[0x2B4], bytes[0x2B5], bytes[0x2B6],
-                view[0x100], view[0x101], viewport_width, viewport_height);
+                view[engine_view_centre()], view[engine_view_centre() + 1], viewport_width, viewport_height);
         } __except (EXCEPTION_EXECUTE_HANDLER) {
             log_line("Projection class probe read fault present=%llu view=%p",
                 static_cast<unsigned long long>(present), view);
@@ -37691,7 +37715,7 @@ void __fastcall hook_engine_view_rebuild(float* view) {
                     frozen_fov, native_asymmetric_factory_render_width,
                     native_asymmetric_factory_render_height, descriptor) &&
             safe_copy_asymmetric_authority(
-                reinterpret_cast<const uint8_t*>(view) + 0x400,
+                reinterpret_cast<const uint8_t*>(view) + engine_view_centre() * sizeof(float),
                 native_asymmetric_marker_center_viewport.data(),
                 native_asymmetric_marker_center_viewport.size())) {
             // Auxiliary jobs can snapshot the global camera at this factory
@@ -37702,18 +37726,18 @@ void __fastcall hook_engine_view_rebuild(float* view) {
             // extent. The two extent fields are uint32, not floating-point.
             view[7] = descriptor.vertical_fov_degrees;
             view[10] = descriptor.aspect;
-            view[0x100] = descriptor.redengine_center_offset_px_x;
-            view[0x101] = descriptor.redengine_center_offset_px_y;
+            view[engine_view_centre()] = descriptor.redengine_center_offset_px_x;
+            view[engine_view_centre() + 1] = descriptor.redengine_center_offset_px_y;
             memcpy(
-                view + 0x102, &native_asymmetric_factory_render_width,
+                view + engine_view_centre() + 2, &native_asymmetric_factory_render_width,
                 sizeof(native_asymmetric_factory_render_width));
             memcpy(
-                view + 0x103, &native_asymmetric_factory_render_height,
+                view + engine_view_centre() + 3, &native_asymmetric_factory_render_height,
                 sizeof(native_asymmetric_factory_render_height));
             native_asymmetric_factory_expected_fov = view[7];
             native_asymmetric_factory_expected_aspect = view[10];
-            native_asymmetric_factory_expected_center_x = view[0x100];
-            native_asymmetric_factory_expected_center_y = view[0x101];
+            native_asymmetric_factory_expected_center_x = view[engine_view_centre()];
+            native_asymmetric_factory_expected_center_y = view[engine_view_centre() + 1];
             native_asymmetric_factory_expected_viewport_width =
                 native_asymmetric_factory_render_width;
             native_asymmetric_factory_expected_viewport_height =
@@ -37734,7 +37758,7 @@ void __fastcall hook_engine_view_rebuild(float* view) {
                     static_cast<unsigned long long>(
                         g_engine_producer_pair_id),
                     g_engine_factory_eye, view[7], view[10],
-                    view[0x100], view[0x101],
+                    view[engine_view_centre()], view[engine_view_centre() + 1],
                     native_asymmetric_factory_render_width,
                     native_asymmetric_factory_render_height,
                     frozen_fov.angleLeft,
@@ -38398,17 +38422,17 @@ void __fastcall hook_engine_view_rebuild(float* view) {
     if (!native_asymmetric_factory_projection_applied &&
         hmd_scene_camera && !suppress_hmd_camera && native_projection_ready &&
         g_game_render_width > 0 && g_game_render_height > 0) {
-        view[0x100] = render_right_eye
+        view[engine_view_centre()] = render_right_eye
             ? static_cast<float>(g_config.engine_native_projection_shift_px)
             : -static_cast<float>(g_config.engine_native_projection_shift_px);
-        view[0x101] = 0.0f;
-        view[0x102] = static_cast<float>(g_game_render_width);
-        view[0x103] = static_cast<float>(g_game_render_height);
+        view[engine_view_centre() + 1] = 0.0f;
+        view[engine_view_centre() + 2] = static_cast<float>(g_game_render_width);
+        view[engine_view_centre() + 3] = static_cast<float>(g_game_render_height);
         if (world_marker_camera_valid) {
-            world_marker_camera_view[0x100] = view[0x100];
-            world_marker_camera_view[0x101] = view[0x101];
-            world_marker_camera_view[0x102] = view[0x102];
-            world_marker_camera_view[0x103] = view[0x103];
+            world_marker_camera_view[engine_view_centre()] = view[engine_view_centre()];
+            world_marker_camera_view[engine_view_centre() + 1] = view[engine_view_centre() + 1];
+            world_marker_camera_view[engine_view_centre() + 2] = view[engine_view_centre() + 2];
+            world_marker_camera_view[engine_view_centre() + 3] = view[engine_view_centre() + 3];
         }
     }
     const float runtime_eye_baseline =
@@ -38619,11 +38643,11 @@ void __fastcall hook_engine_view_rebuild(float* view) {
         uint32_t native_asymmetric_factory_post_height{};
         const bool native_asymmetric_factory_post_extent_valid =
             safe_copy_asymmetric_authority(
-                view + 0x102,
+                view + engine_view_centre() + 2,
                 &native_asymmetric_factory_post_width,
                 sizeof(native_asymmetric_factory_post_width)) &&
             safe_copy_asymmetric_authority(
-                view + 0x103,
+                view + engine_view_centre() + 3,
                 &native_asymmetric_factory_post_height,
                 sizeof(native_asymmetric_factory_post_height));
         const bool native_asymmetric_factory_post_valid =
@@ -38636,11 +38660,11 @@ void __fastcall hook_engine_view_rebuild(float* view) {
                 native_asymmetric_factory_expected_fov) <= 0.0001f &&
             std::fabs(view[10] -
                 native_asymmetric_factory_expected_aspect) <= 0.000001f &&
-            std::isfinite(view[0x100]) &&
-            std::isfinite(view[0x101]) &&
-            std::fabs(view[0x100] -
+            std::isfinite(view[engine_view_centre()]) &&
+            std::isfinite(view[engine_view_centre() + 1]) &&
+            std::fabs(view[engine_view_centre()] -
                 native_asymmetric_factory_expected_center_x) <= 0.000001f &&
-            std::fabs(view[0x101] -
+            std::fabs(view[engine_view_centre() + 1] -
                 native_asymmetric_factory_expected_center_y) <= 0.000001f &&
             native_asymmetric_factory_post_extent_valid &&
             native_asymmetric_factory_post_width ==
@@ -38672,7 +38696,7 @@ void __fastcall hook_engine_view_rebuild(float* view) {
                         g_engine_factory_eye,
                         view[7], native_asymmetric_factory_expected_fov,
                         view[10], native_asymmetric_factory_expected_aspect,
-                        view[0x100], view[0x101],
+                        view[engine_view_centre()], view[engine_view_centre() + 1],
                         native_asymmetric_factory_expected_center_x,
                         native_asymmetric_factory_expected_center_y,
                         native_asymmetric_factory_post_width,
@@ -39804,7 +39828,8 @@ void install_engine_native_head_pose_hooks() {
 // The three scene queries resolve through the per-build address table and also
 // run on 5.01, where they and the flags read by
 // read_native_camera_authority_snapshot() (+0x2F3, +0x2F2, +0x11F) are
-// unchanged. The camera hooks below are not located on 5.01 yet.
+// unchanged. EnableManualControl below stays 4.04-only (its camera fields moved
+// by +0x10 in 5.01); GetTopmostCameraObject has its own installer.
 void install_engine_native_camera_authority_hooks() {
     using w3vr::engine_addresses::Function;
     auto* gameplay_scene_target =
@@ -39874,7 +39899,6 @@ void install_engine_native_camera_authority_hooks() {
         return;
     }
     constexpr uintptr_t kCameraEnableManualControlRva = 0x01F580E0;
-    constexpr uintptr_t kTopmostCameraObjectRva = 0x0161B9C0;
 
     auto* manual_control_target =
         module + kCameraEnableManualControlRva;
@@ -39895,9 +39919,20 @@ void install_engine_native_camera_authority_hooks() {
             "hook target=%p",
             manual_control_target);
     }
+}
 
-    auto* topmost_camera_target =
-        module + kTopmostCameraObjectRva;
+// Per-build address table: the camera director list layout read by
+// read_native_camera_authority_snapshot() (+0x58 entries, +0x60 count,
+// stride 0x28) is unchanged in 5.01.
+void install_engine_topmost_camera_object_hook() {
+    if (g_engine_topmost_camera_object != nullptr) {
+        return;
+    }
+    auto* topmost_camera_target = engine_function_target(
+        w3vr::engine_addresses::Function::TopmostCameraObject);
+    if (topmost_camera_target == nullptr) {
+        return;
+    }
     if (MH_CreateHook(
             topmost_camera_target,
             reinterpret_cast<void*>(
@@ -39907,9 +39942,8 @@ void install_engine_native_camera_authority_hooks() {
         MH_EnableHook(topmost_camera_target) == MH_OK) {
         log_line(
             "Hooked native CameraDirector.GetTopmostCameraObject "
-            "RVA=0x%llX",
-            static_cast<unsigned long long>(
-                kTopmostCameraObjectRva));
+            "target=%p",
+            topmost_camera_target);
     } else {
         log_line(
             "Failed native CameraDirector.GetTopmostCameraObject "
@@ -40465,10 +40499,10 @@ void install_engine_temporal_camera_builder_hook() {
     }
 }
 
+// Per-build address table. The hook adjusts the view inputs (indices
+// 0x00..0x0E, unchanged in 5.01) before the original builds the matrices; the
+// centre offset/viewport block resolves through engine_view_centre().
 void install_engine_view_factory_probe() {
-    if (!engine_build_supported()) {
-        return;
-    }
     // [FIX:CLEAN-MONO-VIEW-REBUILD-DEPENDENCY V19000 1/2] Clean Mode 1 uses
     // the common gameplay/Full-VR camera correction and its private rebuilds
     // even though it deliberately owns no stereo offset or per-eye temporal
@@ -40482,18 +40516,17 @@ void install_engine_view_factory_probe() {
         return;
     }
 
-    constexpr uintptr_t kEngineViewRebuildRva = 0x015FE550;
-    auto* module = reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr));
-    auto* target = module != nullptr ? module + kEngineViewRebuildRva : nullptr;
-    if (target != nullptr &&
-        MH_CreateHook(target, reinterpret_cast<void*>(&hook_engine_view_rebuild),
+    auto* target =
+        engine_function_target(w3vr::engine_addresses::Function::ViewRebuild);
+    if (target == nullptr) {
+        return;
+    }
+    if (MH_CreateHook(target, reinterpret_cast<void*>(&hook_engine_view_rebuild),
             reinterpret_cast<void**>(&g_engine_view_rebuild)) == MH_OK &&
         MH_EnableHook(target) == MH_OK) {
-        log_line("Engine view factory probe hooked RVA=0x%llX target=%p",
-            static_cast<unsigned long long>(kEngineViewRebuildRva), target);
+        log_line("Engine view factory probe hooked target=%p", target);
     } else {
-        log_line("Engine view factory probe hook failed RVA=0x%llX target=%p",
-            static_cast<unsigned long long>(kEngineViewRebuildRva), target);
+        log_line("Engine view factory probe hook failed target=%p", target);
     }
 }
 
@@ -40988,8 +41021,13 @@ void* __fastcall hook_engine_frame_data_factory(void* render_context, void* rend
         asymmetric_authority_audit_active();
     const auto module = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
     const auto caller_rva = reinterpret_cast<uintptr_t>(_ReturnAddress()) - module;
-    constexpr size_t kSceneDescriptorBytes = 0xC000;
-    constexpr size_t kSceneDescriptorMinimumBytes = 0xB000;
+    // 4.04 values; 5.01's descriptor is about 0x4000 bytes larger.
+    static const size_t kSceneDescriptorBytes = static_cast<size_t>(
+        w3vr::engine_addresses::value(running_game_build(),
+            w3vr::engine_addresses::Value::SceneDescriptorBytes));
+    static const size_t kSceneDescriptorMinimumBytes = static_cast<size_t>(
+        w3vr::engine_addresses::value(running_game_build(),
+            w3vr::engine_addresses::Value::SceneDescriptorMinimumBytes));
     // [FIX:ASYMMETRIC-TAAU-SCENE-DESCRIPTOR-HARDENING V1207 1/1]
     // The REDengine scene descriptor is stack-backed. Its readable range to
     // the next VM boundary varies with address placement, so the old clone
@@ -40999,9 +41037,8 @@ void* __fastcall hook_engine_frame_data_factory(void* render_context, void* rend
     // histories. Every observed safe bounded prefix is at least 0xBD00. Copy
     // exactly that stable prefix and zero the rest only for asymmetric TAAU;
     // every other backend/projection route retains V1206 behavior.
+    // Asymmetric TAAU exists only on 4.04 (5.01 has no TAAU).
     constexpr size_t kAsymmetricTaauSceneDescriptorPrefixBytes = 0xBD00;
-    static_assert(kAsymmetricTaauSceneDescriptorPrefixBytes >=
-        kSceneDescriptorMinimumBytes);
     std::vector<uint8_t>* right_scene_descriptor{};
     const auto last_hmd_camera = g_engine_hmd_camera_last_present.load(
         std::memory_order_relaxed);
@@ -41491,7 +41528,13 @@ void install_engine_frame_factory_probe() {
         return;
     }
     g_engine_scene_enqueue_target = reinterpret_cast<EngineSceneEnqueueFn>(enqueue);
-    g_engine_factory_duplicate_supported = engine_build_supported();
+    using w3vr::engine_addresses::Value;
+    // The duplicate needs the per-eye view rebuild (installed before this
+    // hook; its code is already patched, so check the hook, not the bytes)
+    // and the descriptor size of this build.
+    g_engine_factory_duplicate_supported =
+        w3vr::engine_addresses::value(running_game_build(), Value::SceneDescriptorBytes) != 0 &&
+        (engine_build_supported() || g_engine_view_rebuild != nullptr);
     if (MH_CreateHook(target, reinterpret_cast<void*>(&hook_engine_frame_data_factory),
             reinterpret_cast<void**>(&g_engine_frame_data_factory)) == MH_OK &&
         MH_EnableHook(target) == MH_OK) {
@@ -45514,6 +45557,7 @@ void ensure_initialized() {
         install_engine_view_factory_probe();
         install_engine_render_proxy_distance_scale_hook();
         install_engine_native_camera_authority_hooks();
+        install_engine_topmost_camera_object_hook();
         install_engine_loading_screen_video_hook();
         install_engine_native_head_pose_hooks();
         install_engine_camera_direction_hook();
@@ -54675,7 +54719,7 @@ HRESULT STDMETHODCALLTYPE hook_present(IDXGISwapChain* swapchain, UINT sync_inte
         !g_first_person_bridge_boat.load(std::memory_order_relaxed) &&
         aim_hmd_camera_age <= kAimGameplayCameraAge &&
         aim_native_authority.top_vtable_rva ==
-            kNativeCustomCameraVtableRva &&
+            native_custom_camera_vtable_rva() &&
         aim_native_authority.player_non_gameplay_cutscene == 0 &&
         aim_native_authority.game_non_gameplay_scene == 0;
     const int previous_aim_gameplay_authority =

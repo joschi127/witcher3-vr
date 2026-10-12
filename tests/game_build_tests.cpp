@@ -79,6 +79,27 @@ int main() {
             "4.04 data values keep their original values");
         require(addresses::value(Build::Unknown, addresses::Value::RenderSchedulerGlobal) == 0,
             "no data values on unknown builds");
+        require(addresses::rva(Build::NextGen404, Function::ViewRebuild) == 0x015FE550 &&
+                addresses::rva(Build::NextGen404, Function::GameplayEntry) == 0x01D00260 &&
+                addresses::rva(Build::NextGen404, Function::RenderSceneSetup) == 0x01553070 &&
+                addresses::rva(Build::NextGen404, Function::TopmostCameraObject) == 0x0161B9C0,
+            "4.04 stereo-path RVAs keep their original values");
+        require(addresses::value(Build::NextGen404, addresses::Value::ViewCentreIndex) == 0x100 &&
+                addresses::value(Build::NextGen404, addresses::Value::CustomCameraVtable) ==
+                0x02D645B0 &&
+                addresses::value(Build::NextGen404, addresses::Value::ViewFactoryReturn) ==
+                0x0162196D &&
+                addresses::value(Build::NextGen404, addresses::Value::ViewCopyRebuildReturn) ==
+                0x015FF863 &&
+                addresses::value(Build::NextGen404, addresses::Value::SceneDescriptorBytes) ==
+                0xC000 &&
+                addresses::value(Build::NextGen404,
+                    addresses::Value::SceneDescriptorMinimumBytes) == 0xB000,
+            "4.04 stereo-path values keep their original values");
+        for (size_t i = 0; i < static_cast<size_t>(addresses::Value::Count); ++i) {
+            require(addresses::value(Build::Remaster501, static_cast<addresses::Value>(i)) != 0,
+                "every 5.01 value is known");
+        }
         require(addresses::rva(Build::Unknown, Function::IsAnyMenu) == 0,
             "no engine addresses on unknown builds");
         require(addresses::signature(Build::NextGen404, Function::IsAnyMenu).size == 0,

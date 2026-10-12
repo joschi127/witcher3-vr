@@ -22,6 +22,10 @@ enum class Function : size_t {
     GameIsPlayingNonGameplayScene,  // native theGame.IsCurrentlyPlayingNonGameplayScene
     FrameDataFactory,  // builds a frame (render_context, render_settings, scene_descriptor)
     SceneEnqueue,      // queues a frame as CRenderCommand_RenderScene (render_context, frame)
+    TopmostCameraObject,  // native CCameraDirector.GetTopmostCameraObject
+    ViewRebuild,       // rebuilds a view's matrices from its inputs (float* view)
+    GameplayEntry,     // render-thread gameplay frame task; calls the frame builder
+    RenderSceneSetup,  // per-tick scene setup; calls the frame factory
     Count,
 };
 
@@ -76,6 +80,21 @@ inline constexpr uint8_t kSceneEnqueue501Bytes[] = {
     0x48, 0x89, 0x5C, 0x24, 0x08, 0x57, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B,
     0x05, 0x4F, 0xCF, 0x79};
 
+inline constexpr uint8_t kTopmostCameraObject501Bytes[] = {
+    0x48, 0x89, 0x5C, 0x24, 0x08, 0x57, 0x48, 0x83, 0xEC, 0x20, 0x48, 0xFF,
+    0x42, 0x30, 0x45, 0x33};
+
+inline constexpr uint8_t kViewRebuild501Bytes[] = {
+    0x48, 0x8B, 0xC4, 0x55, 0x53, 0x56, 0x57, 0x48, 0x8D, 0xA8, 0x08, 0xFB,
+    0xFF, 0xFF, 0x48, 0x81};
+
+inline constexpr uint8_t kGameplayEntry501Bytes[] = {
+    0x40, 0x57, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B, 0x15, 0x7B, 0xBA, 0xB4,
+    0x03, 0x48, 0x8B, 0xF9};
+inline constexpr uint8_t kRenderSceneSetup501Bytes[] = {
+    0x40, 0x55, 0x57, 0x48, 0x8D, 0xAC, 0x24, 0x98, 0x08, 0xFF, 0xFF, 0xB8,
+    0x68, 0xF8, 0x00, 0x00};
+
 inline constexpr Entry kEntries[] = {
     {"IsAnyMenu", 0x01F3C5C0, 0x01DF41A0, {kIsAnyMenuBytes, sizeof(kIsAnyMenuBytes)}},
     {"IsLoadingScreenVideoPlaying", 0x0154EED0, 0x0227A0F0,
@@ -90,6 +109,14 @@ inline constexpr Entry kEntries[] = {
         {kFrameDataFactory501Bytes, sizeof(kFrameDataFactory501Bytes)}},
     {"SceneEnqueue", 0x01621FC0, 0x022BE990,
         {kSceneEnqueue501Bytes, sizeof(kSceneEnqueue501Bytes)}},
+    {"CameraDirector.GetTopmostCameraObject", 0x0161B9C0, 0x023825D0,
+        {kTopmostCameraObject501Bytes, sizeof(kTopmostCameraObject501Bytes)}},
+    {"ViewRebuild", 0x015FE550, 0x02293240,
+        {kViewRebuild501Bytes, sizeof(kViewRebuild501Bytes)}},
+    {"GameplayEntry", 0x01D00260, 0x01D0C570,
+        {kGameplayEntry501Bytes, sizeof(kGameplayEntry501Bytes)}},
+    {"RenderSceneSetup", 0x01553070, 0x0227D1F0,
+        {kRenderSceneSetup501Bytes, sizeof(kRenderSceneSetup501Bytes)}},
 };
 static_assert(sizeof(kEntries) / sizeof(kEntries[0]) ==
     static_cast<size_t>(Function::Count));
@@ -102,6 +129,12 @@ constexpr const Entry& entry(Function function) {
 enum class Value : size_t {
     RenderSchedulerGlobal,      // RVA of the render scheduler pointer (flags at +0x3C)
     RenderContextSharedOffset,  // render context field passed on by the scene enqueue
+    ViewCentreIndex,            // view-array float index of centre offset x, y and viewport w, h
+    CustomCameraVtable,         // RVA of the CCustomCamera vtable at subobject +0x170
+    ViewFactoryReturn,          // return address of the view rebuild call in the factory
+    ViewCopyRebuildReturn,      // return address of the view rebuild call in the copy wrapper
+    SceneDescriptorBytes,       // bytes of the stack scene descriptor copied for the second eye
+    SceneDescriptorMinimumBytes,  // copy fails below this many readable bytes
     Count,
 };
 
@@ -114,6 +147,13 @@ struct ValueEntry {
 inline constexpr ValueEntry kValues[] = {
     {"RenderSchedulerGlobal", 0x057F5930, 0x05A5B8F0},
     {"RenderContextSharedOffset", 0x620, 0x5440},
+    {"ViewCentreIndex", 0x100, 0x130},
+    {"CustomCameraVtable", 0x02D645B0, 0x03810198},
+    {"ViewFactoryReturn", 0x0162196D, 0x022C101A},
+    {"ViewCopyRebuildReturn", 0x015FF863, 0x02292EA7},
+    // The factory reads up to about +0xB765 (4.04) and +0xF714 (5.01).
+    {"SceneDescriptorBytes", 0xC000, 0x10000},
+    {"SceneDescriptorMinimumBytes", 0xB000, 0xF800},
 };
 static_assert(sizeof(kValues) / sizeof(kValues[0]) == static_cast<size_t>(Value::Count));
 

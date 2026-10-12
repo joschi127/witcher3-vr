@@ -230,5 +230,15 @@ Layout changes that block a direct port:
   view[0x100..0x103] to view[0x130..0x133]**; 5.01 uses 0x100–0x12F for matrix copies, so the
   hook's writes to view[0x100]/[0x102] must not run unchanged on 5.01. view[0x11A] has a new
   meaning as well.
-- The factory hook now resolves through the address table and runs on 5.01 as a pass-through
-  (no second-eye duplicate) until the view rebuild is ported.
+- Ported through the address table (5.01 values in `src/engine_addresses.h`): frame factory,
+  scene enqueue, view rebuild, gameplay entry, render-scene setup, `GetTopmostCameraObject`,
+  the CCustomCamera vtable, both view-rebuild return addresses, the scene-descriptor copy size
+  (5.01: 0x10000, minimum 0xF800) and the centre-offset/viewport index (`engine_view_centre()`,
+  0x100 on 4.04, 0x130 on 5.01; all 30 accesses go through it). Frame builder, temporal writer,
+  shadow cascade and the TAAU/DLSS hooks stay 4.04-only.
+- Verified on 5.01 (flat, `mode=3`, OpenXR off): all of these hook; at runtime the director's top
+  camera carries exactly the predicted 5.01 CCustomCamera vtable (0x03810198) and the scene flags
+  read 0 in free roaming; the view rebuild accepts the gameplay camera and renders the eyes
+  alternately per frame (two consecutive captures show the expected horizontal offset), as the
+  4.04 flat stereo run does. The real dual render (two frames per Present) only starts with a
+  valid HMD pose, so it needs an OpenXR run with the headset.
