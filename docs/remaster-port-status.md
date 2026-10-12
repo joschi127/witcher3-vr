@@ -197,5 +197,10 @@ See `remaster-porting-analysis.md` §6. In short:
   pointer is unchanged. The hook and `read_native_camera_authority_snapshot()` read 0x259, so
   enabling them needs a per-build field offset. Worth doing together with the view/frame
   hooks that consume the snapshot.
+- `GameplayEntry` (4.04 0x01D00260) confirmed at 5.01 RVA 0x01D0C570: instruction-for-instruction
+  the same structure. Fields of the global game object it reads moved by +8 (0x78 → 0x80,
+  0x80 → 0x88, 0x88 → 0x90) and +0xC (0x91 → 0x9D); fields of the inner object (0x280, 0x2A0,
+  0x70) are unchanged. Not hooked yet: it only matters together with the frame builder and its
+  return-address identities.
 - Open: 4.04 regression run of this build (the 4.04 path only changed from inline RVAs to the
   table with the same values).
