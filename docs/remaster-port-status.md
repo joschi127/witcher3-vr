@@ -174,6 +174,21 @@ See `remaster-porting-analysis.md` §6. In short:
   hook; the game calls the cutscene and global scene queries (result 0 in free roaming).
   `IsInGameplayScene` was not called on this route (on 4.04 mainly the mod scripts call it,
   which are not installed in the 5.01 test setup).
+- **5.01 is an AVX build** (VEX-encoded SSE instructions), so most functions are not
+  byte-identical even where the logic is unchanged; byte comparison only works for small
+  integer-only functions. **Camera object layout moved:** `GetCameraDirection` reads the
+  direction at +0x790 in 5.01 (4.04: +0x6C0, so +0xD0). The camera director list layout
+  (+0x58 entries, +0x60 count, stride 0x28) is unchanged. Every struct offset used on camera
+  objects therefore needs a 5.01 check.
+- `CameraDirector.GetCameraDirection` located at 5.01 RVA 0x023826F0 (registered script name;
+  both builds have an identical second copy 0x110 bytes later, the hooked one is the first in
+  both). The hook reads no camera fields, but **MinHook cannot hook it on 5.01**:
+  `MH_CreateHook` returns `MH_ERROR_UNSUPPORTED_FUNCTION`, because its disassembler (HDE64)
+  rejects VEX-prefixed instructions and the function has one at byte 4, inside the 5 bytes the
+  jump overwrites. This affects small leaf functions; the larger 5.01 candidates (frame data
+  factory, view rebuild, temporal writer, gameplay entry, head-bone getters, ...) start with
+  plain prologues. Options: patch the native-function registration instead of the code for
+  script natives, or teach the trampoline builder VEX instruction lengths. Left 4.04-only.
 - Still 4.04-only in the camera-authority installer: `GetTopmostCameraObject` (5.01 candidate
   0x023825D0, compiled differently but same director layout: +0x58 entries, +0x60 count,
   stride 0x28) and `EnableManualControl` (no 5.01 match for the 4.04 code or a setter touching
