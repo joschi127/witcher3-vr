@@ -136,4 +136,7 @@ See `remaster-porting-analysis.md` §6. In short:
   `GetCurrentReading`/`GetNextReading` → `IGameInputReading::GetGamepadState`). Verified: with a
   connected gamepad every reading goes through the hook and the game switches to gamepad prompts.
   Without a connected gamepad GameInput returns no readings, so 5.01 runs need a controller.
-  Open: the 4.04 smoke timings do not fit the longer 5.01 startup; a 5.01 recording is next.
+- 5.01 smoke script (`scripts/test-input/smoke-continue-remaster.txt`, derived from a manual
+  5.01 recording) runs unattended with a switched-on gamepad: intros, Continue, walk, camera
+  turn, Witcher Senses, game menu, then EXIT through the system menu (the game closes itself,
+  the `quit` fallback is not needed). Open: runs without a switched-on gamepad.
