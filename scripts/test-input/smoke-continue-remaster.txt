@@ -1,8 +1,9 @@
 # Smoke test for the Remaster (5.01): start, skip intros, Continue the latest save, walk, turn the
 # camera, Witcher Senses, open the game menu, quit through the BACK menu. Times are ms since the
-# first Present (see src/test_input_script.h). Derived from a manual gamepad recording on 5.01
-# with generous margins; loading times vary per machine. 5.01 reads the gamepad through
-# GameInput, so a physical gamepad must be switched on for the injected input to reach the game.
+# first Present (see src/test_input_script.h). Derived from a manual gamepad recording on 5.01 and
+# a calibration run with a capture every 2 s (main menu ready at ~24 s, about 12 s of loading after
+# Continue), with margins; loading times vary per machine. Works with or without a connected
+# gamepad: without one, the test mode reports a virtual GameInput gamepad.
 # Use with [test] input_script=<this file> in witcher3vr.ini (path relative to the game exe).
 # Each "capture" writes two consecutive frames to witcher3vr_captures\.
 
@@ -10,41 +11,41 @@
 15500 tap X            # skip intro part 1
 18500 tap X            # skip intro part 2
 22000 tap X            # skip intro part 3
-55000 tap A            # main menu: Continue (latest save)
+28000 tap A            # main menu: Continue (latest save)
 
-85000 capture          # loaded, standing
-86000 stick L 0 1      # walk forward
-89000 stick L 0 0
-90000 capture          # after walking
+48000 capture          # loaded, standing
+49000 stick L 0 1      # walk forward
+52000 stick L 0 0
+53000 capture          # after walking
 
-92000 stick R 0.6 0    # turn the camera
-93500 stick R 0 0
-94500 capture          # after turning
+55000 stick R 0.6 0    # turn the camera
+56500 stick R 0 0
+57500 capture          # after turning
 
-96000 trigger L 1      # hold LT: Witcher Senses
-98500 capture
-100000 trigger L 0
+59000 trigger L 1      # hold LT: Witcher Senses
+61500 capture
+63000 trigger L 0
 
-102000 tap START       # game menu (map, inventory, quests ...)
-105000 capture
-106000 tap B           # close the game menu
+65000 tap START       # game menu (map, inventory, quests ...)
+68000 capture
+69000 tap B           # close the game menu
 
-109000 tap BACK        # system menu, cursor on RESUME
-111000 capture
-112000 stick L 0 -1    # six flicks down: RESUME -> EXIT
-112150 stick L 0 0
-112400 stick L 0 -1
-112550 stick L 0 0
-112800 stick L 0 -1
-112950 stick L 0 0
-113200 stick L 0 -1
-113350 stick L 0 0
-113600 stick L 0 -1
-113750 stick L 0 0
-114000 stick L 0 -1
-114150 stick L 0 0
-115000 capture         # EXIT selected
-116000 tap A           # EXIT
-117500 tap A           # confirm
+72000 tap BACK        # system menu, cursor on RESUME
+74000 capture
+75000 stick L 0 -1    # six flicks down: RESUME -> EXIT
+75150 stick L 0 0
+75400 stick L 0 -1
+75550 stick L 0 0
+75800 stick L 0 -1
+75950 stick L 0 0
+76200 stick L 0 -1
+76350 stick L 0 0
+76600 stick L 0 -1
+76750 stick L 0 0
+77000 stick L 0 -1
+77150 stick L 0 0
+78000 capture         # EXIT selected
+79000 tap A           # EXIT
+80500 tap A           # confirm
 
-120000 quit            # fallback: close the game window
+83000 quit            # fallback: close the game window
