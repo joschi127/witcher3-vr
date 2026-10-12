@@ -252,3 +252,10 @@ Layout changes that block a direct port:
   projection (`native_stereo=1`). On 5.01 the engine itself applies the centre offset at
   view[0x130] when building the projection, so a first headset test should start with symmetric
   projection (`native_stereo=0`) and then compare.
+- Temporal writer located at 5.01 RVA 0x022BD750: same logic as 4.04 0x015E5A90 (writes the
+  centre/jitter block of two views, calling the view rebuild after each). It shows the 5.01 frame
+  layout: first view at frame+0x10 in both builds, second view at +0x5F0 instead of +0x520 (view
+  stride 0x510 → 0x5E0), centre blocks at +0x4D0/+0xAB0 instead of +0x410/+0x920. 5.01 calls it
+  from the frame builder once and from two other functions; render-scene setup no longer calls it,
+  so the 4.04 return-address list does not carry over. Frame-builder offsets (+0x420/+0x930,
+  +0x428/+0x938, +0x530, +0xA4C, +0x560) need to be re-derived with this stride.
