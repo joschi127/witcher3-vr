@@ -69,6 +69,16 @@ int main() {
                     addresses::signature(Build::Remaster501, function).size != 0,
                 "every 5.01 entry has an address and a signature");
         }
+        require(addresses::rva(Build::NextGen404, Function::FrameDataFactory) == 0x016214C0 &&
+                addresses::rva(Build::NextGen404, Function::SceneEnqueue) == 0x01621FC0,
+            "4.04 factory and enqueue keep their original RVAs");
+        require(addresses::value(Build::NextGen404,
+                    addresses::Value::RenderSchedulerGlobal) == 0x057F5930 &&
+                addresses::value(Build::NextGen404,
+                    addresses::Value::RenderContextSharedOffset) == 0x620,
+            "4.04 data values keep their original values");
+        require(addresses::value(Build::Unknown, addresses::Value::RenderSchedulerGlobal) == 0,
+            "no data values on unknown builds");
         require(addresses::rva(Build::Unknown, Function::IsAnyMenu) == 0,
             "no engine addresses on unknown builds");
         require(addresses::signature(Build::NextGen404, Function::IsAnyMenu).size == 0,

@@ -40958,6 +40958,13 @@ size_t copy_readable_scene_descriptor(
     return copied_bytes;
 }
 
+// Resolved with the factory hook. The second-eye duplicate is only allowed on
+// builds whose stereo path (descriptor size, view rebuild) has been ported. The
+// call goes to the function itself (through the scene-enqueue probe when that
+// diagnostic hook is installed).
+EngineSceneEnqueueFn g_engine_scene_enqueue_target{};
+bool g_engine_factory_duplicate_supported{};
+
 void* __fastcall hook_engine_frame_data_factory(void* render_context, void* render_settings, void* scene_descriptor) {
     w3vr::pipeline_flight::CpuScope flight_cpu{
         w3vr::pipeline_flight::Phase::FrameFactory};
@@ -41074,7 +41081,8 @@ void* __fastcall hook_engine_frame_data_factory(void* render_context, void* rend
     const bool mode3_aer_single_render =
         stereo_render_eligible && mode3_aer_presentation_active();
     bool duplicate_render =
-        stereo_render_eligible && !mode3_aer_single_render;
+        stereo_render_eligible && !mode3_aer_single_render &&
+        g_engine_factory_duplicate_supported;
     if (g_config.runtime_diagnostics && cinema_geometry_route) {
         const uint32_t diagnostic_index =
             g_cinema_factory_diagnostic_logs.fetch_add(
@@ -41391,9 +41399,7 @@ void* __fastcall hook_engine_frame_data_factory(void* render_context, void* rend
                     duplicate_asymmetric_tag,
                     *duplicate_factory_capture);
             }
-            constexpr uintptr_t kEngineSceneEnqueueRva = 0x01621FC0;
-            auto enqueue = reinterpret_cast<EngineSceneEnqueueFn>(module + kEngineSceneEnqueueRva);
-            enqueue(render_context, right_frame_data);
+            g_engine_scene_enqueue_target(render_context, right_frame_data);
 
             using ReleaseFrameDataFn = void(__fastcall*)(void*);
             auto* vtable = *reinterpret_cast<void***>(right_frame_data);
@@ -41434,11 +41440,20 @@ void* __fastcall hook_engine_frame_data_factory(void* render_context, void* rend
         if (result != nullptr) {
             ref_count = *reinterpret_cast<const uint32_t*>(static_cast<const uint8_t*>(result) + 8);
         }
-        if (render_context != nullptr) {
-            memcpy(&shared_render_context, static_cast<const uint8_t*>(render_context) + 0x620,
+        using w3vr::engine_addresses::Value;
+        const auto build = running_game_build();
+        const uintptr_t shared_offset =
+            w3vr::engine_addresses::value(build, Value::RenderContextSharedOffset);
+        const uintptr_t scheduler_rva =
+            w3vr::engine_addresses::value(build, Value::RenderSchedulerGlobal);
+        if (render_context != nullptr && shared_offset != 0) {
+            memcpy(&shared_render_context, static_cast<const uint8_t*>(render_context) + shared_offset,
                 sizeof(shared_render_context));
         }
-        memcpy(&render_scheduler, reinterpret_cast<const void*>(module + 0x057F5930), sizeof(render_scheduler));
+        if (scheduler_rva != 0) {
+            memcpy(&render_scheduler, reinterpret_cast<const void*>(module + scheduler_rva),
+                sizeof(render_scheduler));
+        }
         if (render_scheduler != nullptr) {
             memcpy(&scheduler_flags, static_cast<const uint8_t*>(render_scheduler) + 0x3C,
                 sizeof(scheduler_flags));
@@ -41458,10 +41473,10 @@ void* __fastcall hook_engine_frame_data_factory(void* render_context, void* rend
     return result;
 }
 
+// Per-build address table. On builds without full engine-hook support the
+// factory only passes through (no second-eye duplicate) until the rest of the
+// stereo path is ported.
 void install_engine_frame_factory_probe() {
-    if (!engine_build_supported()) {
-        return;
-    }
     if ((!g_config.engine_frame_factory_probe &&
             !g_config.engine_dual_render_probe &&
             !clean_mono_transport_active()) ||
@@ -41469,18 +41484,21 @@ void install_engine_frame_factory_probe() {
         return;
     }
 
-    constexpr uintptr_t kEngineFrameDataFactoryRva = 0x016214C0;
-    auto* module = reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr));
-    auto* target = module != nullptr ? module + kEngineFrameDataFactoryRva : nullptr;
-    if (target != nullptr &&
-        MH_CreateHook(target, reinterpret_cast<void*>(&hook_engine_frame_data_factory),
+    using w3vr::engine_addresses::Function;
+    auto* enqueue = engine_function_target(Function::SceneEnqueue);
+    auto* target = engine_function_target(Function::FrameDataFactory);
+    if (enqueue == nullptr || target == nullptr) {
+        return;
+    }
+    g_engine_scene_enqueue_target = reinterpret_cast<EngineSceneEnqueueFn>(enqueue);
+    g_engine_factory_duplicate_supported = engine_build_supported();
+    if (MH_CreateHook(target, reinterpret_cast<void*>(&hook_engine_frame_data_factory),
             reinterpret_cast<void**>(&g_engine_frame_data_factory)) == MH_OK &&
         MH_EnableHook(target) == MH_OK) {
-        log_line("Engine frame data factory probe hooked RVA=0x%llX target=%p",
-            static_cast<unsigned long long>(kEngineFrameDataFactoryRva), target);
+        log_line("Engine frame data factory probe hooked target=%p duplicate=%d", target,
+            g_engine_factory_duplicate_supported ? 1 : 0);
     } else {
-        log_line("Engine frame data factory probe hook failed RVA=0x%llX target=%p",
-            static_cast<unsigned long long>(kEngineFrameDataFactoryRva), target);
+        log_line("Engine frame data factory probe hook failed target=%p", target);
     }
 }
 

@@ -20,6 +20,8 @@ enum class Function : size_t {
     ActorIsInGameplayScene,       // native CActor.IsInGameplayScene (+0x2F3)
     ActorIsInNonGameplayCutscene, // native CActor.IsInNonGameplayCutscene (+0x2F2)
     GameIsPlayingNonGameplayScene,  // native theGame.IsCurrentlyPlayingNonGameplayScene
+    FrameDataFactory,  // builds a frame (render_context, render_settings, scene_descriptor)
+    SceneEnqueue,      // queues a frame as CRenderCommand_RenderScene (render_context, frame)
     Count,
 };
 
@@ -62,6 +64,18 @@ inline constexpr uint8_t kGameIsPlayingNonGameplaySceneBytes[] = {
     0x48, 0xFF, 0x42, 0x30, 0x4D, 0x85, 0xC0, 0x74, 0x0A, 0x0F, 0xB6, 0x81,
     0x1F, 0x01, 0x00, 0x00, 0x41, 0x88, 0x00, 0xC3};
 
+// Large functions differ between the builds (5.01 is an AVX build); their 5.01
+// entries carry the 5.01 prologue, which is unique in the 5.01 exe. The match
+// itself comes from the call graph: render-scene setup calls the factory, the
+// factory calls the view rebuild, and the enqueue is the only other function
+// that builds a CRenderCommand_RenderScene with the same logic.
+inline constexpr uint8_t kFrameDataFactory501Bytes[] = {
+    0x48, 0x89, 0x54, 0x24, 0x10, 0x55, 0x53, 0x57, 0x48, 0x8D, 0xAC, 0x24,
+    0xA0, 0x6C, 0xFF, 0xFF};
+inline constexpr uint8_t kSceneEnqueue501Bytes[] = {
+    0x48, 0x89, 0x5C, 0x24, 0x08, 0x57, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B,
+    0x05, 0x4F, 0xCF, 0x79};
+
 inline constexpr Entry kEntries[] = {
     {"IsAnyMenu", 0x01F3C5C0, 0x01DF41A0, {kIsAnyMenuBytes, sizeof(kIsAnyMenuBytes)}},
     {"IsLoadingScreenVideoPlaying", 0x0154EED0, 0x0227A0F0,
@@ -72,12 +86,48 @@ inline constexpr Entry kEntries[] = {
         {kActorIsInNonGameplayCutsceneBytes, sizeof(kActorIsInNonGameplayCutsceneBytes)}},
     {"Game.IsPlayingNonGameplayScene", 0x01549800, 0x022753C0,
         {kGameIsPlayingNonGameplaySceneBytes, sizeof(kGameIsPlayingNonGameplaySceneBytes)}},
+    {"FrameDataFactory", 0x016214C0, 0x022C0820,
+        {kFrameDataFactory501Bytes, sizeof(kFrameDataFactory501Bytes)}},
+    {"SceneEnqueue", 0x01621FC0, 0x022BE990,
+        {kSceneEnqueue501Bytes, sizeof(kSceneEnqueue501Bytes)}},
 };
 static_assert(sizeof(kEntries) / sizeof(kEntries[0]) ==
     static_cast<size_t>(Function::Count));
 
 constexpr const Entry& entry(Function function) {
     return kEntries[static_cast<size_t>(function)];
+}
+
+// Build-dependent data addresses and object layout values (0 = unknown).
+enum class Value : size_t {
+    RenderSchedulerGlobal,      // RVA of the render scheduler pointer (flags at +0x3C)
+    RenderContextSharedOffset,  // render context field passed on by the scene enqueue
+    Count,
+};
+
+struct ValueEntry {
+    const char* name;
+    uintptr_t next_gen_404;
+    uintptr_t remaster_501;
+};
+
+inline constexpr ValueEntry kValues[] = {
+    {"RenderSchedulerGlobal", 0x057F5930, 0x05A5B8F0},
+    {"RenderContextSharedOffset", 0x620, 0x5440},
+};
+static_assert(sizeof(kValues) / sizeof(kValues[0]) == static_cast<size_t>(Value::Count));
+
+constexpr uintptr_t value(game_build::Build build, Value which) {
+    const ValueEntry& entry = kValues[static_cast<size_t>(which)];
+    switch (build) {
+    case game_build::Build::NextGen404:
+        return entry.next_gen_404;
+    case game_build::Build::Remaster501:
+        return entry.remaster_501;
+    case game_build::Build::Unknown:
+        break;
+    }
+    return 0;
 }
 
 // RVA of |function| on |build|, or 0 when it is unknown there.

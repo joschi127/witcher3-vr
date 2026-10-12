@@ -204,3 +204,31 @@ See `remaster-porting-analysis.md` §6. In short:
   return-address identities.
 - 4.04 regression (commit `885c229`, flat mono smoke test): passed. All table-resolved hooks
   land on the original 4.04 addresses; the game calls all three scene queries there.
+
+### Third-person stereo core on 5.01 (mapping)
+The second eye comes from the frame-factory hook (calls the factory twice, enqueues the second
+frame itself); the view-rebuild hook sets the per-eye camera; gameplay entry maps frames to eyes on
+the render thread; render-scene setup paces pairs. Located through the call graph of both builds
+(Ghidra decompilation, local only) and the `CRenderCommand_RenderScene` / `CCustomCamera` RTTI:
+
+| Role | 4.04 | 5.01 | Evidence / layout notes |
+|---|---|---|---|
+| Render-scene setup | 0x01553070 | 0x0227D1F0 | calls the factory, builds a RenderScene command |
+| Frame-data factory | 0x016214C0 | 0x022C0820 | calls view rebuild, then the same wrapper |
+| Scene enqueue | 0x01621FC0 | 0x022BE990 | same logic; render-context field +0x620 → +0x5440, scheduler global 0x057F5930 → 0x05A5B8F0 |
+| View rebuild | 0x015FE550 | 0x02293240 | called from the factory |
+| Factory → view rebuild return | 0x0162196D | 0x022C101A | |
+| Wrapper → view rebuild return | 0x015FF863 | 0x02292EA7 | |
+| Gameplay entry → frame builder | 0x01D00260 → 0x01D86400 (return 0x01D002CF) | 0x01D0C570 → 0x01C1A210 (return 0x01D0C5E1) | task +0x8 frame, +0x10 extra unchanged |
+| `CCustomCamera` vtable (subobject +0x170) | 0x02D645B0 | 0x03810198 | RTTI complete-object locators |
+
+Layout changes that block a direct port:
+- Scene descriptor: the factory reads up to about +0xB765 in 4.04 (the mod copies 0xC000) and up
+  to about +0xF714 in 5.01. The second-eye copy size must grow accordingly (to be confirmed).
+- View array: indices 0x00–0xAB (position, angles, FOV, aspect, near/far, projection at 0x80,
+  basis at 0xA0/0xA4/0xA8) are used identically. **Centre offset and viewport moved from
+  view[0x100..0x103] to view[0x130..0x133]**; 5.01 uses 0x100–0x12F for matrix copies, so the
+  hook's writes to view[0x100]/[0x102] must not run unchanged on 5.01. view[0x11A] has a new
+  meaning as well.
+- The factory hook now resolves through the address table and runs on 5.01 as a pass-through
+  (no second-eye duplicate) until the view rebuild is ported.
