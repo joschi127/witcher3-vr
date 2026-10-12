@@ -56,6 +56,19 @@ int main() {
         require(addresses::rva(Build::Remaster501, Function::IsLoadingScreenVideoPlaying) ==
                 0x0227A0F0,
             "5.01 IsLoadingScreenVideoPlaying RVA");
+        require(addresses::rva(Build::NextGen404, Function::ActorIsInGameplayScene) ==
+                0x01C4CD70 &&
+                addresses::rva(Build::NextGen404, Function::ActorIsInNonGameplayCutscene) ==
+                0x01C4CD90 &&
+                addresses::rva(Build::NextGen404, Function::GameIsPlayingNonGameplayScene) ==
+                0x01549800,
+            "4.04 scene queries keep their original RVAs");
+        for (size_t i = 0; i < static_cast<size_t>(Function::Count); ++i) {
+            const auto function = static_cast<Function>(i);
+            require(addresses::rva(Build::Remaster501, function) != 0 &&
+                    addresses::signature(Build::Remaster501, function).size != 0,
+                "every 5.01 entry has an address and a signature");
+        }
         require(addresses::rva(Build::Unknown, Function::IsAnyMenu) == 0,
             "no engine addresses on unknown builds");
         require(addresses::signature(Build::NextGen404, Function::IsAnyMenu).size == 0,

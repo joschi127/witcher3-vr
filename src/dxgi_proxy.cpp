@@ -39386,11 +39386,23 @@ void __fastcall hook_engine_get_bone_world_matrix(
     }
 }
 
+// One line per native scene query on its first call, as proof that a hook
+// resolved through the address table is actually reached.
+void log_native_scene_query_first_call(
+    std::atomic<bool>& logged, const char* name, void* object, const uint8_t* result) {
+    if (!logged.exchange(true, std::memory_order_relaxed)) {
+        log_line("Native %s first call object=%p result=%d", name, object,
+            result != nullptr ? static_cast<int>(*result) : -1);
+    }
+}
+
 void __fastcall hook_engine_actor_is_in_gameplay_scene(
     void* player,
     void* stack,
     uint8_t* result) {
     g_engine_actor_is_in_gameplay_scene(player, stack, result);
+    static std::atomic<bool> logged{};
+    log_native_scene_query_first_call(logged, "Actor.IsInGameplayScene", player, result);
     if (player != nullptr) {
         g_engine_native_player.store(player, std::memory_order_release);
     }
@@ -39401,6 +39413,9 @@ void __fastcall hook_engine_actor_is_in_non_gameplay_cutscene(
     void* stack,
     uint8_t* result) {
     g_engine_actor_is_in_non_gameplay_cutscene(player, stack, result);
+    static std::atomic<bool> logged{};
+    log_native_scene_query_first_call(
+        logged, "Actor.IsInNonGameplayCutscene", player, result);
     if (player != nullptr) {
         g_engine_native_player.store(player, std::memory_order_release);
         if (g_native_head_pose_provider_completed) {
@@ -39444,6 +39459,9 @@ void __fastcall hook_engine_game_is_playing_non_gameplay_scene(
     void* stack,
     uint8_t* result) {
     g_engine_game_is_playing_non_gameplay_scene(game, stack, result);
+    static std::atomic<bool> logged{};
+    log_native_scene_query_first_call(
+        logged, "Game.IsCurrentlyPlayingNonGameplayScene", game, result);
     if (game != nullptr) {
         g_engine_native_game.store(game, std::memory_order_release);
     }
@@ -39783,24 +39801,16 @@ void install_engine_native_head_pose_hooks() {
         static_cast<unsigned long long>(kGetBoneWorldMatrixRva));
 }
 
+// The three scene queries resolve through the per-build address table and also
+// run on 5.01, where they and the flags read by
+// read_native_camera_authority_snapshot() (+0x2F3, +0x2F2, +0x11F) are
+// unchanged. The camera hooks below are not located on 5.01 yet.
 void install_engine_native_camera_authority_hooks() {
-    if (!engine_build_supported()) {
-        return;
-    }
-    auto* module = reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr));
-    if (module == nullptr) {
-        return;
-    }
-
-    constexpr uintptr_t kActorIsInGameplaySceneRva = 0x01C4CD70;
-    constexpr uintptr_t kActorIsInNonGameplayCutsceneRva = 0x01C4CD90;
-    constexpr uintptr_t kGameIsPlayingNonGameplaySceneRva = 0x01549800;
-    constexpr uintptr_t kCameraEnableManualControlRva = 0x01F580E0;
-    constexpr uintptr_t kTopmostCameraObjectRva = 0x0161B9C0;
-
+    using w3vr::engine_addresses::Function;
     auto* gameplay_scene_target =
-        module + kActorIsInGameplaySceneRva;
-    if (MH_CreateHook(
+        engine_function_target(Function::ActorIsInGameplayScene);
+    if (gameplay_scene_target == nullptr) {
+    } else if (MH_CreateHook(
             gameplay_scene_target,
             reinterpret_cast<void*>(
                 &hook_engine_actor_is_in_gameplay_scene),
@@ -39808,9 +39818,8 @@ void install_engine_native_camera_authority_hooks() {
                 &g_engine_actor_is_in_gameplay_scene)) == MH_OK &&
         MH_EnableHook(gameplay_scene_target) == MH_OK) {
         log_line(
-            "Hooked native Actor.IsInGameplayScene RVA=0x%llX",
-            static_cast<unsigned long long>(
-                kActorIsInGameplaySceneRva));
+            "Hooked native Actor.IsInGameplayScene target=%p",
+            gameplay_scene_target);
     } else {
         log_line(
             "Failed native Actor.IsInGameplayScene hook target=%p",
@@ -39818,8 +39827,9 @@ void install_engine_native_camera_authority_hooks() {
     }
 
     auto* non_gameplay_cutscene_target =
-        module + kActorIsInNonGameplayCutsceneRva;
-    if (MH_CreateHook(
+        engine_function_target(Function::ActorIsInNonGameplayCutscene);
+    if (non_gameplay_cutscene_target == nullptr) {
+    } else if (MH_CreateHook(
             non_gameplay_cutscene_target,
             reinterpret_cast<void*>(
                 &hook_engine_actor_is_in_non_gameplay_cutscene),
@@ -39827,9 +39837,8 @@ void install_engine_native_camera_authority_hooks() {
                 &g_engine_actor_is_in_non_gameplay_cutscene)) == MH_OK &&
         MH_EnableHook(non_gameplay_cutscene_target) == MH_OK) {
         log_line(
-            "Hooked native Actor.IsInNonGameplayCutscene RVA=0x%llX",
-            static_cast<unsigned long long>(
-                kActorIsInNonGameplayCutsceneRva));
+            "Hooked native Actor.IsInNonGameplayCutscene target=%p",
+            non_gameplay_cutscene_target);
     } else {
         log_line(
             "Failed native Actor.IsInNonGameplayCutscene hook target=%p",
@@ -39837,8 +39846,9 @@ void install_engine_native_camera_authority_hooks() {
     }
 
     auto* global_non_gameplay_target =
-        module + kGameIsPlayingNonGameplaySceneRva;
-    if (MH_CreateHook(
+        engine_function_target(Function::GameIsPlayingNonGameplayScene);
+    if (global_non_gameplay_target == nullptr) {
+    } else if (MH_CreateHook(
             global_non_gameplay_target,
             reinterpret_cast<void*>(
                 &hook_engine_game_is_playing_non_gameplay_scene),
@@ -39847,15 +39857,24 @@ void install_engine_native_camera_authority_hooks() {
         MH_EnableHook(global_non_gameplay_target) == MH_OK) {
         log_line(
             "Hooked native Game.IsCurrentlyPlayingNonGameplayScene "
-            "RVA=0x%llX",
-            static_cast<unsigned long long>(
-                kGameIsPlayingNonGameplaySceneRva));
+            "target=%p",
+            global_non_gameplay_target);
     } else {
         log_line(
             "Failed native Game.IsCurrentlyPlayingNonGameplayScene "
             "hook target=%p",
             global_non_gameplay_target);
     }
+
+    if (!engine_build_supported()) {
+        return;
+    }
+    auto* module = reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr));
+    if (module == nullptr) {
+        return;
+    }
+    constexpr uintptr_t kCameraEnableManualControlRva = 0x01F580E0;
+    constexpr uintptr_t kTopmostCameraObjectRva = 0x0161B9C0;
 
     auto* manual_control_target =
         module + kCameraEnableManualControlRva;

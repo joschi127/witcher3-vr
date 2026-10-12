@@ -17,6 +17,9 @@ namespace w3vr::engine_addresses {
 enum class Function : size_t {
     IsAnyMenu,                    // native theGame.IsAnyMenu (GUI manager)
     IsLoadingScreenVideoPlaying,  // native theGame.IsLoadingScreenVideoPlaying
+    ActorIsInGameplayScene,       // native CActor.IsInGameplayScene (+0x2F3)
+    ActorIsInNonGameplayCutscene, // native CActor.IsInNonGameplayCutscene (+0x2F2)
+    GameIsPlayingNonGameplayScene,  // native theGame.IsCurrentlyPlayingNonGameplayScene
     Count,
 };
 
@@ -47,10 +50,28 @@ inline constexpr uint8_t kIsLoadingScreenVideoPlayingBytes[] = {
     0x48, 0x85, 0xDB, 0x74, 0x30, 0x48, 0x8B, 0x4B, 0x38, 0x48, 0x85, 0xC9,
     0x74, 0x1D, 0x48, 0x8B, 0x01, 0xFF, 0x50, 0x18, 0x83, 0xF8, 0x02, 0x75};
 
+// Script-native bool getters: bump the stack code pointer, store one byte
+// flag of the object if a result is requested, return.
+inline constexpr uint8_t kActorIsInGameplaySceneBytes[] = {
+    0x48, 0xFF, 0x42, 0x30, 0x4D, 0x85, 0xC0, 0x74, 0x0A, 0x0F, 0xB6, 0x81,
+    0xF3, 0x02, 0x00, 0x00, 0x41, 0x88, 0x00, 0xC3};
+inline constexpr uint8_t kActorIsInNonGameplayCutsceneBytes[] = {
+    0x48, 0xFF, 0x42, 0x30, 0x4D, 0x85, 0xC0, 0x74, 0x0A, 0x0F, 0xB6, 0x81,
+    0xF2, 0x02, 0x00, 0x00, 0x41, 0x88, 0x00, 0xC3};
+inline constexpr uint8_t kGameIsPlayingNonGameplaySceneBytes[] = {
+    0x48, 0xFF, 0x42, 0x30, 0x4D, 0x85, 0xC0, 0x74, 0x0A, 0x0F, 0xB6, 0x81,
+    0x1F, 0x01, 0x00, 0x00, 0x41, 0x88, 0x00, 0xC3};
+
 inline constexpr Entry kEntries[] = {
     {"IsAnyMenu", 0x01F3C5C0, 0x01DF41A0, {kIsAnyMenuBytes, sizeof(kIsAnyMenuBytes)}},
     {"IsLoadingScreenVideoPlaying", 0x0154EED0, 0x0227A0F0,
         {kIsLoadingScreenVideoPlayingBytes, sizeof(kIsLoadingScreenVideoPlayingBytes)}},
+    {"Actor.IsInGameplayScene", 0x01C4CD70, 0x0210B410,
+        {kActorIsInGameplaySceneBytes, sizeof(kActorIsInGameplaySceneBytes)}},
+    {"Actor.IsInNonGameplayCutscene", 0x01C4CD90, 0x0210B430,
+        {kActorIsInNonGameplayCutsceneBytes, sizeof(kActorIsInNonGameplayCutsceneBytes)}},
+    {"Game.IsPlayingNonGameplayScene", 0x01549800, 0x022753C0,
+        {kGameIsPlayingNonGameplaySceneBytes, sizeof(kGameIsPlayingNonGameplaySceneBytes)}},
 };
 static_assert(sizeof(kEntries) / sizeof(kEntries[0]) ==
     static_cast<size_t>(Function::Count));

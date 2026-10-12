@@ -167,10 +167,16 @@ See `remaster-porting-analysis.md` §6. In short:
 - `IsLoadingScreenVideoPlaying` (5.01 RVA 0x0227A0F0, identical incl. the +0x198/+0x38/vtable
   +0x18 layout mirrored by `poll_engine_loading_screen_video_state()`): moved out of the
   camera-authority installer into its own installer.
-- Also unique and byte-identical in 5.01, not yet enabled: `Actor.IsInGameplayScene` 0x0210B410
-  (+0x2F3), `Actor.IsInNonGameplayCutscene` 0x0210B430 (+0x2F2),
-  `Game.IsPlayingNonGameplayScene` 0x022753C0 (+0x11F). `GetTopmostCameraObject` 0x023825D0 is
-  compiled differently but uses the same director layout (+0x58 entries, +0x60 count, stride
-  0x28). `EnableManualControl` is not located yet.
+- Scene queries, unique and byte-identical in 5.01, now resolved through the table:
+  `Actor.IsInGameplayScene` 0x0210B410 (+0x2F3), `Actor.IsInNonGameplayCutscene` 0x0210B430
+  (+0x2F2), `Game.IsCurrentlyPlayingNonGameplayScene` 0x022753C0 (+0x11F). The flags read by
+  `read_native_camera_authority_snapshot()` are the same offsets. Verified on 5.01: all three
+  hook; the game calls the cutscene and global scene queries (result 0 in free roaming).
+  `IsInGameplayScene` was not called on this route (on 4.04 mainly the mod scripts call it,
+  which are not installed in the 5.01 test setup).
+- Still 4.04-only in the camera-authority installer: `GetTopmostCameraObject` (5.01 candidate
+  0x023825D0, compiled differently but same director layout: +0x58 entries, +0x60 count,
+  stride 0x28) and `EnableManualControl` (no 5.01 match for the 4.04 code or a setter touching
+  +0x259; needs the structural comparison).
 - Open: 4.04 regression run of this build (the 4.04 path only changed from inline RVAs to the
   table with the same values).
