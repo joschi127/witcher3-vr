@@ -202,5 +202,5 @@ See `remaster-porting-analysis.md` §6. In short:
   0x80 → 0x88, 0x88 → 0x90) and +0xC (0x91 → 0x9D); fields of the inner object (0x280, 0x2A0,
   0x70) are unchanged. Not hooked yet: it only matters together with the frame builder and its
   return-address identities.
-- Open: 4.04 regression run of this build (the 4.04 path only changed from inline RVAs to the
-  table with the same values).
+- 4.04 regression (commit `885c229`, flat mono smoke test): passed. All table-resolved hooks
+  land on the original 4.04 addresses; the game calls all three scene queries there.
