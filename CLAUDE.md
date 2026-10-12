@@ -57,13 +57,20 @@ game folder. Add Defender exclusions for the build directory and the installed `
   Back up that file before running tests, or fix the test isolation (candidate upstream issue).
 - **Nothing tests compatibility with a real `witcher3.exe`.** A green `ctest` says nothing
   about whether hooks, offsets or shader hashes match a game build. That needs the smoke test
-  (planned: `scripts/smoke-test.ps1`: build, start game with diagnostic logging, ~60 s,
-  quit, evaluate `witcher3vr.log`, exit code) and finally a headset run by the user.
+  and finally a headset run by the user.
+- Smoke test: `scripts/smoke-test.ps1 -GameDirectory <bin\x64_dx12> [-Dll <built dxgi.dll>]`
+  installs the DLL and input script, points `[test]` in `witcher3vr.ini` at the script (restored
+  afterwards), starts the game, waits for it to exit, collects logs and captures under
+  `build\smoke-runs\<run>` and writes `summary.txt`. Exit code 0 = passed (script loaded, all
+  captures written, no hook failure, no timeout). Default script:
+  `scripts/test-input/smoke-continue-remaster.txt` (5.01, ~90 s); 4.04 uses `smoke-continue.txt`.
+  The run starts the real game, so it needs the user's go-ahead like any game start.
 - In-game test mode (`[test]` in `witcher3vr.ini`, logic in `src/test_input_script.h`):
   `record_input=1` records the physical gamepad to `witcher3vr-input-recording.txt`,
-  `input_script=<file>` replays a script (same format) through the XInput hook, also without
-  a controller, and its `quit` action closes the game window. Times are ms since the first
-  Present. Diagnostic census and inventory files from `[debug]` complement it.
+  `input_script=<file>` replays a script (same format) through the XInput hook (4.04) or
+  GameInput (5.01), also without a controller (5.01: virtual GameInput gamepad), and its `quit`
+  action closes the game window. Times are ms since the first Present. Diagnostic census and
+  inventory files from `[debug]` complement it.
 
 ## Launcher behaviour worth knowing
 
