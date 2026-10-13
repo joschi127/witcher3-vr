@@ -43,6 +43,7 @@
 #include "native_asymmetric_transport_policy.h"
 #include "optiscaler_jitter_policy.h"
 #include "pipeline_flight_recorder.h"
+#include "prefix_hook.h"
 #include "route_flight_recorder.h"
 #include "rt_ingress_join.h"
 #include "thread_stack_sampler.h"
@@ -40460,6 +40461,13 @@ void __fastcall hook_engine_camera_direction(void* camera, void* stack, float* r
             camera, std::memory_order_release);
     }
     g_engine_camera_direction(camera, stack, result);
+    static std::atomic<bool> first_call_logged{};
+    if (g_config.runtime_diagnostics && result != nullptr &&
+        !first_call_logged.exchange(true, std::memory_order_relaxed)) {
+        log_line("CameraDirector.GetCameraDirection first call director=%p "
+            "direction=%.4f,%.4f,%.4f",
+            camera, result[0], result[1], result[2]);
+    }
     if (result == nullptr || !g_config.hmd_freelook ||
         g_force_mono_cinema.load(std::memory_order_acquire) ||
         !g_engine_hmd_forward_valid.load()) {
@@ -40498,23 +40506,35 @@ void __fastcall hook_engine_camera_direction(void* camera, void* stack, float* r
     }
 }
 
+// 5.01 starts this leaf function with VEX instructions that MinHook cannot
+// relocate; its verified 20-byte prefix goes through prefix_hook instead.
 void install_engine_camera_direction_hook() {
-    if (!engine_build_supported()) {
-        return;
-    }
     if (!g_config.hmd_freelook || g_engine_camera_direction != nullptr) {
         return;
     }
-    constexpr uintptr_t kEngineCameraDirectionRva = 0x0161BBC0;
-    auto* module = reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr));
-    auto* target = module != nullptr ? module + kEngineCameraDirectionRva : nullptr;
-    if (target != nullptr &&
-        MH_CreateHook(target, reinterpret_cast<void*>(&hook_engine_camera_direction),
-            reinterpret_cast<void**>(&g_engine_camera_direction)) == MH_OK &&
-        MH_EnableHook(target) == MH_OK) {
-        log_line("Hooked CameraDirector.GetCameraDirection RVA=0x%llX target=%p",
-            static_cast<unsigned long long>(kEngineCameraDirectionRva), target);
+    using w3vr::engine_addresses::Function;
+    auto* target = engine_function_target(Function::CameraDirection);
+    if (target == nullptr) {
+        return;
+    }
+    const auto prefix = w3vr::engine_addresses::signature(
+        running_game_build(), Function::CameraDirection);
+    bool hooked{};
+    if (prefix.size != 0) {
+        hooked = w3vr::prefix_hook::install(target, prefix.size,
+            reinterpret_cast<void*>(&hook_engine_camera_direction),
+            reinterpret_cast<void**>(&g_engine_camera_direction));
     } else {
+        hooked = MH_CreateHook(target,
+                reinterpret_cast<void*>(&hook_engine_camera_direction),
+                reinterpret_cast<void**>(&g_engine_camera_direction)) == MH_OK &&
+            MH_EnableHook(target) == MH_OK;
+    }
+    if (hooked) {
+        log_line("Hooked CameraDirector.GetCameraDirection target=%p prefix_hook=%u",
+            target, prefix.size != 0 ? 1u : 0u);
+    } else {
+        g_engine_camera_direction = nullptr;
         log_line("Failed CameraDirector.GetCameraDirection hook target=%p", target);
     }
 }

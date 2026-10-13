@@ -28,6 +28,7 @@ enum class Function : size_t {
     RenderSceneSetup,  // per-tick scene setup; calls the frame factory
     FrameBuilder,      // render-thread frame build (render_context, frame, extra)
     CameraEnableManualControl,  // native CCustomCamera.EnableManualControl
+    CameraDirection,   // native CCameraDirector.GetCameraDirection (first of two copies)
     Count,
 };
 
@@ -108,6 +109,13 @@ inline constexpr uint8_t kCameraEnableManualControl501Bytes[] = {
     0x48, 0x89, 0x5C, 0x24, 0x10, 0x57, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B,
     0x42, 0x30, 0x4C, 0x8D, 0x0D, 0x5B, 0x82, 0xC6, 0x03, 0x48, 0x8B, 0xD9};
 
+// Leaf function: inc [rdx+0x30]; vmovss xmm0/1/2, [rcx+0x790/0x794/0x798].
+// The signature is exactly the 20-byte prefix the 5.01 prefix hook relocates
+// (whole, position-independent instructions; the only branch targets ret).
+inline constexpr uint8_t kCameraDirection501Bytes[] = {
+    0x48, 0xFF, 0x42, 0x30, 0xC5, 0xFA, 0x10, 0x81, 0x90, 0x07, 0x00, 0x00,
+    0xC5, 0xFA, 0x10, 0x89, 0x94, 0x07, 0x00, 0x00};
+
 inline constexpr Entry kEntries[] = {
     {"IsAnyMenu", 0x01F3C5C0, 0x01DF41A0, {kIsAnyMenuBytes, sizeof(kIsAnyMenuBytes)}},
     {"IsLoadingScreenVideoPlaying", 0x0154EED0, 0x0227A0F0,
@@ -134,6 +142,8 @@ inline constexpr Entry kEntries[] = {
         {kFrameBuilder501Bytes, sizeof(kFrameBuilder501Bytes)}},
     {"CustomCamera.EnableManualControl", 0x01F580E0, 0x01E0D800,
         {kCameraEnableManualControl501Bytes, sizeof(kCameraEnableManualControl501Bytes)}},
+    {"CameraDirector.GetCameraDirection", 0x0161BBC0, 0x023826F0,
+        {kCameraDirection501Bytes, sizeof(kCameraDirection501Bytes)}},
 };
 static_assert(sizeof(kEntries) / sizeof(kEntries[0]) ==
     static_cast<size_t>(Function::Count));

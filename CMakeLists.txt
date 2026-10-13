@@ -284,6 +284,15 @@ if(BUILD_TESTING)
         COMMAND w3vr_test_input_script_tests
     )
 
+    add_executable(w3vr_prefix_hook_tests
+        tests/prefix_hook_tests.cpp
+    )
+    target_include_directories(w3vr_prefix_hook_tests PRIVATE src)
+    add_test(
+        NAME prefix_hook
+        COMMAND w3vr_prefix_hook_tests
+    )
+
     add_executable(w3vr_camera_follow_policy_tests
         tests/camera_follow_policy_tests.cpp
     )
