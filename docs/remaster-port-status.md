@@ -305,3 +305,31 @@ Layout changes that block a direct port:
 - Not yet run with these changes: 4.04 regression (the 4.04 paths are unchanged by design:
   early hook and root-signature extension are 5.01-only, the smoke retry limit only matters when
   creation fails).
+
+### Further 5.01 ports (verified with the null HMD unless noted)
+- Frame builder (5.01 0x01C1A210, called from the gameplay entry, return 0x01D0C5E1) and the frame
+  offsets its helpers read, all in the address table: secondary view core +0x600, centre/extent
+  blocks +0x4E0/+0xAC0 (+8), input extent +0xBEC, camera transform +0x630. The builder reads the
+  input extent at +0xBEC (4.04 +0xA4C) and passes frame+0x10 to the temporal writer, which writes
+  +0x4D0/+0xAB0 relative to it. Enables the cinema/Full VR final-frame camera; not exercised by the
+  smoke route (no cutscene). The native asymmetric route stays 4.04-only (temporal writer hook).
+- `CCustomCamera.EnableManualControl` (5.01 0x01E0D800): the setter stores the flag at +0x269
+  (4.04 +0x259) and copies the float pairs at +0x258/+0x260 (4.04 +0x248/+0x250). The camera
+  authority snapshot reads the director's top camera with the same table offset, but that pointer
+  carries the +0x170 subobject vtable, so its `top_manual` value is diagnostic only.
+- `GetCameraDirection` (5.01 0x023826F0) through `src/prefix_hook.h`: relocates the verified 20-byte
+  prefix (inc [rdx+0x30]; vmovss x2) that MinHook cannot decode. Called in gameplay, returns a unit
+  direction.
+- Viewport resolution (5.01 0x0228F3B0, same signature and logic; the DXGI desktop-size part moved
+  into 0x0228E230): `render_width/height` now set the game's render size on 5.01.
+- HUD composite: runtime pair VS 2668F02C9B6C7FDD / PS 0816B1C02F3BAF8B (the offline matcher had
+  picked another VS). The 5.01 PS adds a colour-blindness filter on the scene colour
+  (CustomPixelConsts row 17: mode .x, strength .w, active when .w > 0), otherwise it is the 4.04
+  composite the replacement HLSL mirrors. Verified: per-eye HUD variants are created and the HUD
+  shifts by ±36 px between the eyes.
+- 5.01 anti-aliasing options (`user_config_matrix/pc/graphics.xml`): `AAMode` 0 off, 1 FXAA,
+  5 FSR, 6 DLSS, 7 XeSS. VR baseline on 5.01: FXAA.
+- The HUD frame scale is written to `dx12user.settings` only inside `witcher3.exe` (ctest no
+  longer touches the user's settings).
+- VDXR with the user's Virtual Desktop settings reports symmetric eye FOVs (centres 0.5/0.5), so the
+  first headset run can use `native_stereo=0` without losing the optical centre.
