@@ -26,6 +26,7 @@ enum class Function : size_t {
     ViewRebuild,       // rebuilds a view's matrices from its inputs (float* view)
     GameplayEntry,     // render-thread gameplay frame task; calls the frame builder
     RenderSceneSetup,  // per-tick scene setup; calls the frame factory
+    FrameBuilder,      // render-thread frame build (render_context, frame, extra)
     Count,
 };
 
@@ -95,6 +96,12 @@ inline constexpr uint8_t kRenderSceneSetup501Bytes[] = {
     0x40, 0x55, 0x57, 0x48, 0x8D, 0xAC, 0x24, 0x98, 0x08, 0xFF, 0xFF, 0xB8,
     0x68, 0xF8, 0x00, 0x00};
 
+// Called from the gameplay entry (return 0x01D0C5E1 on 5.01); passes
+// frame+0x10 and the input extent at +0xBEC to the temporal writer.
+inline constexpr uint8_t kFrameBuilder501Bytes[] = {
+    0x48, 0x8B, 0xC4, 0x48, 0x89, 0x50, 0x10, 0x55, 0x53, 0x56, 0x41, 0x54,
+    0x41, 0x55, 0x41, 0x56};
+
 inline constexpr Entry kEntries[] = {
     {"IsAnyMenu", 0x01F3C5C0, 0x01DF41A0, {kIsAnyMenuBytes, sizeof(kIsAnyMenuBytes)}},
     {"IsLoadingScreenVideoPlaying", 0x0154EED0, 0x0227A0F0,
@@ -117,6 +124,8 @@ inline constexpr Entry kEntries[] = {
         {kGameplayEntry501Bytes, sizeof(kGameplayEntry501Bytes)}},
     {"RenderSceneSetup", 0x01553070, 0x0227D1F0,
         {kRenderSceneSetup501Bytes, sizeof(kRenderSceneSetup501Bytes)}},
+    {"FrameBuilder", 0x01D86400, 0x01C1A210,
+        {kFrameBuilder501Bytes, sizeof(kFrameBuilder501Bytes)}},
 };
 static_assert(sizeof(kEntries) / sizeof(kEntries[0]) ==
     static_cast<size_t>(Function::Count));
@@ -135,6 +144,15 @@ enum class Value : size_t {
     ViewCopyRebuildReturn,      // return address of the view rebuild call in the copy wrapper
     SceneDescriptorBytes,       // bytes of the stack scene descriptor copied for the second eye
     SceneDescriptorMinimumBytes,  // copy fails below this many readable bytes
+    GameplayFrameBuilderReturn,   // return address of the frame-builder call in the gameplay entry
+    // Frame data built by the factory: two views (core at +0x20 and the
+    // secondary offset, stride 0x510 on 4.04 and 0x5E0 on 5.01), each with a
+    // centre offset x, y and extent w, h block, then the input extent.
+    FrameSecondaryViewOffset,     // secondary view core (primary core is +0x20)
+    FramePrimaryCentreOffset,     // primary centre x, y; extent w, h follows at +8
+    FrameSecondaryCentreOffset,   // secondary centre x, y; extent w, h follows at +8
+    FrameInputExtentOffset,       // render input width, height
+    FrameCameraTransformOffset,   // camera transform (row 3 = position); diagnostics only
     Count,
 };
 
@@ -154,6 +172,15 @@ inline constexpr ValueEntry kValues[] = {
     // The factory reads up to about +0xB765 (4.04) and +0xF714 (5.01).
     {"SceneDescriptorBytes", 0xC000, 0x10000},
     {"SceneDescriptorMinimumBytes", 0xB000, 0xF800},
+    {"GameplayFrameBuilderReturn", 0x01D002CF, 0x01D0C5E1},
+    // 5.01 values follow the view stride (+0xD0 per view) and match the
+    // temporal writer (frame+0x10 +0x4D0/+0xAB0) and the builder (+0xBEC).
+    {"FrameSecondaryViewOffset", 0x530, 0x600},
+    {"FramePrimaryCentreOffset", 0x420, 0x4E0},
+    {"FrameSecondaryCentreOffset", 0x930, 0xAC0},
+    {"FrameInputExtentOffset", 0xA4C, 0xBEC},
+    // Secondary view +0x30 (view floats 0x0C-0x1B, unchanged below 0xAC).
+    {"FrameCameraTransformOffset", 0x560, 0x630},
 };
 static_assert(sizeof(kValues) / sizeof(kValues[0]) == static_cast<size_t>(Value::Count));
 

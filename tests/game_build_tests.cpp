@@ -96,6 +96,20 @@ int main() {
                 addresses::value(Build::NextGen404,
                     addresses::Value::SceneDescriptorMinimumBytes) == 0xB000,
             "4.04 stereo-path values keep their original values");
+        require(addresses::rva(Build::NextGen404, Function::FrameBuilder) == 0x01D86400 &&
+                addresses::value(Build::NextGen404,
+                    addresses::Value::GameplayFrameBuilderReturn) == 0x01D002CF &&
+                addresses::value(Build::NextGen404,
+                    addresses::Value::FrameSecondaryViewOffset) == 0x530 &&
+                addresses::value(Build::NextGen404,
+                    addresses::Value::FramePrimaryCentreOffset) == 0x420 &&
+                addresses::value(Build::NextGen404,
+                    addresses::Value::FrameSecondaryCentreOffset) == 0x930 &&
+                addresses::value(Build::NextGen404,
+                    addresses::Value::FrameInputExtentOffset) == 0xA4C &&
+                addresses::value(Build::NextGen404,
+                    addresses::Value::FrameCameraTransformOffset) == 0x560,
+            "4.04 frame-builder values keep their original values");
         for (size_t i = 0; i < static_cast<size_t>(addresses::Value::Count); ++i) {
             require(addresses::value(Build::Remaster501, static_cast<addresses::Value>(i)) != 0,
                 "every 5.01 value is known");

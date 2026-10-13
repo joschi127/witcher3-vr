@@ -30424,6 +30424,12 @@ size_t engine_view_centre() {
     return index != 0 ? index : 0x100;
 }
 
+// Frame-data layout value on the running build (0 = unknown there).
+size_t engine_frame_offset(w3vr::engine_addresses::Value which) {
+    return static_cast<size_t>(
+        w3vr::engine_addresses::value(running_game_build(), which));
+}
+
 // Target of |function| on the running build, or nullptr when its address is
 // unknown there or the code at that address is not the expected one. Hooks
 // resolved this way may run on builds without full engine-hook support.
@@ -31781,18 +31787,23 @@ bool verify_native_asymmetric_frame_writer_state(
     uint32_t secondary_extent[2]{};
     float primary_core[11]{};
     float secondary_core[11]{};
+    const size_t primary_centre =
+        engine_frame_offset(w3vr::engine_addresses::Value::FramePrimaryCentreOffset);
+    const size_t secondary_centre =
+        engine_frame_offset(w3vr::engine_addresses::Value::FrameSecondaryCentreOffset);
     if (!safe_copy_asymmetric_authority(
-            frame + 0x420, primary_center, sizeof(primary_center)) ||
+            frame + primary_centre, primary_center, sizeof(primary_center)) ||
         !safe_copy_asymmetric_authority(
-            frame + 0x930, secondary_center, sizeof(secondary_center)) ||
+            frame + secondary_centre, secondary_center, sizeof(secondary_center)) ||
         !safe_copy_asymmetric_authority(
-            frame + 0x428, primary_extent, sizeof(primary_extent)) ||
+            frame + primary_centre + 8, primary_extent, sizeof(primary_extent)) ||
         !safe_copy_asymmetric_authority(
-            frame + 0x938, secondary_extent, sizeof(secondary_extent)) ||
+            frame + secondary_centre + 8, secondary_extent, sizeof(secondary_extent)) ||
         !safe_copy_asymmetric_authority(
             frame + 0x20, primary_core, sizeof(primary_core)) ||
         !safe_copy_asymmetric_authority(
-            frame + 0x530, secondary_core, sizeof(secondary_core))) {
+            frame + engine_frame_offset(w3vr::engine_addresses::Value::FrameSecondaryViewOffset),
+            secondary_core, sizeof(secondary_core))) {
         return false;
     }
     const bool center_and_extent_match =
@@ -31828,9 +31839,11 @@ bool native_asymmetric_frame_centers_are_zero(void* frame_data) {
     float primary_center[2]{};
     float secondary_center[2]{};
     if (!safe_copy_asymmetric_authority(
-            frame + 0x420, primary_center, sizeof(primary_center)) ||
+            frame + engine_frame_offset(w3vr::engine_addresses::Value::FramePrimaryCentreOffset),
+            primary_center, sizeof(primary_center)) ||
         !safe_copy_asymmetric_authority(
-            frame + 0x930, secondary_center, sizeof(secondary_center))) {
+            frame + engine_frame_offset(w3vr::engine_addresses::Value::FrameSecondaryCentreOffset),
+            secondary_center, sizeof(secondary_center))) {
         return false;
     }
     for (const float center : {
@@ -31856,7 +31869,8 @@ bool verify_native_asymmetric_frame_projection(
     if (!safe_copy_asymmetric_authority(
             frame + 0x20, primary_core, sizeof(primary_core)) ||
         !safe_copy_asymmetric_authority(
-            frame + 0x530, secondary_core, sizeof(secondary_core))) {
+            frame + engine_frame_offset(w3vr::engine_addresses::Value::FrameSecondaryViewOffset),
+            secondary_core, sizeof(secondary_core))) {
         return false;
     }
     return std::isfinite(primary_core[7]) &&
@@ -31871,8 +31885,16 @@ bool verify_native_asymmetric_frame_projection(
         std::fabs(secondary_core[10] - expected_projection.aspect) <= 0.000001f;
 }
 
+uintptr_t gameplay_frame_builder_return_rva() {
+    static const uintptr_t rva = w3vr::engine_addresses::value(
+        running_game_build(),
+        w3vr::engine_addresses::Value::GameplayFrameBuilderReturn);
+    return rva;
+}
+
 void __fastcall hook_engine_frame_builder(void* render_context, void* frame_data, void* extra) {
-    constexpr uintptr_t kGameplayFrameBuilderCallerRva = 0x01D002CF;
+    const uintptr_t kGameplayFrameBuilderCallerRva =
+        gameplay_frame_builder_return_rva();
     const auto present = g_present_count.load();
     const auto module = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
     const auto return_address = reinterpret_cast<uintptr_t>(_ReturnAddress());
@@ -32067,8 +32089,16 @@ void __fastcall hook_engine_frame_builder(void* render_context, void* frame_data
             const auto* bytes = static_cast<const uint8_t*>(frame_data);
             uint32_t dimensions[4]{};
             float camera_translation[3]{};
-            memcpy(dimensions, bytes + 0xA4C, sizeof(dimensions));
-            memcpy(camera_translation, bytes + 0x560 + 12 * sizeof(float), sizeof(camera_translation));
+            memcpy(dimensions,
+                bytes + engine_frame_offset(w3vr::engine_addresses::Value::FrameInputExtentOffset),
+                sizeof(dimensions));
+            const size_t camera_transform =
+                engine_frame_offset(w3vr::engine_addresses::Value::FrameCameraTransformOffset);
+            if (camera_transform != 0) {
+                memcpy(camera_translation,
+                    bytes + camera_transform + 12 * sizeof(float),
+                    sizeof(camera_translation));
+            }
             log_line(
                 "Engine frame builder present=%llu caller_rva=0x%llX context=%p frame=%p extra=%p dims=%u,%u,%u,%u camera=%.4f,%.4f,%.4f",
                 static_cast<unsigned long long>(present),
@@ -32090,10 +32120,14 @@ void __fastcall hook_engine_frame_builder(void* render_context, void* frame_data
         caller_rva == kGameplayFrameBuilderCallerRva &&
         g_config.openxr_mode == 3 &&
         (g_present_count.load() & 1ull) != 0 &&
-        g_config.engine_native_stereo_offset != 0.0f) {
+        g_config.engine_native_stereo_offset != 0.0f &&
+        engine_frame_offset(w3vr::engine_addresses::Value::FrameCameraTransformOffset) != 0) {
         __try {
             // The fourth row of this engine camera transform contains its world position.
-            auto* camera_x = reinterpret_cast<float*>(static_cast<uint8_t*>(frame_data) + 0x590);
+            auto* camera_x = reinterpret_cast<float*>(
+                static_cast<uint8_t*>(frame_data) +
+                engine_frame_offset(w3vr::engine_addresses::Value::FrameCameraTransformOffset) +
+                12 * sizeof(float));
             saved_camera_x = *camera_x;
             *camera_x += g_config.engine_native_stereo_offset;
             native_stereo_applied = true;
@@ -32144,7 +32178,8 @@ void __fastcall hook_engine_frame_builder(void* render_context, void* frame_data
     if (native_asymmetric_frame_candidate) {
         uint32_t frame_extent[4]{};
         const bool frame_extent_valid = safe_copy_asymmetric_authority(
-            static_cast<const uint8_t*>(frame_data) + 0xA4C,
+            static_cast<const uint8_t*>(frame_data) +
+                engine_frame_offset(w3vr::engine_addresses::Value::FrameInputExtentOffset),
             frame_extent, sizeof(frame_extent)) &&
             frame_extent[0] > 0 && frame_extent[1] > 0 &&
             frame_extent[0] <= 16384 && frame_extent[1] <= 16384;
@@ -32348,7 +32383,10 @@ void __fastcall hook_engine_frame_builder(void* render_context, void* frame_data
 
     if (native_stereo_applied) {
         __try {
-            *reinterpret_cast<float*>(static_cast<uint8_t*>(frame_data) + 0x590) = saved_camera_x;
+            *reinterpret_cast<float*>(
+                static_cast<uint8_t*>(frame_data) +
+                engine_frame_offset(w3vr::engine_addresses::Value::FrameCameraTransformOffset) +
+                12 * sizeof(float)) = saved_camera_x;
         } __except (EXCEPTION_EXECUTE_HANDLER) {
             log_line("Engine native stereo restore fault frame=%p", frame_data);
         }
@@ -32369,9 +32407,6 @@ void __fastcall hook_engine_frame_builder(void* render_context, void* frame_data
 }
 
 void install_engine_frame_builder_probe() {
-    if (!engine_build_supported()) {
-        return;
-    }
     const bool cinema_frame_camera_needed =
         (std::isfinite(g_config.cinema_aspect_ratio) &&
             g_config.cinema_aspect_ratio > 1.0f) ||
@@ -32383,18 +32418,17 @@ void install_engine_frame_builder_probe() {
         return;
     }
 
-    constexpr uintptr_t kEngineFrameBuilderRva = 0x01D86400;
-    auto* module = reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr));
-    auto* target = module != nullptr ? module + kEngineFrameBuilderRva : nullptr;
-    if (target != nullptr &&
-        MH_CreateHook(target, reinterpret_cast<void*>(&hook_engine_frame_builder),
+    auto* target =
+        engine_function_target(w3vr::engine_addresses::Function::FrameBuilder);
+    if (target == nullptr) {
+        return;
+    }
+    if (MH_CreateHook(target, reinterpret_cast<void*>(&hook_engine_frame_builder),
             reinterpret_cast<void**>(&g_engine_frame_builder)) == MH_OK &&
         MH_EnableHook(target) == MH_OK) {
-        log_line("Engine frame builder probe hooked RVA=0x%llX target=%p",
-            static_cast<unsigned long long>(kEngineFrameBuilderRva), target);
+        log_line("Engine frame builder probe hooked target=%p", target);
     } else {
-        log_line("Engine frame builder probe hook failed RVA=0x%llX target=%p",
-            static_cast<unsigned long long>(kEngineFrameBuilderRva), target);
+        log_line("Engine frame builder probe hook failed target=%p", target);
     }
 }
 
@@ -34064,12 +34098,14 @@ bool capture_asymmetric_frame_factory(
     candidate.tag = tag;
     auto* frame = static_cast<uint8_t*>(frame_data);
     candidate.extent_valid = safe_copy_asymmetric_authority(
-        frame + 0xA4C, candidate.frame_extent.data(),
+        frame + engine_frame_offset(w3vr::engine_addresses::Value::FrameInputExtentOffset),
+        candidate.frame_extent.data(),
         sizeof(candidate.frame_extent));
     candidate.primary_valid = read_asymmetric_descriptor_snapshot(
         frame + 0x20, candidate.primary);
     candidate.secondary_valid = read_asymmetric_descriptor_snapshot(
-        frame + 0x530, candidate.secondary);
+        frame + engine_frame_offset(w3vr::engine_addresses::Value::FrameSecondaryViewOffset),
+        candidate.secondary);
     const auto* scene = static_cast<const uint8_t*>(scene_descriptor);
     candidate.scene_primary_valid = scene != nullptr &&
         read_asymmetric_descriptor_snapshot(
@@ -34168,7 +34204,8 @@ void emit_asymmetric_frame_factory(
         capture.scene_descriptor, capture.frame_data,
         static_cast<uint8_t*>(capture.frame_data) + 0x10,
         static_cast<uint8_t*>(capture.frame_data) + 0x20,
-        static_cast<uint8_t*>(capture.frame_data) + 0x530,
+        static_cast<uint8_t*>(capture.frame_data) +
+            engine_frame_offset(w3vr::engine_addresses::Value::FrameSecondaryViewOffset),
         capture.extent_valid ? 1u : 0u,
         frame_extent[0], frame_extent[1], frame_extent[2], frame_extent[3],
         render_width, render_height,
