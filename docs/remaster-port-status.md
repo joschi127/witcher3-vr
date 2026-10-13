@@ -276,6 +276,11 @@ Layout changes that block a direct port:
   `openxr.hmd_roll_scale=0` in these runs, otherwise the scene renders upside down.
 - Nothing about the headset path is covered (lenses, real tracking, Pico/VDXR specifics), but the
   complete mod pipeline runs: dual render, pair barrier, OpenXR submission, HUD/smoke routes.
+  Successful `xrEndFrame` calls alone do not prove that images were submitted: check the
+  `OpenXR layer transition` lines (and the null driver's "Headset Window"). The null HMD also
+  enters standby after a few seconds without motion (session drops to SYNCHRONIZED); set
+  `power.pauseCompositorOnStandby=false` and a long `power.turnOffScreensTimeout`. SteamVR reports
+  every null-HMD frame as dropped on both builds; that counter is meaningless there.
 
 ### First dual render on 5.01 (Mode 3, symmetric projection)
 - Verified unattended (smoke script, null HMD, `native_stereo=0`): the dual render starts, both
@@ -338,3 +343,18 @@ Layout changes that block a direct port:
   configuration (TAAU, `native_stereo=1`, 1748x1468) passed as well: dual render, smoke projection
   PSOs and per-eye HUD PSOs created, 3 timed-out pairs, Present pacing ~11 ms. The 5.01-only
   paths (early CreateRootSignature hook, root-signature extension) stay inactive on 4.04.
+
+### First headset run on 5.01 (Pico 4, Virtual Desktop) and fixes
+- Run 1 (`33ae4d2`): session FOCUSED, but the headset stayed black. At startup 5.01 briefly
+  presents an R10G10B10A2 backbuffer; the menu/panel projection path copied it into the RGBA8
+  swapchain, the D3D12 debug layer rejects that copy, the XR command list failed to close and was
+  never usable again, so no later frame carried a layer. The earlier null-HMD runs had the same
+  failure (layer `none` after present 3). Fixed in `dd02d89` (format-family guard on the direct
+  copy, recreate the list after a failed close; `[debug] d3d12_debug_layer=1` logs the debug
+  layer's errors).
+- Then both headset eyes flickered in gameplay (steady in menus and on the map), confirmed in the
+  null-HMD headset view on 5.01 and absent on 4.04. Cause: `temporal_backend=taau` made the packed
+  pair promotion wait for TAAU submissions that 5.01 never produces, so both eyes were fed from the
+  alternating backbuffer. Fixed in `4ad8fbd` (5.01 forces the No-AA route). Null-HMD view: steady,
+  one image per eye.
+- The menu panel appears upside down in the null-HMD view only (180° roll of the null driver).
