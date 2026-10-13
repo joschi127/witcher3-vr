@@ -45,6 +45,7 @@
 #include "pipeline_flight_recorder.h"
 #include "route_flight_recorder.h"
 #include "rt_ingress_join.h"
+#include "thread_stack_sampler.h"
 #include "shadow_cascade_authority_policy.h"
 #include "smoke_eye_authority_policy.h"
 #include "taau_submission_policy.h"
@@ -718,6 +719,9 @@ struct Config {
     // Lightweight route-only event recorder. It is independently enabled by
     // INI and F3 is the only operation which writes its file.
     bool route_flight_recorder{false};
+    // Diagnostic stack sampler for the REDengine render worker; its report is
+    // written by the test-mode flight_dump action.
+    bool thread_stack_sampler{false};
     // Optional in-process RenderDoc integration. This is deliberately
     // independent from Diagnostic Logging and defaults off so an adjacent
     // renderdoc.dll can remain installed without touching the render path.
@@ -14687,6 +14691,8 @@ void load_config() {
             "debug", "pipeline_flight_recorder", false);
         g_config.route_flight_recorder = read_ini_bool(
             "debug", "route_flight_recorder", false);
+        g_config.thread_stack_sampler = read_ini_bool(
+            "debug", "thread_stack_sampler", false);
         g_config.focus_projection_shader_registry = read_ini_bool(
             "focus_projection", "shader_registry_enabled", false);
         g_config.cinema_camera_diagnostics = read_ini_bool(
@@ -14706,6 +14712,9 @@ void load_config() {
             diagnostic_logging_enabled && g_config.pipeline_flight_recorder);
         w3vr::route_flight::set_enabled(
             diagnostic_logging_enabled && g_config.route_flight_recorder);
+        if (diagnostic_logging_enabled && g_config.thread_stack_sampler) {
+            w3vr::thread_stack_sampler::start();
+        }
         if (!diagnostic_logging_enabled) {
             g_config.logging_enabled = false;
             g_config.runtime_diagnostics = false;
@@ -32406,6 +32415,7 @@ void install_engine_dlss_command_route_hook() {
 }
 
 void __fastcall hook_engine_gameplay_frame_entry(void* frame_task) {
+    w3vr::thread_stack_sampler::set_target_thread(GetCurrentThreadId());
     const uint64_t flight_hook_frame =
         w3vr::pipeline_flight::current_frame();
     const int64_t flight_hook_begin =
@@ -32446,6 +32456,26 @@ void __fastcall hook_engine_gameplay_frame_entry(void* frame_task) {
             g_engine_dual_frame_mutex.unlock();
         } __except (EXCEPTION_EXECUTE_HANDLER) {
             log_line("Engine gameplay eye-map read fault task=%p", frame_task);
+        }
+    }
+    if (g_config.runtime_diagnostics &&
+        g_engine_dual_render_active.load(std::memory_order_relaxed)) {
+        static std::atomic<uint32_t> dual_task_lookup_logs{};
+        if (dual_task_lookup_logs.fetch_add(1) < 96) {
+            log_line(
+                "Dual route gameplay lookup caller_rva=0x%llX task=%p frame=%p "
+                "hit=%d eye=%d pair=%llu generation=%u/%u wait_floor=%llu "
+                "tid=%lu present=%llu",
+                static_cast<unsigned long long>(caller_rva), frame_task,
+                mono_lookup_frame_data, mono_lookup_hit ? 1 : 0,
+                g_engine_render_eye,
+                static_cast<unsigned long long>(g_engine_render_pair_id),
+                g_engine_render_generation,
+                g_streamline_capture_generation.load(),
+                static_cast<unsigned long long>(
+                    g_engine_pair_wait_floor.load(std::memory_order_relaxed)),
+                static_cast<unsigned long>(GetCurrentThreadId()),
+                static_cast<unsigned long long>(present));
         }
     }
     if (clean_mono_transport_active() && frame_task != nullptr) {
@@ -44239,6 +44269,17 @@ bool test_mode_advance(uint64_t frame, uint32_t now_ms) {
         g_test_capture_frames_pending.store(2, std::memory_order_release);
         log_line("Test mode capture requested at_ms=%u present=%llu", now_ms,
             static_cast<unsigned long long>(frame));
+    }
+    if (due.flight_dumps != 0) {
+        // Same recorders as the F3 hotkey, without RenderDoc.
+        log_line("Test mode flight dump at_ms=%u present=%llu", now_ms,
+            static_cast<unsigned long long>(frame));
+        if (w3vr::pipeline_flight::enabled()) {
+            w3vr::pipeline_flight::dump_last_ten_seconds();
+        }
+        w3vr::route_flight::dump_last_seconds("test", 15);
+        w3vr::thread_stack_sampler::report(10.0, "dxgi.dll",
+            [](const char* line) { log_line("%s", line); });
     }
     if (due.quit) {
         test_mode_request_quit_locked(now_ms, frame);

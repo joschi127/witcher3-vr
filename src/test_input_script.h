@@ -21,13 +21,14 @@
 //   3000 stick L 0 1      left stick, x/y in -1..1, held until changed
 //   3000 trigger R 1      right trigger 0..1
 //   9000 capture          request an image capture (handled by the host)
+//   9500 flight_dump      dump the flight recorders, like F3 (handled by the host)
 //   60000 quit            close the game
 //
 // Button names: A B X Y LB RB BACK START LS RS UP DOWN LEFT RIGHT. The masks
 // equal XINPUT_GAMEPAD_* so the host can OR them into XINPUT_GAMEPAD.
 namespace w3vr::test_input {
 
-enum class Action : uint8_t { Down, Up, Stick, Trigger, Capture, Quit };
+enum class Action : uint8_t { Down, Up, Stick, Trigger, Capture, FlightDump, Quit };
 enum class Side : uint8_t { Left, Right };
 
 struct Event {
@@ -240,6 +241,8 @@ inline bool parse_script(
             event.action = Action::Trigger;
         } else if (action == "capture") {
             event.action = Action::Capture;
+        } else if (action == "flight_dump") {
+            event.action = Action::FlightDump;
         } else if (action == "quit") {
             event.action = Action::Quit;
         } else {
@@ -263,6 +266,7 @@ public:
 
     struct Due {
         uint32_t captures{};
+        uint32_t flight_dumps{};
         bool quit{};
     };
 
@@ -281,6 +285,7 @@ public:
                 (e.side == Side::Left ? state_.lt : state_.rt) = e.x;
                 break;
             case Action::Capture: ++due.captures; break;
+            case Action::FlightDump: ++due.flight_dumps; break;
             case Action::Quit: due.quit = true; break;
             }
         }

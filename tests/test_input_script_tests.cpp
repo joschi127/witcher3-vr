@@ -29,10 +29,11 @@ int main() {
         "2000 down LB\n"
         "2600 up LB\n"
         "4000 capture\n"
+        "4200 flight_dump\n"
         "5000 stick L 0 0\n"
         "9000 quit";
     require(parse_script(script, events, error), "valid script parses");
-    require(events.size() == 11, "tap expands to down and up");
+    require(events.size() == 12, "tap expands to down and up");
     for (size_t i = 1; i < events.size(); ++i) {
         require(events[i - 1].time_ms <= events[i].time_ms, "events are time ordered");
     }
@@ -56,6 +57,7 @@ int main() {
     require(due.captures == 1 && !due.quit, "capture reported once");
     due = player.advance(4500);
     require(due.captures == 0, "capture not repeated");
+    require(due.flight_dumps == 1, "flight dump reported once");
     due = player.advance(10000);
     require(player.state().ly == 0.0f, "stick returned to centre");
     require(due.quit && player.finished(), "quit reported at the end");
