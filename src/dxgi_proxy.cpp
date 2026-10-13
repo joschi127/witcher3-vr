@@ -723,6 +723,9 @@ struct Config {
     // Diagnostic stack sampler for the REDengine render worker; its report is
     // written by the test-mode flight_dump action.
     bool thread_stack_sampler{false};
+    // D3D12 debug layer (5.01: enabled from the early device hook); its
+    // stored messages are logged when the XR command list fails to close.
+    bool d3d12_debug_layer{false};
     // Optional in-process RenderDoc integration. This is deliberately
     // independent from Diagnostic Logging and defaults off so an adjacent
     // renderdoc.dll can remain installed without touching the render path.
@@ -14737,6 +14740,8 @@ void load_config() {
             "debug", "route_flight_recorder", false);
         g_config.thread_stack_sampler = read_ini_bool(
             "debug", "thread_stack_sampler", false);
+        g_config.d3d12_debug_layer = read_ini_bool(
+            "debug", "d3d12_debug_layer", false);
         g_config.focus_projection_shader_registry = read_ini_bool(
             "focus_projection", "shader_registry_enabled", false);
         g_config.cinema_camera_diagnostics = read_ini_bool(
@@ -30193,6 +30198,44 @@ HRESULT WINAPI hook_renderdoc_d3d12_create_device_bridge(
 // 4.04 keeps its original hook timing.
 D3D12CreateDeviceFn g_early_d3d12_create_device_trampoline{};
 
+// Logs (and clears) the debug layer's stored messages, errors first.
+void log_d3d12_debug_messages(const char* context) {
+    if (!g_config.d3d12_debug_layer || g_d3d12_device == nullptr) {
+        return;
+    }
+    ID3D12InfoQueue* queue{};
+    if (FAILED(g_d3d12_device->QueryInterface(IID_PPV_ARGS(&queue))) ||
+        queue == nullptr) {
+        log_line("D3D12 debug messages context=%s info_queue=unavailable", context);
+        return;
+    }
+    const UINT64 count = queue->GetNumStoredMessages();
+    log_line("D3D12 debug messages context=%s stored=%llu", context,
+        static_cast<unsigned long long>(count));
+    uint32_t logged{};
+    for (UINT64 index = 0; index < count && logged < 24; ++index) {
+        SIZE_T length{};
+        if (FAILED(queue->GetMessage(index, nullptr, &length)) || length == 0) {
+            continue;
+        }
+        std::vector<uint8_t> storage(length);
+        auto* message = reinterpret_cast<D3D12_MESSAGE*>(storage.data());
+        if (FAILED(queue->GetMessage(index, message, &length))) {
+            continue;
+        }
+        if (message->Severity > D3D12_MESSAGE_SEVERITY_ERROR) {
+            continue;
+        }
+        ++logged;
+        log_line("D3D12 debug message severity=%d id=%d %.*s",
+            static_cast<int>(message->Severity), static_cast<int>(message->ID),
+            static_cast<int>(message->DescriptionByteLength),
+            message->pDescription != nullptr ? message->pDescription : "");
+    }
+    queue->ClearStoredMessages();
+    queue->Release();
+}
+
 void install_early_root_signature_hook(IUnknown* device_unknown) {
     if (device_unknown == nullptr || g_create_root_signature != nullptr) {
         return;
@@ -30222,6 +30265,18 @@ HRESULT WINAPI hook_early_d3d12_create_device(
     D3D_FEATURE_LEVEL minimum_feature_level,
     REFIID riid,
     void** device) {
+    static std::atomic<bool> debug_layer_requested{};
+    if (g_config.d3d12_debug_layer && device != nullptr &&
+        !debug_layer_requested.exchange(true)) {
+        ID3D12Debug* debug{};
+        const HRESULT debug_hr = D3D12GetDebugInterface(IID_PPV_ARGS(&debug));
+        if (SUCCEEDED(debug_hr) && debug != nullptr) {
+            debug->EnableDebugLayer();
+            debug->Release();
+        }
+        log_line("D3D12 debug layer requested hr=0x%08lX",
+            static_cast<unsigned long>(debug_hr));
+    }
     const HRESULT result = g_early_d3d12_create_device_trampoline(
         adapter, minimum_feature_level, riid, device);
     if (SUCCEEDED(result) && device != nullptr && *device != nullptr) {
@@ -30232,7 +30287,7 @@ HRESULT WINAPI hook_early_d3d12_create_device(
 
 void install_early_d3d12_device_hook() {
     if (running_game_build() != w3vr::game_build::Build::Remaster501 ||
-        !descriptor_metadata_hooks_needed() ||
+        (!descriptor_metadata_hooks_needed() && !g_config.d3d12_debug_layer) ||
         (g_config.renderdoc_capture_enabled &&
             g_config.renderdoc_streamline_device_bridge) ||
         g_early_d3d12_create_device_trampoline != nullptr ||
@@ -50785,6 +50840,33 @@ bool native_stereo_capture_ready() {
 
 // [CORE] Submit projection views during gameplay and head-locked quad layers
 // during menus/cinematics, using only complete stereo resources.
+// CopyTextureRegion needs formats of the same typeless family.
+DXGI_FORMAT dxgi_copy_family(DXGI_FORMAT format) {
+    switch (format) {
+    case DXGI_FORMAT_R8G8B8A8_TYPELESS:
+    case DXGI_FORMAT_R8G8B8A8_UNORM:
+    case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+    case DXGI_FORMAT_R8G8B8A8_UINT:
+    case DXGI_FORMAT_R8G8B8A8_SNORM:
+    case DXGI_FORMAT_R8G8B8A8_SINT:
+        return DXGI_FORMAT_R8G8B8A8_TYPELESS;
+    case DXGI_FORMAT_B8G8R8A8_TYPELESS:
+    case DXGI_FORMAT_B8G8R8A8_UNORM:
+    case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
+        return DXGI_FORMAT_B8G8R8A8_TYPELESS;
+    case DXGI_FORMAT_R10G10B10A2_TYPELESS:
+    case DXGI_FORMAT_R10G10B10A2_UNORM:
+    case DXGI_FORMAT_R10G10B10A2_UINT:
+        return DXGI_FORMAT_R10G10B10A2_TYPELESS;
+    case DXGI_FORMAT_R16G16B16A16_TYPELESS:
+    case DXGI_FORMAT_R16G16B16A16_FLOAT:
+    case DXGI_FORMAT_R16G16B16A16_UNORM:
+        return DXGI_FORMAT_R16G16B16A16_TYPELESS;
+    default:
+        return format;
+    }
+}
+
 void render_openxr_test_frame(
     PoseTimelineEvent trace_reason = PoseTimelineEvent::SubmitOther,
     uint64_t trace_pair_id = 0) {
@@ -53598,7 +53680,29 @@ void render_openxr_test_frame(
                     // copy the complete post-temporal source without filtering.
                     // The per-eye OpenXR imageRect selects the useful tangent
                     // crop from this shared 1:1 placement below.
+                    // 5.01 briefly presents an R10G10B10A2 backbuffer at
+                    // startup; a copy into the RGBA8 swapchain is invalid
+                    // and would fail the whole XR command list. That frame
+                    // stays black instead.
+                    const bool direct_copy_format_compatible =
+                        src.pResource != nullptr &&
+                        dxgi_copy_family(src.pResource->GetDesc().Format) ==
+                            dxgi_copy_family(texture->GetDesc().Format);
                     if (projection_direct_copy &&
+                        !direct_copy_format_compatible) {
+                        static std::atomic<uint32_t> incompatible_copy_logs{};
+                        if (incompatible_copy_logs.fetch_add(1) < 8) {
+                            log_line(
+                                "OpenXR direct copy skipped: incompatible formats "
+                                "source=%u target=%u eye=%u present=%llu",
+                                src.pResource != nullptr
+                                    ? static_cast<unsigned>(src.pResource->GetDesc().Format)
+                                    : 0u,
+                                static_cast<unsigned>(texture->GetDesc().Format), eye,
+                                static_cast<unsigned long long>(current_present));
+                        }
+                    }
+                    if (projection_direct_copy && direct_copy_format_compatible &&
                         shifted_width > 0 && shifted_height > 0) {
                         g_xr_command_list->CopyTextureRegion(
                             &dst,
@@ -54304,6 +54408,21 @@ void render_openxr_test_frame(
                 log_taau_trace_line(
                     "OpenXR command list close failed image=%u hr=0x%08X",
                     image_index, static_cast<unsigned>(close_result));
+                log_d3d12_debug_messages("xr_command_list_close");
+                // A list whose Close failed cannot be reset again; without a
+                // new one every later frame would be dropped (black headset).
+                ID3D12GraphicsCommandList* replacement{};
+                if (SUCCEEDED(g_d3d12_device->CreateCommandList(
+                        0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+                        g_xr_command_allocators[g_xr_command_allocator_index],
+                        nullptr, IID_PPV_ARGS(&replacement))) &&
+                    SUCCEEDED(replacement->Close())) {
+                    g_xr_command_list->Release();
+                    g_xr_command_list = replacement;
+                    log_line("OpenXR command list recreated after failed close");
+                } else if (replacement != nullptr) {
+                    replacement->Release();
+                }
             }
         }
 
