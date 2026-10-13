@@ -9959,6 +9959,12 @@ void STDMETHODCALLTYPE hook_resource_barrier(
     ID3D12GraphicsCommandList* command_list,
     UINT num_barriers,
     const D3D12_RESOURCE_BARRIER* barriers);
+// 5.01 records the backbuffer PRESENT barrier on the render worker inside the
+// gameplay frame task, before that task's completion tag is queued (4.04
+// records it later on another thread). The PRESENT capture then takes the
+// task's own tag; the previous queued tag belongs to the other eye.
+thread_local bool t_in_gameplay_frame_task{};
+thread_local bool t_present_tag_taken_in_task{};
 void STDMETHODCALLTYPE hook_om_set_render_targets(
     ID3D12GraphicsCommandList* command_list,
     UINT num_render_target_descriptors,
@@ -29830,12 +29836,32 @@ void STDMETHODCALLTYPE hook_resource_barrier(
                     }
                     continue;
                 }
-                std::scoped_lock lock{g_engine_completed_tag_queue_mutex};
-                if (!g_engine_completed_tag_queue.empty()) {
-                    packed_engine_route_tag =
-                        g_engine_completed_tag_queue.front();
-                    g_engine_completed_tag_queue.pop_front();
+                if (t_in_gameplay_frame_task && !t_present_tag_taken_in_task &&
+                    g_engine_render_eye >= 0 && g_engine_render_eye <= 1 &&
+                    g_engine_render_pair_id != 0 &&
+                    g_engine_render_generation ==
+                        g_streamline_capture_generation.load()) {
+                    // PRESENT inside the task that rendered this image (5.01).
+                    packed_engine_route_tag.eye =
+                        static_cast<uint32_t>(g_engine_render_eye);
+                    packed_engine_route_tag.generation =
+                        g_engine_render_generation;
+                    packed_engine_route_tag.pair_id = g_engine_render_pair_id;
+                    packed_engine_route_tag.render_view = g_engine_render_view;
+                    packed_engine_route_tag.render_view_valid =
+                        g_engine_render_view_valid;
+                    packed_engine_route_tag.pixel_projection =
+                        g_engine_render_pixel_projection;
+                    t_present_tag_taken_in_task = true;
                     packed_route_valid = true;
+                } else {
+                    std::scoped_lock lock{g_engine_completed_tag_queue_mutex};
+                    if (!g_engine_completed_tag_queue.empty()) {
+                        packed_engine_route_tag =
+                            g_engine_completed_tag_queue.front();
+                        g_engine_completed_tag_queue.pop_front();
+                        packed_route_valid = true;
+                    }
                 }
                 if (mode3_stereo_transport_active() &&
                     packed_route_valid) {
@@ -33093,7 +33119,11 @@ void __fastcall hook_engine_gameplay_frame_entry(void* frame_task) {
 
     const int64_t flight_original_begin =
         w3vr::pipeline_flight::cpu_begin();
+    const bool outer_gameplay_frame_task = t_in_gameplay_frame_task;
+    t_in_gameplay_frame_task = true;
+    t_present_tag_taken_in_task = false;
     g_engine_gameplay_frame_entry(frame_task);
+    t_in_gameplay_frame_task = outer_gameplay_frame_task;
     w3vr::pipeline_flight::cpu_end(
         w3vr::pipeline_flight::Phase::EngineGameplayOriginal,
         flight_original_begin,
@@ -33182,7 +33212,8 @@ void __fastcall hook_engine_gameplay_frame_entry(void* frame_task) {
         // and retained-HUD ownership. TAAU resolve identity is already owned by
         // its upstream CB10 producer record and never reads this later queue.
         if (g_config.openxr_mode == 3 &&
-            !mode3_aer_final_present_source_active()) {
+            !mode3_aer_final_present_source_active() &&
+            !t_present_tag_taken_in_task) {
             EngineFrameTag completed_tag{};
             completed_tag.eye = static_cast<uint32_t>(g_engine_render_eye);
             completed_tag.generation = g_engine_render_generation;
@@ -41582,6 +41613,35 @@ size_t copy_readable_scene_descriptor(
 EngineSceneEnqueueFn g_engine_scene_enqueue_target{};
 bool g_engine_factory_duplicate_supported{};
 
+
+// Which camera did each built frame receive? (pos1 - pos0) along the primary
+// frame's right vector must equal +IPD when the duplicate is the right eye.
+void log_dual_frame_cameras(uint64_t present, int primary_eye,
+    int duplicate_eye, void* primary, void* duplicate) {
+    static std::atomic<uint32_t> frame_camera_logs{};
+    if (!g_config.runtime_diagnostics || primary == nullptr ||
+        duplicate == nullptr || frame_camera_logs.fetch_add(1) >= 24) {
+        return;
+    }
+    __try {
+        const auto* primary_view = reinterpret_cast<const float*>(
+            static_cast<const uint8_t*>(primary) + 0x20);
+        const auto* duplicate_view = reinterpret_cast<const float*>(
+            static_cast<const uint8_t*>(duplicate) + 0x20);
+        const float dx = duplicate_view[0] - primary_view[0];
+        const float dy = duplicate_view[1] - primary_view[1];
+        const float dz = duplicate_view[2] - primary_view[2];
+        const float along_right = dx * primary_view[0xA0] +
+            dy * primary_view[0xA1] + dz * primary_view[0xA2];
+        log_line(
+            "Dual frame cameras present=%llu primary_eye=%d duplicate_eye=%d "
+            "duplicate_minus_primary_right=%.5f distance=%.5f",
+            static_cast<unsigned long long>(present), primary_eye,
+            duplicate_eye, along_right, sqrtf(dx * dx + dy * dy + dz * dz));
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
 void* __fastcall hook_engine_frame_data_factory(void* render_context, void* render_settings, void* scene_descriptor) {
     w3vr::pipeline_flight::CpuScope flight_cpu{
         w3vr::pipeline_flight::Phase::FrameFactory};
@@ -42020,6 +42080,8 @@ void* __fastcall hook_engine_frame_data_factory(void* render_context, void* rend
                     duplicate_asymmetric_tag,
                     *duplicate_factory_capture);
             }
+            log_dual_frame_cameras(present, primary_eye, duplicate_eye,
+                result, right_frame_data);
             g_engine_scene_enqueue_target(render_context, right_frame_data);
 
             using ReleaseFrameDataFn = void(__fastcall*)(void*);
@@ -44996,29 +45058,12 @@ bool test_mode_convert_row(DXGI_FORMAT format, const uint8_t* source, uint8_t* t
     }
 }
 
-void test_mode_capture_if_pending(IDXGISwapChain* swapchain) {
-    if (g_test_capture_frames_pending.load(std::memory_order_acquire) == 0 ||
-        swapchain == nullptr || g_d3d12_device == nullptr ||
-        g_command_queue == nullptr || g_execute_command_lists == nullptr) {
-        return;
-    }
-    const uint32_t frame_index =
-        2 - g_test_capture_frames_pending.fetch_sub(1, std::memory_order_acq_rel);
-    const uint32_t request_ms =
-        g_test_capture_request_ms.load(std::memory_order_relaxed);
-
-    IDXGISwapChain3* swapchain3{};
-    ID3D12Resource* backbuffer{};
-    if (FAILED(swapchain->QueryInterface(IID_PPV_ARGS(&swapchain3))) ||
-        FAILED(swapchain3->GetBuffer(swapchain3->GetCurrentBackBufferIndex(),
-            IID_PPV_ARGS(&backbuffer)))) {
-        if (swapchain3 != nullptr) swapchain3->Release();
-        log_line("Test mode capture failed: no back buffer");
-        return;
-    }
-    swapchain3->Release();
-
-    const D3D12_RESOURCE_DESC desc = backbuffer->GetDesc();
+// Copies |resource| (subresource 0, currently in |state|) to a readback
+// buffer on the game queue, waits, converts it and writes |file| as PNG.
+bool test_mode_capture_resource_png(ID3D12Resource* resource,
+    D3D12_RESOURCE_STATES state, const std::wstring& file,
+    D3D12_RESOURCE_DESC& desc) {
+    desc = resource->GetDesc();
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
     UINT64 total_bytes{};
     g_d3d12_device->GetCopyableFootprints(
@@ -45053,21 +45098,26 @@ void test_mode_capture_if_pending(IDXGISwapChain* swapchain) {
     if (ok) {
         D3D12_RESOURCE_BARRIER barrier{};
         barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        barrier.Transition.pResource = backbuffer;
+        barrier.Transition.pResource = resource;
         barrier.Transition.Subresource = 0;
-        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
+        barrier.Transition.StateBefore = state;
         barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
-        list->ResourceBarrier(1, &barrier);
+        const bool transition = state != D3D12_RESOURCE_STATE_COPY_SOURCE;
+        if (transition) {
+            list->ResourceBarrier(1, &barrier);
+        }
         D3D12_TEXTURE_COPY_LOCATION source{};
-        source.pResource = backbuffer;
+        source.pResource = resource;
         source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
         D3D12_TEXTURE_COPY_LOCATION target{};
         target.pResource = readback;
         target.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
         target.PlacedFootprint = footprint;
         list->CopyTextureRegion(&target, 0, 0, 0, &source, nullptr);
-        std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
-        list->ResourceBarrier(1, &barrier);
+        if (transition) {
+            std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
+            list->ResourceBarrier(1, &barrier);
+        }
         ok = SUCCEEDED(list->Close());
     }
     if (ok) {
@@ -45097,6 +45147,39 @@ void test_mode_capture_if_pending(IDXGISwapChain* swapchain) {
         ok = false;
     }
 
+    if (ok) {
+        ok = test_mode_write_png(file, width, height, bgra);
+    }
+    if (fence != nullptr) fence->Release();
+    if (list != nullptr) list->Release();
+    if (allocator != nullptr) allocator->Release();
+    if (readback != nullptr) readback->Release();
+    if (event != nullptr) CloseHandle(event);
+    return ok;
+}
+
+void test_mode_capture_if_pending(IDXGISwapChain* swapchain) {
+    if (g_test_capture_frames_pending.load(std::memory_order_acquire) == 0 ||
+        swapchain == nullptr || g_d3d12_device == nullptr ||
+        g_command_queue == nullptr || g_execute_command_lists == nullptr) {
+        return;
+    }
+    const uint32_t frame_index =
+        2 - g_test_capture_frames_pending.fetch_sub(1, std::memory_order_acq_rel);
+    const uint32_t request_ms =
+        g_test_capture_request_ms.load(std::memory_order_relaxed);
+
+    IDXGISwapChain3* swapchain3{};
+    ID3D12Resource* backbuffer{};
+    if (FAILED(swapchain->QueryInterface(IID_PPV_ARGS(&swapchain3))) ||
+        FAILED(swapchain3->GetBuffer(swapchain3->GetCurrentBackBufferIndex(),
+            IID_PPV_ARGS(&backbuffer)))) {
+        if (swapchain3 != nullptr) swapchain3->Release();
+        log_line("Test mode capture failed: no back buffer");
+        return;
+    }
+    swapchain3->Release();
+
     std::wstring directory;
     {
         wchar_t path[MAX_PATH]{};
@@ -45107,23 +45190,40 @@ void test_mode_capture_if_pending(IDXGISwapChain* swapchain) {
         directory = std::wstring(path) + L"witcher3vr_captures";
     }
     CreateDirectoryW(directory.c_str(), nullptr);
+    const uint32_t sequence = g_test_capture_sequence.fetch_add(1);
     wchar_t name[96]{};
     swprintf_s(name, L"\\capture_%03u_%07ums_f%u.png",
-        g_test_capture_sequence.fetch_add(1), request_ms, frame_index);
+        sequence, request_ms, frame_index);
     const std::wstring file = directory + name;
-    if (ok) {
-        ok = test_mode_write_png(file, width, height, bgra);
-    }
-    log_line("Test mode capture %s frame=%u at_ms=%u size=%ux%u format=%d file=%ls",
-        ok ? "written" : "failed", frame_index, request_ms, width, height,
+    D3D12_RESOURCE_DESC desc{};
+    const bool ok = test_mode_capture_resource_png(
+        backbuffer, D3D12_RESOURCE_STATE_PRESENT, file, desc);
+    log_line("Test mode capture %s frame=%u at_ms=%u size=%llux%u format=%d file=%ls",
+        ok ? "written" : "failed", frame_index, request_ms,
+        static_cast<unsigned long long>(desc.Width), desc.Height,
         static_cast<int>(desc.Format), file.c_str());
-
-    if (fence != nullptr) fence->Release();
-    if (list != nullptr) list->Release();
-    if (allocator != nullptr) allocator->Release();
-    if (readback != nullptr) readback->Release();
-    if (event != nullptr) CloseHandle(event);
     backbuffer->Release();
+
+    // The two images the OpenXR projection submits (packed eye pair, kept in
+    // COPY_SOURCE between submissions), once per capture request.
+    if (frame_index == 0 && g_packed_present_cache_valid) {
+        for (uint32_t eye = 0; eye < 2; ++eye) {
+            if (g_packed_present_cache[eye] == nullptr) {
+                continue;
+            }
+            wchar_t eye_name[96]{};
+            swprintf_s(eye_name, L"\\capture_%03u_%07ums_xr_eye%u.png",
+                sequence, request_ms, eye);
+            D3D12_RESOURCE_DESC eye_desc{};
+            const bool eye_ok = test_mode_capture_resource_png(
+                g_packed_present_cache[eye], D3D12_RESOURCE_STATE_COPY_SOURCE,
+                directory + eye_name, eye_desc);
+            log_line("Test mode XR eye capture %s eye=%u pair=%llu file=%ls",
+                eye_ok ? "written" : "failed", eye,
+                static_cast<unsigned long long>(g_packed_accepted_pair_id),
+                (directory + eye_name).c_str());
+        }
+    }
 }
 
 // [FEATURE:FIRST-PERSON-SNAP-TURN 5/5] Read the physical right-stick X, turn
