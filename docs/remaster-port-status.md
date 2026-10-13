@@ -333,3 +333,8 @@ Layout changes that block a direct port:
   longer touches the user's settings).
 - VDXR with the user's Virtual Desktop settings reports symmetric eye FOVs (centres 0.5/0.5), so the
   first headset run can use `native_stereo=0` without losing the optical centre.
+- 4.04 regression of these changes (commit `33ae4d2`): flat stereo smoke run passed with the same
+  hook set as the previous regression run; a null-HMD OpenXR run with the normal 4.04 VR
+  configuration (TAAU, `native_stereo=1`, 1748x1468) passed as well: dual render, smoke projection
+  PSOs and per-eye HUD PSOs created, 3 timed-out pairs, Present pacing ~11 ms. The 5.01-only
+  paths (early CreateRootSignature hook, root-signature extension) stay inactive on 4.04.
