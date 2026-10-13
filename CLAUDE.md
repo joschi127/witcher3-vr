@@ -65,6 +65,11 @@ game folder. Add Defender exclusions for the build directory and the installed `
   captures written, no hook failure, no timeout). Default script:
   `scripts/test-input/smoke-continue-remaster.txt` (5.01, ~90 s); 4.04 uses `smoke-continue.txt`.
   The run starts the real game, so it needs the user's go-ahead like any game start.
+  `-IniSet 'openxr.enabled=1,openxr.hmd_roll_scale=0'` plus
+  `-OpenXrRuntimeJson <SteamVR>\steamxr_win64.json` runs the full OpenXR/dual-render path
+  without a headset through the SteamVR null driver (setup in `docs/remaster-port-status.md`,
+  2026-10-13). A `flight_dump` script action writes the flight recorders and, with
+  `[debug] thread_stack_sampler=1`, a render-thread CPU profile to the log.
 - In-game test mode (`[test]` in `witcher3vr.ini`, logic in `src/test_input_script.h`):
   `record_input=1` records the physical gamepad to `witcher3vr-input-recording.txt`,
   `input_script=<file>` replays a script (same format) through the XInput hook (4.04) or
