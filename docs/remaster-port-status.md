@@ -358,3 +358,14 @@ Layout changes that block a direct port:
   alternating backbuffer. Fixed in `4ad8fbd` (5.01 forces the No-AA route). Null-HMD view: steady,
   one image per eye.
 - The menu panel appears upside down in the null-HMD view only (180° roll of the null driver).
+- Run 2 (`4ad8fbd`, Pico 4 / Virtual Desktop): image in both eyes, intro, menus and loading
+  screens as on 4.04, gameplay smooth, but no usable depth; the user suspected swapped eyes.
+  Confirmed without the headset: the test mode now also saves the two images submitted to OpenXR
+  (`xr_eye0/1` captures). On 4.04 near objects shift left in the right-eye image; on 5.01 they
+  shifted right. The built frames had the correct cameras (right eye +IPD along the right
+  vector), so the swap happened when the presented backbuffer was tagged with its eye: 5.01
+  records the backbuffer PRESENT barrier on the render worker inside the gameplay frame task,
+  before that task's completion tag is queued, so the capture took the previous task's tag
+  (the other eye). 4.04 records it afterwards on another thread. Fixed in `c892871`: a PRESENT
+  inside the running frame task uses that task's own tag. Null-HMD captures now show the 4.04
+  parallax direction. Headset check pending.
