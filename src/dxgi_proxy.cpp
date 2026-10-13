@@ -4229,6 +4229,10 @@ bool real_smoke_shader_pair(uint64_t vs_hash, uint64_t ps_hash) {
 std::atomic<ID3D12PipelineState*> g_real_smoke_pipeline{};
 std::array<std::atomic<ID3D12PipelineState*>, 3>
     g_real_smoke_center_pipelines{};
+// A variant whose GS compile or PSO creation keeps failing is not retried:
+// every retry recompiles the GS with DXC on the render thread.
+constexpr uint32_t kRealSmokeVariantMaxAttempts = 3;
+std::array<uint32_t, 3> g_real_smoke_variant_failures{};
 
 // [DIAG:SMOKE-SELECTOR-FLIGHT V1420] These values describe why the exact
 // canonical smoke draw selected an eye variant or fell back. They are POD
@@ -4847,6 +4851,11 @@ struct RootParameterInfo {
 
 struct RootSignatureInfo {
     std::vector<RootParameterInfo> parameters{};
+    D3D12_ROOT_SIGNATURE_FLAGS flags{};
+    // Root CBV b1 indices of the VS and of the appended GS parameter (5.01
+    // smoke route); UINT32_MAX when the root signature was not extended.
+    uint32_t vertex_camera_cbv_parameter{UINT32_MAX};
+    uint32_t geometry_camera_cbv_parameter{UINT32_MAX};
 };
 
 std::mutex g_reverse_mutex{};
@@ -16800,6 +16809,7 @@ HRESULT STDMETHODCALLTYPE hook_create_root_signature(
     RootSignatureInfo info{};
     const auto* desc = deserializer->GetUnconvertedRootSignatureDesc();
     if (desc != nullptr && desc->Version == D3D_ROOT_SIGNATURE_VERSION_1_0) {
+        info.flags = desc->Desc_1_0.Flags;
         info.parameters.reserve(desc->Desc_1_0.NumParameters);
         for (UINT index = 0; index < desc->Desc_1_0.NumParameters; ++index) {
             const auto& source = desc->Desc_1_0.pParameters[index];
@@ -16826,6 +16836,7 @@ HRESULT STDMETHODCALLTYPE hook_create_root_signature(
             info.parameters.push_back(std::move(parameter));
         }
     } else if (desc != nullptr && desc->Version == D3D_ROOT_SIGNATURE_VERSION_1_1) {
+        info.flags = desc->Desc_1_1.Flags;
         info.parameters.reserve(desc->Desc_1_1.NumParameters);
         for (UINT index = 0; index < desc->Desc_1_1.NumParameters; ++index) {
             const auto& source = desc->Desc_1_1.pParameters[index];
@@ -17010,6 +17021,76 @@ void main(triangle VertexData input[3], inout TriangleStream<VertexData> output)
     return !shader_out.empty();
 }
 
+// [DIAG:REAL-SMOKE-PSO-FAILURE] One-off probe when the projection PSO is
+// rejected: the original VS/PS pair, then a resource-free pass-through GS as
+// gs_6_0 and gs_6_6. A pass-through success with a failing real GS points at
+// root-signature access (b1 for the GS stage), a pass-through failure at stage
+// linkage or shader-model mixing.
+void diagnose_real_smoke_pso_failure(
+    ID3D12Device* device, const D3D12_GRAPHICS_PIPELINE_STATE_DESC& recipe) {
+    static std::atomic<bool> diagnosed{};
+    if (diagnosed.exchange(true) || !initialize_dxc()) {
+        return;
+    }
+    static constexpr char kPassThroughSource[] = R"(
+struct VertexData {
+    float4 tc0 : TEXCOORD0;
+    float4 tc1 : TEXCOORD1;
+    float4 tc2 : TEXCOORD2;
+    float4 tc3 : TEXCOORD3;
+    float4 tc4 : TEXCOORD4;
+    float4 tc5 : TEXCOORD5;
+    float4 tc6 : TEXCOORD6;
+    float4 tc7 : TEXCOORD7;
+    float4 position : SV_Position;
+};
+[maxvertexcount(3)]
+void main(triangle VertexData input[3], inout TriangleStream<VertexData> output) {
+    [unroll] for (uint index = 0; index < 3; ++index) {
+        output.Append(input[index]);
+    }
+}
+)";
+    const auto try_create = [&](const char* label, const void* gs, size_t gs_size) {
+        auto desc = recipe;
+        desc.GS = D3D12_SHADER_BYTECODE{gs, gs_size};
+        ID3D12PipelineState* pso{};
+        const HRESULT hr = g_create_graphics_pipeline_state(
+            device, &desc, IID_PPV_ARGS(&pso));
+        if (pso != nullptr) pso->Release();
+        log_line("Real-smoke PSO probe %s hr=0x%08lX", label,
+            static_cast<unsigned long>(hr));
+    };
+    try_create("vs_ps_only", nullptr, 0);
+    for (const wchar_t* target : {L"gs_6_0", L"gs_6_6"}) {
+        DxcBuffer source_buffer{};
+        source_buffer.Ptr = kPassThroughSource;
+        source_buffer.Size = sizeof(kPassThroughSource) - 1;
+        source_buffer.Encoding = DXC_CP_UTF8;
+        LPCWSTR arguments[] = {L"-E", L"main", L"-T", target, L"-O3"};
+        IDxcResult* result{};
+        HRESULT status = E_FAIL;
+        if (SUCCEEDED(g_dxc_compiler->Compile(&source_buffer, arguments,
+                static_cast<UINT32>(std::size(arguments)), nullptr,
+                IID_PPV_ARGS(&result))) && result != nullptr) {
+            result->GetStatus(&status);
+        }
+        IDxcBlob* object{};
+        if (SUCCEEDED(status) && SUCCEEDED(result->GetOutput(
+                DXC_OUT_OBJECT, IID_PPV_ARGS(&object), nullptr)) &&
+            object != nullptr) {
+            try_create(target[5] == L'0' ? "passthrough_gs_6_0"
+                                         : "passthrough_gs_6_6",
+                object->GetBufferPointer(), object->GetBufferSize());
+            object->Release();
+        } else {
+            log_line("Real-smoke PSO probe compile %ls failed hr=0x%08lX",
+                target, static_cast<unsigned long>(status));
+        }
+        if (result != nullptr) result->Release();
+    }
+}
+
 // The real-smoke PSO can be created before OpenXR has published valid views.
 // Preserve its immutable recipe and finish the two eye variants as soon as the
 // runtime FOV exists. This is producer preparation, independent of the current
@@ -17066,6 +17147,8 @@ bool ensure_real_smoke_projection_psos() {
             g_real_smoke_center_pipelines[variant_index].load(
                 std::memory_order_acquire) == nullptr;
         if (!need_variant ||
+            g_real_smoke_variant_failures[variant_index] >=
+                kRealSmokeVariantMaxAttempts ||
             !w3vr::mode3_transport::real_smoke_variant_bootstrap_allowed(
                 variant_index, runtime_views_ready)) {
             continue;
@@ -17078,12 +17161,18 @@ bool ensure_real_smoke_projection_psos() {
                     g_xr_views[variant_index].fov, 1, 1,
                     projections[variant_index]);
         }
-        variant_ready = variant_ready &&
-            compile_real_smoke_center_geometry_shader(
+        if (!variant_ready) {
+            continue;
+        }
+        if (!compile_real_smoke_center_geometry_shader(
                 projections[variant_index].center_ndc_x,
                 projections[variant_index].center_ndc_y,
-                geometry_shaders[variant_index]);
-        if (!variant_ready) {
+                geometry_shaders[variant_index])) {
+            ++g_real_smoke_variant_failures[variant_index];
+            log_line(
+                "Real-smoke projection variant=%u GS compile failed attempt=%u/%u",
+                variant_index, g_real_smoke_variant_failures[variant_index],
+                kRealSmokeVariantMaxAttempts);
             continue;
         }
 
@@ -17091,10 +17180,81 @@ bool ensure_real_smoke_projection_psos() {
         variant_desc.GS = D3D12_SHADER_BYTECODE{
             geometry_shaders[variant_index].data(),
             geometry_shaders[variant_index].size()};
-        if (need_variant && FAILED(g_create_graphics_pipeline_state(
-                recipe.device, &variant_desc,
-                IID_PPV_ARGS(&variants[variant_index])))) {
+        const HRESULT create_hr = g_create_graphics_pipeline_state(
+            recipe.device, &variant_desc,
+            IID_PPV_ARGS(&variants[variant_index]));
+        if (FAILED(create_hr)) {
             variants[variant_index] = nullptr;
+            ++g_real_smoke_variant_failures[variant_index];
+            // Root-signature flags and the stage visibility of the b1 camera
+            // CBV decide whether a GS may read it.
+            uint32_t rs_flags = UINT32_MAX;
+            int b1_visibility = -1;
+            {
+                std::scoped_lock reverse_lock{g_reverse_mutex};
+                const auto found = g_root_signature_infos.find(
+                    variant_desc.pRootSignature);
+                if (found != g_root_signature_infos.end()) {
+                    rs_flags = static_cast<uint32_t>(found->second.flags);
+                    if (g_real_smoke_variant_failures[variant_index] == 1 &&
+                        variant_index == 0) {
+                        uint32_t parameter_index{};
+                        for (const auto& parameter : found->second.parameters) {
+                            std::string ranges;
+                            for (const auto& range : parameter.ranges) {
+                                char text[64]{};
+                                std::snprintf(text, sizeof(text),
+                                    " [t%d r%u n%u s%u]",
+                                    static_cast<int>(range.type),
+                                    range.base_shader_register,
+                                    range.num_descriptors, range.register_space);
+                                ranges += text;
+                            }
+                            log_line(
+                                "Real-smoke root parameter %u type=%d visibility=%d "
+                                "register=%u space=%u values=%u ranges=%s",
+                                parameter_index++,
+                                static_cast<int>(parameter.type),
+                                static_cast<int>(parameter.visibility),
+                                parameter.shader_register,
+                                parameter.register_space,
+                                parameter.num_32bit_values, ranges.c_str());
+                        }
+                    }
+                    for (const auto& parameter : found->second.parameters) {
+                        bool has_b1 = parameter.type ==
+                                D3D12_ROOT_PARAMETER_TYPE_CBV &&
+                            parameter.shader_register == 1 &&
+                            parameter.register_space == 0;
+                        for (const auto& range : parameter.ranges) {
+                            has_b1 = has_b1 ||
+                                (range.type == D3D12_DESCRIPTOR_RANGE_TYPE_CBV &&
+                                    range.register_space == 0 &&
+                                    range.base_shader_register <= 1 &&
+                                    (range.num_descriptors == UINT_MAX ||
+                                        range.base_shader_register +
+                                            range.num_descriptors > 1));
+                        }
+                        if (has_b1) {
+                            b1_visibility =
+                                static_cast<int>(parameter.visibility);
+                            break;
+                        }
+                    }
+                }
+            }
+            log_line(
+                "Real-smoke projection variant=%u PSO creation failed hr=0x%08lX "
+                "attempt=%u/%u vs=%zu ps=%zu gs=%zu rs=%p rs_flags=0x%X "
+                "b1_visibility=%d",
+                variant_index, static_cast<unsigned long>(create_hr),
+                g_real_smoke_variant_failures[variant_index],
+                kRealSmokeVariantMaxAttempts,
+                variant_desc.VS.BytecodeLength, variant_desc.PS.BytecodeLength,
+                variant_desc.GS.BytecodeLength,
+                static_cast<void*>(variant_desc.pRootSignature), rs_flags,
+                b1_visibility);
+            diagnose_real_smoke_pso_failure(recipe.device, recipe.desc);
         }
     }
 
