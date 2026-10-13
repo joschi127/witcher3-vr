@@ -369,3 +369,19 @@ Layout changes that block a direct port:
   (the other eye). 4.04 records it afterwards on another thread. Fixed in `c892871`: a PRESENT
   inside the running frame task uses that task's own tag. Null-HMD captures now show the 4.04
   parallax direction. Headset check pending.
+
+### First playable VR on 5.01 (headset run 3, `c892871`)
+- Pico 4 over Virtual Desktop (VDXR), symmetric projection (`native_stereo=0`), 1748x1468 per eye,
+  FXAA, No-AA route. Third-person gameplay in Kaer Morhen, indoors and on the balcony.
+- Result (user): real 3D depth, correct in both eyes (checked with one eye closed at a time),
+  intro, menus, loading screens and menu panel as on 4.04, performance subjectively close to 4.04,
+  fire/smoke, HUD and trees look right. Log: every gameplay projection submits the packed pair
+  (one image per eye), no timed-out pairs, Present pacing ~7.4 ms.
+- Open:
+  - Distant water (river seen from the balcony) flickers between dark and light, about once per
+    second and with camera movement. Likely a screen-space or temporal effect that still shares
+    history between the alternating eyes on 5.01.
+  - Colour saturation in VR felt lower than on 4.04 (subjective, not yet compared).
+  - Aiming (crossbow) untested; cinema camera and cutscenes not yet checked in the headset.
+  - Not ported: foliage native snapshot (V1521), native asymmetric projection, TAAU/DLSS/RT
+    backends.
