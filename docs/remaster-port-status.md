@@ -259,3 +259,49 @@ Layout changes that block a direct port:
   from the frame builder once and from two other functions; render-scene setup no longer calls it,
   so the 4.04 return-address list does not carry over. Frame-builder offsets (+0x420/+0x930,
   +0x428/+0x938, +0x530, +0xA4C, +0x560) need to be re-derived with this stride.
+
+## 2026-10-13
+
+### Headset-free OpenXR runs (SteamVR null driver)
+- The SteamVR runtime with its built-in null driver provides a virtual HMD (fixed pose, 72 Hz,
+  configurable render size) with the full OpenXR frame loop: session, swapchains, xrWaitFrame,
+  xrEndFrame. `scripts/smoke-test.ps1 -OpenXrRuntimeJson <SteamVR>\steamxr_win64.json` selects it
+  for the game process only (`XR_RUNTIME_JSON`); the system runtime stays unchanged. `-IniSet`
+  changes INI values for one run (`openxr.enabled=1`, `openxr.native_stereo=0`, ...).
+- SteamVR needs `steamvr.forcedDriver=null`, `steamvr.requireHmd=true`,
+  `steamvr.activateMultipleDrivers=false`, `driver_null.enable=true` and
+  `steamvr.startMonitorFromAppLaunch=false`. Without the last one vrmonitor launches Room Setup
+  for the uncalibrated null HMD, which sends the game a quit event.
+- The null driver reports a constant orientation with 180° roll; use
+  `openxr.hmd_roll_scale=0` in these runs, otherwise the scene renders upside down.
+- Nothing about the headset path is covered (lenses, real tracking, Pico/VDXR specifics), but the
+  complete mod pipeline runs: dual render, pair barrier, OpenXR submission, HUD/smoke routes.
+
+### First dual render on 5.01 (Mode 3, symmetric projection)
+- Verified unattended (smoke script, null HMD, `native_stereo=0`): the dual render starts, both
+  eyes are produced per pair through the 5.01 frame factory / scene enqueue / gameplay entry,
+  captures of consecutive presents show the expected horizontal eye offset, and the run ends
+  normally. Scene-descriptor copy on 5.01: 0xFD20 bytes readable (the factory reads up to about
+  +0xF714), so the 0x10000 copy size with zero-padded tail holds.
+- Initially only ~25 presents/s with ~100 timed-out pairs per run. The new render-thread stack
+  sampler (`[debug] thread_stack_sampler=1`, report through the test-mode `flight_dump` action)
+  showed ~60% of the render thread inside DXC: the real-smoke world-up GS was recompiled on
+  every call because its PSO creation kept failing. With a retry limit: ~90 presents/s.
+- Cause of the PSO failure: the 5.01 root signature binds VS b0-b4 as VERTEX-only root CBVs and
+  PS b0-b4 as PIXEL-only root CBVs, has no GS parameters and sets
+  `DENY_GEOMETRY_SHADER_ROOT_ACCESS` (flags 0x1D). 4.04 has per-stage CBV tables including one
+  for the GS (the smoke route copies VS table 3 into GS table 6). On 5.01 the mod now appends a
+  GEOMETRY root CBV b1 to root signatures with that layout, drops the GS deny flag and binds the
+  appended parameter to the VS b1 address at the smoke draw. The root signatures are created
+  before the swapchain on 5.01, so the CreateRootSignature hook is installed from a
+  D3D12CreateDevice hook on that build. Result: all three smoke projection PSOs are created,
+  ~6 timed-out pairs per run (startup), Present pacing ~11 ms.
+- Same as 4.04 (no port issue): the cinema detector's alternating "gameplay authority
+  lost/confirmed" lines and the dual-render auto-start reason `automatic_full_vr`.
+- Open on 5.01: the foliage native snapshot (V1521) falls back on every draw
+  (`reason=graphics_state`): it expects the 4.04 VS CBV table with b0 and b12; on 5.01 b0 is a
+  root CBV (parameter 5) and b12 sits in the b5-b15 table (parameter 17). Needs its own 5.01
+  binding path.
+- Not yet run with these changes: 4.04 regression (the 4.04 paths are unchanged by design:
+  early hook and root-signature extension are 5.01-only, the smoke retry limit only matters when
+  creation fails).
