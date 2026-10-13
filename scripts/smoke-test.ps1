@@ -21,7 +21,15 @@ param(
     [int] $TimeoutSeconds = 240,
 
     # Keep the [test] settings in witcher3vr.ini after the run instead of restoring the file.
-    [switch] $KeepIni
+    [switch] $KeepIni,
+
+    # Extra INI values for this run only, as 'section.key=value' (e.g. 'openxr.enabled=1').
+    # Existing keys are replaced in place, missing keys are appended to their section.
+    [string[]] $IniSet = @(),
+
+    # OpenXR runtime manifest for the game process only (sets XR_RUNTIME_JSON), e.g. the SteamVR
+    # runtime with its null driver for a headset-free OpenXR run. The system runtime is unchanged.
+    [string] $OpenXrRuntimeJson
 )
 
 # Unattended smoke test: install the DLL and input script, start the game with the test mode,
@@ -84,7 +92,30 @@ if ([regex]::IsMatch($iniText, $sectionPattern)) {
 } else {
     $newIni = $iniText.TrimEnd("`r", "`n") + $newline + $newline + $testSection
 }
+# powershell.exe -File passes 'a=1','b=2' as one comma-separated string.
+$IniSet = @($IniSet | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
+foreach ($assignment in $IniSet) {
+    if ($assignment -notmatch '^([^.=\s]+)\.([^=\s]+)=(.*)$') { throw "Bad -IniSet value: $assignment" }
+    $section = [regex]::Escape($Matches[1]); $key = $Matches[2]; $value = $Matches[3]
+    $sectionMatch = [regex]::Match($newIni, "(?ms)^\[$section\]\r?\n.*?(?=^\[|\z)")
+    if (-not $sectionMatch.Success) { throw "INI section not found: $($Matches[1])" }
+    $body = $sectionMatch.Value
+    $keyPattern = '(?m)^' + [regex]::Escape($key) + '=[^\r\n]*'
+    if ([regex]::IsMatch($body, $keyPattern)) {
+        $body = [regex]::Replace($body, $keyPattern, { param($m) "$key=$value" })
+    } else {
+        $trimmed = $body.TrimEnd("`r", "`n")
+        $body = $trimmed + $newline + "$key=$value" + $body.Substring($trimmed.Length)
+        if ($body -notmatch '\r?\n$') { $body += $newline }
+    }
+    $newIni = $newIni.Substring(0, $sectionMatch.Index) + $body +
+        $newIni.Substring($sectionMatch.Index + $sectionMatch.Length)
+}
 [System.IO.File]::WriteAllBytes($ini, [System.Text.Encoding]::ASCII.GetBytes($newIni))
+if ($OpenXrRuntimeJson) {
+    if (-not (Test-Path -LiteralPath $OpenXrRuntimeJson)) { throw "Not found: $OpenXrRuntimeJson" }
+    $env:XR_RUNTIME_JSON = (Resolve-Path -LiteralPath $OpenXrRuntimeJson).Path
+}
 
 $started = Get-Date
 $killed = $false
@@ -144,6 +175,9 @@ if ($lines | Where-Object { $_ -match 'Test mode quit' }) {
 if ($lines | Where-Object { $_ -match 'GameInput virtual pad announced' }) {
     $notes.Add('input: virtual GameInput gamepad')
 }
+if ($lines | Where-Object { $_ -match 'Engine dual render INI auto-start queued' }) {
+    $notes.Add('stereo: dual render started')
+}
 
 $passed = $failures.Count -eq 0
 $summary = @(
@@ -153,7 +187,9 @@ $summary = @(
     "dxgi.dll sha256: $dllHash"
     "duration: $seconds s"
     "captures: $written/$expectedCaptures"
-) + ($notes | ForEach-Object { "note: $_" }) + ($failures | ForEach-Object { "failure: $_" })
+) + ($IniSet | ForEach-Object { "ini: $_" }) +
+    $(if ($OpenXrRuntimeJson) { @("openxr runtime: $([System.IO.Path]::GetFileName($OpenXrRuntimeJson))") } else { @() })
+$summary = $summary + ($notes | ForEach-Object { "note: $_" }) + ($failures | ForEach-Object { "failure: $_" })
 $summary | Set-Content -LiteralPath (Join-Path $runDirectory 'summary.txt')
 $summary | ForEach-Object { Write-Output $_ }
 Write-Output "output: $runDirectory"
