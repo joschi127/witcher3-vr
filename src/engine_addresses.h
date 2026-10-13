@@ -29,6 +29,7 @@ enum class Function : size_t {
     FrameBuilder,      // render-thread frame build (render_context, frame, extra)
     CameraEnableManualControl,  // native CCustomCamera.EnableManualControl
     CameraDirection,   // native CCameraDirector.GetCameraDirection (first of two copies)
+    ViewportResolution,  // (fullscreen, resolution setting, int* width, int* height)
     Count,
 };
 
@@ -116,6 +117,12 @@ inline constexpr uint8_t kCameraDirection501Bytes[] = {
     0x48, 0xFF, 0x42, 0x30, 0xC5, 0xFA, 0x10, 0x81, 0x90, 0x07, 0x00, 0x00,
     0xC5, 0xFA, 0x10, 0x89, 0x94, 0x07, 0x00, 0x00};
 
+// Same signature and logic as 4.04 (desktop size from DXGI, then the "WxH"
+// setting); 5.01 moved the DXGI part into a helper (0x0228E230).
+inline constexpr uint8_t kViewportResolution501Bytes[] = {
+    0x48, 0x8B, 0xC4, 0x88, 0x48, 0x08, 0x57, 0x48, 0x81, 0xEC, 0xB0, 0x00,
+    0x00, 0x00, 0x48, 0x89};
+
 inline constexpr Entry kEntries[] = {
     {"IsAnyMenu", 0x01F3C5C0, 0x01DF41A0, {kIsAnyMenuBytes, sizeof(kIsAnyMenuBytes)}},
     {"IsLoadingScreenVideoPlaying", 0x0154EED0, 0x0227A0F0,
@@ -144,6 +151,8 @@ inline constexpr Entry kEntries[] = {
         {kCameraEnableManualControl501Bytes, sizeof(kCameraEnableManualControl501Bytes)}},
     {"CameraDirector.GetCameraDirection", 0x0161BBC0, 0x023826F0,
         {kCameraDirection501Bytes, sizeof(kCameraDirection501Bytes)}},
+    {"ViewportResolution", 0x01563DC0, 0x0228F3B0,
+        {kViewportResolution501Bytes, sizeof(kViewportResolution501Bytes)}},
 };
 static_assert(sizeof(kEntries) / sizeof(kEntries[0]) ==
     static_cast<size_t>(Function::Count));

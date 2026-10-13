@@ -44489,22 +44489,19 @@ void __fastcall hook_engine_viewport_resolution(
 }
 
 void install_engine_viewport_resolution_hook() {
-    if (!engine_build_supported()) {
-        return;
-    }
     if (g_engine_viewport_resolution != nullptr ||
         g_config.render_width <= 0 || g_config.render_height <= 0) {
         return;
     }
-    constexpr uintptr_t kViewportResolutionRva = 0x01563DC0;
-    auto* module = reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr));
-    auto* target = module != nullptr ? module + kViewportResolutionRva : nullptr;
-    if (target != nullptr &&
-        MH_CreateHook(target, &hook_engine_viewport_resolution,
+    auto* target = engine_function_target(
+        w3vr::engine_addresses::Function::ViewportResolution);
+    if (target == nullptr) {
+        return;
+    }
+    if (MH_CreateHook(target, &hook_engine_viewport_resolution,
             reinterpret_cast<void**>(&g_engine_viewport_resolution)) == MH_OK &&
         MH_EnableHook(target) == MH_OK) {
-        log_line("Hooked REDengine viewport resolution RVA=0x%llX target=%p",
-            static_cast<unsigned long long>(kViewportResolutionRva), target);
+        log_line("Hooked REDengine viewport resolution target=%p", target);
     } else {
         log_line("Failed REDengine viewport resolution hook target=%p", target);
     }
