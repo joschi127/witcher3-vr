@@ -20,7 +20,8 @@ as a runtime dependency.
 
 > [!IMPORTANT]
 > Gameplay currently requires a mouse and keyboard or a gamepad. VR motion
-> controllers are not supported and are not currently planned.
+> controllers are not supported and are not currently planned at this time.
+> Remastered version support too is not yet planned.
 
 ## Highlights
 
@@ -99,7 +100,7 @@ The ForceDLAA parameter-query and resolution-override approach is adapted from
 
 ## Requirements
 
-- The Witcher 3 Next-Gen, DirectX 12 version
+- The Witcher 3 Next-Gen (2022), v4.0.4, DirectX 12 version
 - A working OpenXR runtime for your headset
 - A mouse and keyboard or gamepad
 - Windows 10 or Windows 11
