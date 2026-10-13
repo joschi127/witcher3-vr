@@ -14796,6 +14796,16 @@ void load_config() {
             temporal_backend,
             g_config.ngx_trace,
             g_config.streamline_taau_bridge);
+        // 5.01 has no TAAU and the mod's DLSS hooks are 4.04-only. A TAAU or
+        // DLSS backend would wait for submissions that never come: the packed
+        // eye pair is then never accepted and both eyes show the alternating
+        // backbuffer (flicker). Run the No-AA route there.
+        if (running_game_build() == w3vr::game_build::Build::Remaster501 &&
+            g_config.temporal_backend != TemporalBackend::None) {
+            log_line("Temporal backend %s not available on 5.01; using none",
+                temporal_backend.c_str());
+            g_config.temporal_backend = TemporalBackend::None;
+        }
 
         if (temporal_backend_is_dlss()) {
             g_config.ngx_trace = true;
@@ -52814,6 +52824,40 @@ void render_openxr_test_frame(
                                 : g_stereo_eye_cache[cache_eye])
                             : game_backbuffer);
                 };
+                if (g_config.runtime_diagnostics &&
+                    g_present_count.load(std::memory_order_relaxed) % 120 == 0) {
+                    static std::atomic<uint32_t> source_selection_logs{};
+                    if (source_selection_logs.fetch_add(1) < 64) {
+                        const auto kind = [&](uint32_t eye) {
+                            auto* source = select_projection_source(eye);
+                            return source == nullptr ? "null"
+                                : source == game_backbuffer ? "backbuffer"
+                                : source == g_packed_present_cache[0] ? "packed0"
+                                : source == g_packed_present_cache[1] ? "packed1"
+                                : source == g_stereo_eye_cache[0] ? "eyecache0"
+                                : source == g_stereo_eye_cache[1] ? "eyecache1"
+                                : "direct";
+                        };
+                        log_line(
+                            "OpenXR projection source present=%llu eye0=%s eye1=%s "
+                            "direct_stereo=%d stereo_cached=%d packed=%d "
+                            "afw_sequenced=%d dual=%d armed=%d cinema=%d "
+                            "cache_valid=%d accepted_pair=%llu floor=%llu "
+                            "final_present=%d",
+                            static_cast<unsigned long long>(
+                                g_present_count.load(std::memory_order_relaxed)),
+                            kind(0), kind(1), direct_stereo ? 1 : 0,
+                            stereo_cached ? 1 : 0, packed_stereo_available ? 1 : 0,
+                            mode3_common_afw_sequenced_available ? 1 : 0,
+                            g_engine_dual_render_active.load() ? 1 : 0,
+                            g_engine_dual_gameplay_armed.load() ? 1 : 0,
+                            cinema_mode ? 1 : 0,
+                            g_packed_present_cache_valid ? 1 : 0,
+                            static_cast<unsigned long long>(g_packed_accepted_pair_id),
+                            static_cast<unsigned long long>(loading_video_scene_pair_floor),
+                            mode3_final_present_source ? 1 : 0);
+                    }
+                }
                 for (uint32_t eye = 0; eye < 2; ++eye) {
                     fit_projection_sources[eye] =
                         select_projection_source(eye);
