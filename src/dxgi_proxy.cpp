@@ -14308,7 +14308,29 @@ struct WitcherSenseHistorySuppressionDrawScope {
         const WitcherSenseHistorySuppressionDrawScope&) = delete;
 };
 
+// True when the proxy runs inside the game. Other processes that load this
+// dxgi.dll (the swapchain identity test from the build directory, tools
+// started from the game folder) must not touch the user's game settings.
+bool host_is_game_process() {
+    wchar_t path[MAX_PATH]{};
+    const DWORD length = GetModuleFileNameW(nullptr, path, MAX_PATH);
+    if (length == 0 || length >= MAX_PATH) {
+        return false;
+    }
+    const wchar_t* name = path;
+    for (const wchar_t* p = path; *p != L'\0'; ++p) {
+        if (*p == L'\\' || *p == L'/') {
+            name = p + 1;
+        }
+    }
+    return _wcsicmp(name, L"witcher3.exe") == 0;
+}
+
 void apply_hud_frame_scale() {
+    if (!host_is_game_process()) {
+        log_line("HUD frame scale not applied: host process is not witcher3.exe");
+        return;
+    }
     char settings_path[MAX_PATH]{};
     if (ExpandEnvironmentStringsA(
             "%USERPROFILE%\\Documents\\The Witcher 3\\dx12user.settings",

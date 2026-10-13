@@ -49,12 +49,11 @@ game folder. Add Defender exclusions for the build directory and the installed `
   that code fragments exist or were retired. They check text, not behaviour. Editing an
   asserted fragment breaks them, which may be intended. Update them deliberately.
 - `launcher/tests.cpp` etc.: settings/path logic against a fake layout.
-- **`ctest` has a side effect on the real game settings.** `swapchain_identity_tests` calls
-  `CreateDXGIFactory1` from the build output directory, so Windows loads the freshly built
-  proxy `dxgi.dll` next to it. Its `load_config()` → `apply_hud_frame_scale()` writes
-  `[Hidden] uiHorizontalFrameScale/uiVerticalFrameScale` into
-  `%USERPROFILE%\Documents\The Witcher 3\dx12user.settings`, creating the file if it is missing.
-  Back up that file before running tests, or fix the test isolation (candidate upstream issue).
+- `swapchain_identity_tests` calls `CreateDXGIFactory1` from the build output directory, so
+  Windows loads the freshly built proxy `dxgi.dll` next to it. Older builds then wrote
+  `[Hidden] uiHorizontalFrameScale/uiVerticalFrameScale` into the real
+  `%USERPROFILE%\Documents\The Witcher 3\dx12user.settings`. Since `host_is_game_process()` the
+  proxy writes it only inside `witcher3.exe`; builds before that commit still have the side effect.
 - **Nothing tests compatibility with a real `witcher3.exe`.** A green `ctest` says nothing
   about whether hooks, offsets or shader hashes match a game build. That needs the smoke test
   and finally a headset run by the user.
