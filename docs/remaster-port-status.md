@@ -378,10 +378,15 @@ Layout changes that block a direct port:
   fire/smoke, HUD and trees look right. Log: every gameplay projection submits the packed pair
   (one image per eye), no timed-out pairs, Present pacing ~7.4 ms.
 - Open:
-  - Distant water (river seen from the balcony) flickers between dark and light, about once per
-    second and with camera movement. Likely a screen-space or temporal effect that still shares
-    history between the alternating eyes on 5.01.
-  - Colour saturation in VR felt lower than on 4.04 (subjective, not yet compared).
+  - Distant water (river seen from the balcony) slowly alternates between dark and light (about
+    once per second, also with camera movement), in both eyes at the same time as far as the user
+    can tell. So probably not an eye-alternation artefact; candidates are a reflection/water shader
+    or exposure effect, or a mod hook acting on it on 5.01. Not yet checked flat (without the mod)
+    or on 4.04 at the same spot.
+  - Colour saturation in VR felt lower than on 4.04 (subjective). The mod passes colours through
+    unchanged on both builds (monitor and submitted eye image of the same frame have equal mean
+    saturation), so any difference would come from the game. To compare: play both builds in the
+    headset at a similar spot.
   - Aiming (crossbow) untested; cinema camera and cutscenes not yet checked in the headset.
   - Not ported: foliage native snapshot (V1521), native asymmetric projection, TAAU/DLSS/RT
     backends.
