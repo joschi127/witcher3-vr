@@ -119,12 +119,14 @@ inline constexpr Entry kEntries[] = {
         0xF9282625E62BCC6Aull, 0x2D62BEEEBB246012ull},
     {Id::NearFrondsPs, Stage::Pixel, "foliage", "near_fronds_ps",
         0x5B6F5C6CA86B8C9Dull, 0x6751E8F5A337D737ull},
-    // 5.01 draws the composite into two render targets (4.04: one); the
-    // replacement pipeline needs review before this is mapped.
+    // 5.01 pairs these at runtime (the PSO has two render targets, both
+    // shaders write only target 0). The 5.01 PS adds a colour-blindness filter
+    // on the scene colour, active only when CustomPixelConsts row 17 .w > 0;
+    // otherwise it is the 4.04 composite, which the replacement HLSL mirrors.
     {Id::HudCompositeVs, Stage::Vertex, "hud", "hud_composite_vs",
-        0x84F8A283C01E56D2ull, 0},
+        0x84F8A283C01E56D2ull, 0x2668F02C9B6C7FDDull},
     {Id::HudCompositePs, Stage::Pixel, "hud", "hud_composite_ps",
-        0x051248978BCC3943ull, 0},
+        0x051248978BCC3943ull, 0x0816B1C02F3BAF8Bull},
     {Id::AimProbeVs, Stage::Vertex, "hud", "aim_probe_vs",
         0xA1EFA1FD7AF9F39Full, 0x9AF43734B8441E7Dull},
     {Id::AimProbePs, Stage::Pixel, "hud", "aim_probe_ps",
