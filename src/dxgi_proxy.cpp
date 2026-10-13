@@ -37520,6 +37520,8 @@ uintptr_t native_custom_camera_vtable_rva() {
     return rva;
 }
 
+size_t custom_camera_manual_control_offset();
+
 NativeCameraAuthoritySnapshot read_native_camera_authority_snapshot() {
     NativeCameraAuthoritySnapshot snapshot{};
     auto* module = reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr));
@@ -37558,7 +37560,8 @@ NativeCameraAuthoritySnapshot read_native_camera_authority_snapshot() {
     if (snapshot.setter_camera != nullptr) {
         __try {
             snapshot.setter_manual_control =
-                static_cast<const uint8_t*>(snapshot.setter_camera)[0x259] != 0
+                static_cast<const uint8_t*>(snapshot.setter_camera)[
+                    custom_camera_manual_control_offset()] != 0
                 ? 1
                 : 0;
         } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -37593,8 +37596,8 @@ NativeCameraAuthoritySnapshot read_native_camera_authority_snapshot() {
                         vtable - reinterpret_cast<uintptr_t>(module);
                 }
                 snapshot.top_manual_control =
-                    static_cast<const uint8_t*>(
-                        snapshot.top_camera)[0x259] != 0
+                    static_cast<const uint8_t*>(snapshot.top_camera)[
+                        custom_camera_manual_control_offset()] != 0
                     ? 1
                     : 0;
 
@@ -39963,15 +39966,23 @@ void __fastcall hook_engine_game_is_playing_non_gameplay_scene(
     }
 }
 
+size_t custom_camera_manual_control_offset() {
+    static const size_t offset = static_cast<size_t>(w3vr::engine_addresses::value(
+        running_game_build(),
+        w3vr::engine_addresses::Value::CustomCameraManualControlOffset));
+    return offset;
+}
+
 void __fastcall hook_engine_camera_enable_manual_control(
     void* camera,
     void* stack) {
+    const size_t manual_control = custom_camera_manual_control_offset();
     int before = -1;
     int after = -1;
     if (camera != nullptr) {
         __try {
             before =
-                static_cast<const uint8_t*>(camera)[0x259] != 0 ? 1 : 0;
+                static_cast<const uint8_t*>(camera)[manual_control] != 0 ? 1 : 0;
         } __except (EXCEPTION_EXECUTE_HANDLER) {
             before = -1;
         }
@@ -39984,7 +39995,7 @@ void __fastcall hook_engine_camera_enable_manual_control(
             camera, std::memory_order_release);
         __try {
             after =
-                static_cast<const uint8_t*>(camera)[0x259] != 0 ? 1 : 0;
+                static_cast<const uint8_t*>(camera)[manual_control] != 0 ? 1 : 0;
         } __except (EXCEPTION_EXECUTE_HANDLER) {
             after = -1;
         }
@@ -40300,8 +40311,9 @@ void install_engine_native_head_pose_hooks() {
 // The three scene queries resolve through the per-build address table and also
 // run on 5.01, where they and the flags read by
 // read_native_camera_authority_snapshot() (+0x2F3, +0x2F2, +0x11F) are
-// unchanged. EnableManualControl below stays 4.04-only (its camera fields moved
-// by +0x10 in 5.01); GetTopmostCameraObject has its own installer.
+// unchanged. EnableManualControl reads the custom-camera manual-control flag,
+// which moved by +0x10 in 5.01 (table value); GetTopmostCameraObject has its
+// own installer.
 void install_engine_native_camera_authority_hooks() {
     using w3vr::engine_addresses::Function;
     auto* gameplay_scene_target =
@@ -40363,17 +40375,11 @@ void install_engine_native_camera_authority_hooks() {
             global_non_gameplay_target);
     }
 
-    if (!engine_build_supported()) {
-        return;
-    }
-    auto* module = reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr));
-    if (module == nullptr) {
-        return;
-    }
-    constexpr uintptr_t kCameraEnableManualControlRva = 0x01F580E0;
-
     auto* manual_control_target =
-        module + kCameraEnableManualControlRva;
+        engine_function_target(Function::CameraEnableManualControl);
+    if (manual_control_target == nullptr) {
+        return;
+    }
     if (MH_CreateHook(
             manual_control_target,
             reinterpret_cast<void*>(
@@ -40382,9 +40388,8 @@ void install_engine_native_camera_authority_hooks() {
                 &g_engine_camera_enable_manual_control)) == MH_OK &&
         MH_EnableHook(manual_control_target) == MH_OK) {
         log_line(
-            "Hooked native CCustomCamera.EnableManualControl RVA=0x%llX",
-            static_cast<unsigned long long>(
-                kCameraEnableManualControlRva));
+            "Hooked native CCustomCamera.EnableManualControl target=%p",
+            manual_control_target);
     } else {
         log_line(
             "Failed native CCustomCamera.EnableManualControl "

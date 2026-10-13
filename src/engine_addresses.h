@@ -27,6 +27,7 @@ enum class Function : size_t {
     GameplayEntry,     // render-thread gameplay frame task; calls the frame builder
     RenderSceneSetup,  // per-tick scene setup; calls the frame factory
     FrameBuilder,      // render-thread frame build (render_context, frame, extra)
+    CameraEnableManualControl,  // native CCustomCamera.EnableManualControl
     Count,
 };
 
@@ -102,6 +103,11 @@ inline constexpr uint8_t kFrameBuilder501Bytes[] = {
     0x48, 0x8B, 0xC4, 0x48, 0x89, 0x50, 0x10, 0x55, 0x53, 0x56, 0x41, 0x54,
     0x41, 0x55, 0x41, 0x56};
 
+// Registered script native; 24 bytes because the first 16 occur 109 times.
+inline constexpr uint8_t kCameraEnableManualControl501Bytes[] = {
+    0x48, 0x89, 0x5C, 0x24, 0x10, 0x57, 0x48, 0x83, 0xEC, 0x20, 0x48, 0x8B,
+    0x42, 0x30, 0x4C, 0x8D, 0x0D, 0x5B, 0x82, 0xC6, 0x03, 0x48, 0x8B, 0xD9};
+
 inline constexpr Entry kEntries[] = {
     {"IsAnyMenu", 0x01F3C5C0, 0x01DF41A0, {kIsAnyMenuBytes, sizeof(kIsAnyMenuBytes)}},
     {"IsLoadingScreenVideoPlaying", 0x0154EED0, 0x0227A0F0,
@@ -126,6 +132,8 @@ inline constexpr Entry kEntries[] = {
         {kRenderSceneSetup501Bytes, sizeof(kRenderSceneSetup501Bytes)}},
     {"FrameBuilder", 0x01D86400, 0x01C1A210,
         {kFrameBuilder501Bytes, sizeof(kFrameBuilder501Bytes)}},
+    {"CustomCamera.EnableManualControl", 0x01F580E0, 0x01E0D800,
+        {kCameraEnableManualControl501Bytes, sizeof(kCameraEnableManualControl501Bytes)}},
 };
 static_assert(sizeof(kEntries) / sizeof(kEntries[0]) ==
     static_cast<size_t>(Function::Count));
@@ -153,6 +161,7 @@ enum class Value : size_t {
     FrameSecondaryCentreOffset,   // secondary centre x, y; extent w, h follows at +8
     FrameInputExtentOffset,       // render input width, height
     FrameCameraTransformOffset,   // camera transform (row 3 = position); diagnostics only
+    CustomCameraManualControlOffset,  // CCustomCamera manual-control flag byte
     Count,
 };
 
@@ -181,6 +190,8 @@ inline constexpr ValueEntry kValues[] = {
     {"FrameInputExtentOffset", 0xA4C, 0xBEC},
     // Secondary view +0x30 (view floats 0x0C-0x1B, unchanged below 0xAC).
     {"FrameCameraTransformOffset", 0x560, 0x630},
+    // EnableManualControl: the custom-camera fields moved by +0x10 in 5.01.
+    {"CustomCameraManualControlOffset", 0x259, 0x269},
 };
 static_assert(sizeof(kValues) / sizeof(kValues[0]) == static_cast<size_t>(Value::Count));
 
