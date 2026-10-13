@@ -1202,6 +1202,18 @@ bool real_smoke_world_up_binding_route_active() {
             g_config.temporal_backend == TemporalBackend::Dlss);
 }
 
+w3vr::game_build::Build running_game_build();
+
+// 5.01 root signatures expose the VS camera b1 as a VERTEX-only root CBV and
+// deny geometry-shader root access, so the V1080 smoke GS cannot read b1 (4.04
+// has a separate GS CBV table instead). On 5.01 the GS gets its own GEOMETRY
+// root CBV b1, appended to the game's root signatures, and the smoke draw
+// binds it to the VS b1 address.
+bool real_smoke_gs_root_cbv_route_active() {
+    return running_game_build() == w3vr::game_build::Build::Remaster501 &&
+        real_smoke_world_up_binding_route_active();
+}
+
 bool taau_functional_hooks_needed() {
     // Functional metadata and compute interception follows the selected TAAU
     // backend directly. DLSS and No AA never inherit this route.
@@ -16785,6 +16797,91 @@ void STDMETHODCALLTYPE hook_create_uav(
     g_resource_descriptors[dest_descriptor.ptr] = info;
 }
 
+// Appends a GEOMETRY-visible root CBV b1 (copying the VS b1 root CBV) and
+// clears DENY_GEOMETRY_SHADER_ROOT_ACCESS. Existing parameter indices are
+// unchanged, so the game's bindings and PSOs are unaffected. Returns nullptr
+// when the root signature does not have the 5.01 per-stage layout.
+template <typename RootDesc, typename RootParameter>
+ID3DBlob* serialize_root_signature_with_gs_camera(
+    const RootDesc& source, D3D_ROOT_SIGNATURE_VERSION version) {
+    constexpr auto kDenyGeometry =
+        D3D12_ROOT_SIGNATURE_FLAG_DENY_GEOMETRY_SHADER_ROOT_ACCESS;
+    if ((source.Flags & kDenyGeometry) == 0) {
+        return nullptr;
+    }
+    uint32_t cost_dwords{};
+    UINT vertex_camera = UINT_MAX;
+    for (UINT index = 0; index < source.NumParameters; ++index) {
+        const auto& parameter = source.pParameters[index];
+        switch (parameter.ParameterType) {
+        case D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE: cost_dwords += 1; break;
+        case D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS:
+            cost_dwords += parameter.Constants.Num32BitValues; break;
+        default: cost_dwords += 2; break;
+        }
+        if (parameter.ParameterType == D3D12_ROOT_PARAMETER_TYPE_CBV &&
+            parameter.Descriptor.ShaderRegister == 1 &&
+            parameter.Descriptor.RegisterSpace == 0 &&
+            parameter.ShaderVisibility == D3D12_SHADER_VISIBILITY_VERTEX) {
+            vertex_camera = index;
+        }
+    }
+    if (vertex_camera == UINT_MAX || cost_dwords + 2 > 64) {
+        return nullptr;
+    }
+    std::vector<RootParameter> parameters(
+        source.pParameters, source.pParameters + source.NumParameters);
+    RootParameter geometry_camera = source.pParameters[vertex_camera];
+    geometry_camera.ShaderVisibility = D3D12_SHADER_VISIBILITY_GEOMETRY;
+    parameters.push_back(geometry_camera);
+    RootDesc extended = source;
+    extended.NumParameters = static_cast<UINT>(parameters.size());
+    extended.pParameters = parameters.data();
+    extended.Flags = static_cast<D3D12_ROOT_SIGNATURE_FLAGS>(
+        source.Flags & ~kDenyGeometry);
+
+    D3D12_VERSIONED_ROOT_SIGNATURE_DESC versioned{};
+    versioned.Version = version;
+    if constexpr (std::is_same_v<RootDesc, D3D12_ROOT_SIGNATURE_DESC>) {
+        versioned.Desc_1_0 = extended;
+    } else {
+        versioned.Desc_1_1 = extended;
+    }
+    ID3DBlob* blob{};
+    ID3DBlob* errors{};
+    const HRESULT hr = D3D12SerializeVersionedRootSignature(
+        &versioned, &blob, &errors);
+    if (errors != nullptr) errors->Release();
+    if (FAILED(hr)) {
+        if (blob != nullptr) blob->Release();
+        return nullptr;
+    }
+    return blob;
+}
+
+ID3DBlob* extend_root_signature_for_smoke_gs_camera(
+    const void* blob_with_root_signature, SIZE_T blob_length_in_bytes) {
+    ID3D12VersionedRootSignatureDeserializer* deserializer{};
+    if (FAILED(D3D12CreateVersionedRootSignatureDeserializer(
+            blob_with_root_signature, blob_length_in_bytes,
+            IID_PPV_ARGS(&deserializer))) || deserializer == nullptr) {
+        return nullptr;
+    }
+    ID3DBlob* extended{};
+    const auto* desc = deserializer->GetUnconvertedRootSignatureDesc();
+    if (desc != nullptr && desc->Version == D3D_ROOT_SIGNATURE_VERSION_1_0) {
+        extended = serialize_root_signature_with_gs_camera<
+            D3D12_ROOT_SIGNATURE_DESC, D3D12_ROOT_PARAMETER>(
+            desc->Desc_1_0, desc->Version);
+    } else if (desc != nullptr) {
+        extended = serialize_root_signature_with_gs_camera<
+            D3D12_ROOT_SIGNATURE_DESC1, D3D12_ROOT_PARAMETER1>(
+            desc->Desc_1_1, desc->Version);
+    }
+    deserializer->Release();
+    return extended;
+}
+
 HRESULT STDMETHODCALLTYPE hook_create_root_signature(
     ID3D12Device* device,
     UINT node_mask,
@@ -16792,8 +16889,44 @@ HRESULT STDMETHODCALLTYPE hook_create_root_signature(
     SIZE_T blob_length_in_bytes,
     REFIID riid,
     void** root_signature) {
-    const auto hr = g_create_root_signature(device, node_mask, blob_with_root_signature,
+    const void* original_blob = blob_with_root_signature;
+    const SIZE_T original_blob_length = blob_length_in_bytes;
+    ID3DBlob* extended_blob{};
+    if (real_smoke_gs_root_cbv_route_active() &&
+        blob_with_root_signature != nullptr && blob_length_in_bytes != 0) {
+        extended_blob = extend_root_signature_for_smoke_gs_camera(
+            blob_with_root_signature, blob_length_in_bytes);
+        if (extended_blob != nullptr) {
+            blob_with_root_signature = extended_blob->GetBufferPointer();
+            blob_length_in_bytes = extended_blob->GetBufferSize();
+        }
+    }
+    auto hr = g_create_root_signature(device, node_mask, blob_with_root_signature,
         blob_length_in_bytes, riid, root_signature);
+    if (extended_blob != nullptr && FAILED(hr)) {
+        // Fall back to the game's own root signature.
+        log_line("Root signature extension rejected hr=0x%08lX; using original",
+            static_cast<unsigned long>(hr));
+        extended_blob->Release();
+        extended_blob = nullptr;
+        blob_with_root_signature = original_blob;
+        blob_length_in_bytes = original_blob_length;
+        hr = g_create_root_signature(device, node_mask, blob_with_root_signature,
+            blob_length_in_bytes, riid, root_signature);
+    }
+    if (extended_blob != nullptr) {
+        static std::atomic<uint32_t> extended_logs{};
+        if (extended_logs.fetch_add(1, std::memory_order_relaxed) < 8) {
+            log_line("Root signature extended with GS camera b1 hr=0x%08lX rs=%p",
+                static_cast<unsigned long>(hr),
+                root_signature != nullptr ? *root_signature : nullptr);
+        }
+    }
+    // The deserializer below reads the blob that was actually created.
+    struct BlobRelease {
+        ID3DBlob* blob;
+        ~BlobRelease() { if (blob != nullptr) blob->Release(); }
+    } extended_blob_release{extended_blob};
     if (!descriptor_metadata_hooks_needed() || FAILED(hr) || root_signature == nullptr || *root_signature == nullptr ||
         blob_with_root_signature == nullptr || blob_length_in_bytes == 0) {
         return hr;
@@ -16865,6 +16998,18 @@ HRESULT STDMETHODCALLTYPE hook_create_root_signature(
     }
     deserializer->Release();
 
+    if (extended_blob != nullptr && !info.parameters.empty()) {
+        info.geometry_camera_cbv_parameter =
+            static_cast<uint32_t>(info.parameters.size() - 1);
+        for (uint32_t index = 0; index + 1 < info.parameters.size(); ++index) {
+            const auto& parameter = info.parameters[index];
+            if (parameter.type == D3D12_ROOT_PARAMETER_TYPE_CBV &&
+                parameter.shader_register == 1 && parameter.register_space == 0 &&
+                parameter.visibility == D3D12_SHADER_VISIBILITY_VERTEX) {
+                info.vertex_camera_cbv_parameter = index;
+            }
+        }
+    }
     if (!info.parameters.empty()) {
         std::scoped_lock lock{g_reverse_mutex};
         g_root_signature_infos[static_cast<ID3D12RootSignature*>(*root_signature)] = std::move(info);
@@ -20225,6 +20370,7 @@ void install_command_list_hooks() {
     const bool command_state_hooks = graphics_binding_hooks_needed();
     const bool graphics_cbv_hooks =
         native_temporal_terrain_motion_route_active() ||
+        real_smoke_gs_root_cbv_route_active() ||
         (reverse_enabled() && g_config.reverse_cbv_probe);
     const bool compute_hooks = taau_compute_hooks_needed() ||
         rt_symmetric_dlss_per_eye_ao_history_active();
@@ -23405,7 +23551,8 @@ void STDMETHODCALLTYPE hook_set_graphics_root_cbv(
             command_list, root_parameter_index, buffer_location);
         return;
     }
-    if (native_temporal_terrain_motion_route_active() &&
+    if ((native_temporal_terrain_motion_route_active() ||
+            real_smoke_gs_root_cbv_route_active()) &&
         root_parameter_index < 32) {
         if (auto* state = access_dlss_graphics_state(command_list, true)) {
             state->cbv[root_parameter_index] = buffer_location;
@@ -24653,18 +24800,52 @@ void STDMETHODCALLTYPE hook_draw_indexed_instanced(
         if (variant_selected) {
             const auto* state = access_dlss_graphics_state(
                 command_list, false);
-            if (state != nullptr && state->tables[3].ptr != 0 &&
-                state->tables[6].ptr != 0) {
-                uint32_t final_variant = 2;
-                if (variant_pipeline ==
-                    g_real_smoke_center_pipelines[0].load(
-                        std::memory_order_relaxed)) {
-                    final_variant = 0;
-                } else if (variant_pipeline ==
-                    g_real_smoke_center_pipelines[1].load(
-                        std::memory_order_relaxed)) {
-                    final_variant = 1;
+            uint32_t final_variant = 2;
+            if (variant_pipeline ==
+                g_real_smoke_center_pipelines[0].load(
+                    std::memory_order_relaxed)) {
+                final_variant = 0;
+            } else if (variant_pipeline ==
+                g_real_smoke_center_pipelines[1].load(
+                    std::memory_order_relaxed)) {
+                final_variant = 1;
+            }
+            // 5.01: the bound root signature carries an appended GS root CBV
+            // b1 (see extend_root_signature_for_smoke_gs_camera). Point it at
+            // the VS b1 of this draw; the game never binds that parameter.
+            uint32_t vertex_camera = UINT32_MAX;
+            uint32_t geometry_camera = UINT32_MAX;
+            if (real_smoke_gs_root_cbv_route_active() && state != nullptr &&
+                state->root_signature != nullptr &&
+                g_set_graphics_root_cbv != nullptr) {
+                std::scoped_lock lock{g_reverse_mutex};
+                const auto found =
+                    g_root_signature_infos.find(state->root_signature);
+                if (found != g_root_signature_infos.end()) {
+                    vertex_camera = found->second.vertex_camera_cbv_parameter;
+                    geometry_camera =
+                        found->second.geometry_camera_cbv_parameter;
                 }
+            }
+            if (state != nullptr && vertex_camera < state->cbv.size() &&
+                geometry_camera != UINT32_MAX &&
+                state->cbv[vertex_camera] != 0) {
+                g_set_graphics_root_cbv(
+                    command_list, geometry_camera, state->cbv[vertex_camera]);
+                g_set_pipeline_state(command_list, variant_pipeline);
+                record_real_smoke_selection(
+                    real_smoke_trace,
+                    final_variant <= 1 ? 1u : 2u,
+                    final_variant,
+                    real_smoke_asymmetric_center,
+                    true);
+                issue_draw();
+                g_set_pipeline_state(command_list, real_smoke_pipeline);
+                return;
+            }
+            if (!real_smoke_gs_root_cbv_route_active() &&
+                state != nullptr && state->tables[3].ptr != 0 &&
+                state->tables[6].ptr != 0) {
                 const auto original_geometry_table = state->tables[6];
                 // Root 3 and root 6 are the matching VS/GS CBV tables in the
                 // REDengine stage schema. Give the local GS the exact b1 used
@@ -29980,6 +30161,70 @@ HRESULT WINAPI hook_renderdoc_d3d12_create_device_bridge(
             g_renderdoc_module);
     }
     return result;
+}
+
+// 5.01 creates its root signatures before the swapchain, i.e. before
+// install_reverse_hooks() runs, so none of them were recorded. Hook device
+// creation on that build and install the CreateRootSignature hook right after
+// the device exists. install_reverse_hooks() skips it when already present.
+// 4.04 keeps its original hook timing.
+D3D12CreateDeviceFn g_early_d3d12_create_device_trampoline{};
+
+void install_early_root_signature_hook(IUnknown* device_unknown) {
+    if (device_unknown == nullptr || g_create_root_signature != nullptr) {
+        return;
+    }
+    ID3D12Device* device{};
+    if (FAILED(device_unknown->QueryInterface(IID_PPV_ARGS(&device))) ||
+        device == nullptr) {
+        return;
+    }
+    auto target = method<void*>(device, 16);
+    if (MH_CreateHook(target, reinterpret_cast<void*>(&hook_create_root_signature),
+            reinterpret_cast<void**>(&g_create_root_signature)) == MH_OK &&
+        MH_EnableHook(target) == MH_OK) {
+        g_mode3_hud_hook_mask.fetch_or(
+            kMode3HudHookRootSignature, std::memory_order_relaxed);
+        log_line("Early hooked ID3D12Device::CreateRootSignature at %p device=%p",
+            target, device);
+    } else {
+        g_create_root_signature = nullptr;
+        log_line("Early CreateRootSignature hook not installed target=%p", target);
+    }
+    device->Release();
+}
+
+HRESULT WINAPI hook_early_d3d12_create_device(
+    IUnknown* adapter,
+    D3D_FEATURE_LEVEL minimum_feature_level,
+    REFIID riid,
+    void** device) {
+    const HRESULT result = g_early_d3d12_create_device_trampoline(
+        adapter, minimum_feature_level, riid, device);
+    if (SUCCEEDED(result) && device != nullptr && *device != nullptr) {
+        install_early_root_signature_hook(static_cast<IUnknown*>(*device));
+    }
+    return result;
+}
+
+void install_early_d3d12_device_hook() {
+    if (running_game_build() != w3vr::game_build::Build::Remaster501 ||
+        !descriptor_metadata_hooks_needed() ||
+        (g_config.renderdoc_capture_enabled &&
+            g_config.renderdoc_streamline_device_bridge) ||
+        g_early_d3d12_create_device_trampoline != nullptr ||
+        !initialize_real_d3d12_create_device_export()) {
+        return;
+    }
+    auto* target = reinterpret_cast<void*>(g_real_d3d12_create_device);
+    if (MH_CreateHook(target, reinterpret_cast<void*>(&hook_early_d3d12_create_device),
+            reinterpret_cast<void**>(&g_early_d3d12_create_device_trampoline)) == MH_OK &&
+        MH_EnableHook(target) == MH_OK) {
+        log_line("Early D3D12CreateDevice hook installed target=%p", target);
+    } else {
+        g_early_d3d12_create_device_trampoline = nullptr;
+        log_line("Early D3D12CreateDevice hook not installed target=%p", target);
+    }
 }
 
 void install_renderdoc_d3d12_create_device_bridge() {
@@ -45742,6 +45987,7 @@ void ensure_initialized() {
             install_ngx_dlss_hook();
         }
         install_renderdoc_d3d12_create_device_bridge();
+        install_early_d3d12_device_hook();
         log_renderdoc_capture_api_status();
         initialize_focus_projection_shader_file();
         reset_asymmetric_authority_audit();

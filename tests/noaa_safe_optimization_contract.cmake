@@ -19,7 +19,7 @@ set(required_fragments
     "D3D12_GPU_DESCRIPTOR_HANDLE base_descriptor) {\n    if (is_reshade_immediate_command_list(command_list))"
     "return;\n    }\n    if (dlss_graphics_state_tracking_active() &&"
     "D3D12_GPU_VIRTUAL_ADDRESS buffer_location) {\n    if (is_reshade_immediate_command_list(command_list))"
-    "return;\n    }\n    if (native_temporal_terrain_motion_route_active() &&")
+    "return;\n    }\n    if ((native_temporal_terrain_motion_route_active() ||\n            real_smoke_gs_root_cbv_route_active()) &&")
 
 foreach(fragment IN LISTS required_fragments)
     string(FIND "${source}" "${fragment}" position)
