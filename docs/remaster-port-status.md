@@ -393,9 +393,16 @@ Layout changes that block a direct port:
     the forced 1748x1468 render size 0.247 / 0.407 (vivid), OpenXR without HMD camera
     (`hmd_freelook=0`) 0.148 / 0.482, OpenXR mono without dual render 0.154 / 0.494, OpenXR with the
     game's own projection (`hmd_compositor_only=1`, view parameters identical to flat) 0.157 / 0.462.
-    So render size, HMD camera, dual render, eye alternation and projection are ruled out; the cause
-    is something enabled only with OpenXR. Next suspect: the mod's replacement HUD composite pixel
-    shader, which re-blends the whole scene with its own gamma transfer (`custom_constants[2]`). The 5.01
+    So render size, HMD camera, dual render, eye alternation and projection are ruled out, and so is
+    the mod's replacement HUD composite (VR with `[debug] disable_hud_composite_replacement=1`:
+    0.152 / 0.491). Indoors there is no difference (flat 0.742 vs VR 0.732). **Cause: the 5.01 light
+    shafts ("God rays", `[PostProcess] AllowShafts`, on by default in both builds).** With the sun in
+    view 5.01 lays a bright veil over the whole image, also flat without OpenXR (camera tilted
+    towards the sun: 0.186 / 0.509 vs 0.273 / 0.351 looking down). The wider VR field of view keeps
+    the sun or a large part of the sky in view, so the veil is almost always there. With
+    `AllowShafts=false`: flat towards the sun 0.266 / 0.443, OpenXR balcony 0.269 / 0.465 (vivid,
+    more saturated than 4.04 OpenXR at 0.213). Not a mod defect; the 5.01 VR settings profile
+    switches light shafts off (to be applied by the build-aware launcher later). The 5.01
     settings add `[PostProcess] WaterFogPerPixel=true` (also of interest for the water flicker). The water flicker does not occur on 4.04 at the same spot.
   - Aiming (crossbow) untested; cinema camera and cutscenes not yet checked in the headset.
   - Not ported: foliage native snapshot (V1521), native asymmetric projection, TAAU/DLSS/RT
