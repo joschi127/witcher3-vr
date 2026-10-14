@@ -389,9 +389,14 @@ Layout changes that block a direct port:
     flat captures of the same spot, mean saturation / value: 5.01 flat mono 0.244 / 0.395, 5.01 flat
     stereo (alternating eyes) 0.243 / 0.395, **5.01 OpenXR 0.150 / 0.525 (hazy, washed out)**, 4.04
     OpenXR 0.213 / 0.448. So the haze is specific to the 5.01 OpenXR path, not the game itself and
-    not the eye alternation. Remaining candidates: forced per-eye render size, runtime projection
-    (FOV/aspect) or the HMD camera feeding a fog/atmosphere term that changed in 5.01. The 5.01
-    settings add `[PostProcess] WaterFogPerPixel=true` (also of interest for the water flicker).
+    not the eye alternation. Narrowed down further (same spot, mean saturation / value): flat with
+    the forced 1748x1468 render size 0.247 / 0.407 (vivid), OpenXR without HMD camera
+    (`hmd_freelook=0`) 0.148 / 0.482, OpenXR mono without dual render 0.154 / 0.494, OpenXR with the
+    game's own projection (`hmd_compositor_only=1`, view parameters identical to flat) 0.157 / 0.462.
+    So render size, HMD camera, dual render, eye alternation and projection are ruled out; the cause
+    is something enabled only with OpenXR. Next suspect: the mod's replacement HUD composite pixel
+    shader, which re-blends the whole scene with its own gamma transfer (`custom_constants[2]`). The 5.01
+    settings add `[PostProcess] WaterFogPerPixel=true` (also of interest for the water flicker). The water flicker does not occur on 4.04 at the same spot.
   - Aiming (crossbow) untested; cinema camera and cutscenes not yet checked in the headset.
   - Not ported: foliage native snapshot (V1521), native asymmetric projection, TAAU/DLSS/RT
     backends.
