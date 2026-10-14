@@ -183,6 +183,25 @@ same). The material they were derived from is not.
   `SSAOEnabled`). The current 4.04 profile (`launcher/vr_dx12user.settings`) must never be
   applied to 5.x. Keep the list of manual deviations up to date until the launcher implements it.
 
+  5.x VR settings the button must write (verified so far; details in
+  `docs/remaster-port-status.md`):
+  - `[PostProcess] AAMode=1` (FXAA; 5.x values: 0 off, 1 FXAA, 5 FSR, 6 DLSS, 7 XeSS). The mod
+    runs the No-AA route on 5.x; TAAU does not exist there.
+  - `[PostProcess] AllowShafts=false`: 5.x light shafts veil the whole image whenever the sun is
+    in view, which the wide VR field of view makes almost permanent (washed-out colours).
+  - Ray tracing off (`[Rendering/RT] EnableRT`, `RTAOEnabled`, `RTGIPreset`, `Shadows`,
+    `EnableRtRadiance`, `BalanceModeRT`; `[Rendering/RT/PathTracer] PTEnable`), ray
+    reconstruction off (`[PostProcess] EnableDLSSRR`, `[Rendering] AllowDLSSRR`), frame
+    generation off (`FSRFramegen=0`, `XessFrameGeneration=false`, `DLSSGMode=0`), low-latency
+    modes off (`XeLowLatency=false`, `[Viewport] AMDAntiLag=0`, `ReflexMode=0`), HDR off
+    (`[Visuals] HdrEnabled=false`), editor preset detection off
+    (`[Rendering] ShouldDetectEditorGraphicsPreset=false`).
+  - The colour-blindness filter must stay off (the mod's replacement HUD composite does not
+    reproduce it).
+  - Per-eye render size = the OpenXR runtime's recommended size (INI `render_width/height`; the
+    mod forces it on 5.x too); `native_stereo` per runtime (symmetric FOVs: 0).
+  - Keep the user's camera inversion keys, as the 4.04 button does.
+
 ## Open decisions
 
 - One codebase for 4.04 and the Remaster (current approach, working since 2026-10-13) or a
