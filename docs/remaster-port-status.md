@@ -31,7 +31,7 @@ See `remaster-porting-analysis.md` §6. In short:
 - For tests, a Remaster "parity" profile is used: shared keys get the 4.04 VR-profile values,
   and new features (RT, ray reconstruction, editor preset detection) are switched off.
   "Configure Settings for VR" should later apply this automatically per build (see roadmap
-  in `CLAUDE.md`).
+  in `docs/guidelines.md`).
 
 ### Build guard (first code change)
 - `src/game_build.h` identifies the exe from PE `TimeDateStamp` + `SizeOfImage` (4.04, 5.01,

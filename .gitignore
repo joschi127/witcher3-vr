@@ -22,7 +22,7 @@
 witcher3vr.ini
 dx12user.settings
 
-# Local-only port data (see CLAUDE.md "Data hygiene"): never commit
+# Local-only port data (see docs/guidelines.md "Data hygiene"): never commit
 CLAUDE.local.md
 CMakeUserPresets.json
 /.claude/settings.local.json
