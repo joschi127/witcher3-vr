@@ -385,8 +385,13 @@ Layout changes that block a direct port:
     or on 4.04 at the same spot.
   - Colour saturation in VR felt lower than on 4.04 (subjective). The mod passes colours through
     unchanged on both builds (monitor and submitted eye image of the same frame have equal mean
-    saturation), so any difference would come from the game. To compare: play both builds in the
-    headset at a similar spot.
+    saturation). 2026-10-14, balcony save made on 4.04 (5.01 loads it via Continue), null-HMD and
+    flat captures of the same spot, mean saturation / value: 5.01 flat mono 0.244 / 0.395, 5.01 flat
+    stereo (alternating eyes) 0.243 / 0.395, **5.01 OpenXR 0.150 / 0.525 (hazy, washed out)**, 4.04
+    OpenXR 0.213 / 0.448. So the haze is specific to the 5.01 OpenXR path, not the game itself and
+    not the eye alternation. Remaining candidates: forced per-eye render size, runtime projection
+    (FOV/aspect) or the HMD camera feeding a fog/atmosphere term that changed in 5.01. The 5.01
+    settings add `[PostProcess] WaterFogPerPixel=true` (also of interest for the water flicker).
   - Aiming (crossbow) untested; cinema camera and cutscenes not yet checked in the headset.
   - Not ported: foliage native snapshot (V1521), native asymmetric projection, TAAU/DLSS/RT
     backends.
