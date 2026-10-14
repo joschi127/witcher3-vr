@@ -407,3 +407,15 @@ Layout changes that block a direct port:
   - Aiming (crossbow) untested; cinema camera and cutscenes not yet checked in the headset.
   - Not ported: foliage native snapshot (V1521), native asymmetric projection, TAAU/DLSS/RT
     backends.
+
+### Rough VR performance comparison (2026-10-14)
+- SteamVR null driver at 240 Hz (so `xrWaitFrame` does not cap), same balcony save on both builds,
+  15 s standing plus 8 s slow camera turn, no captures, identical diagnostic settings, AMD RX 7900
+  XTX class GPU. One run each, so only the direction is meaningful.
+- Mean time per Present in gameplay: 5.01 (FXAA, No-AA route) ~8.4 ms at 1748x1468 and ~8.8 ms
+  at 2448x2448 per eye; 4.04 ~15 ms in all three variants (TAAU at both sizes, and FXAA with
+  `temporal_backend=none` at 1748x1468). SteamVR app CPU/GPU time: 5.01 ~10.5/4 ms, 4.04
+  ~11.7/3.3 ms.
+- 5.01 is not slower in VR; on this machine it delivers about 1.8x the frame rate. Both builds
+  are CPU-bound here: 2.3x the pixels per eye barely changes the frame time, so a GPU-limited
+  comparison (weaker GPU) is still open.
