@@ -62,4 +62,4 @@ Test setup unless noted: Pico 4 over Virtual Desktop (VDXR), symmetric projectio
 - Cutscenes, including the cinema camera position (2026-10-15).
 - Combat: combat tutorial and the first ghoul fight work well (2026-10-15).
 - Horse riding: works, nothing unusual (2026-10-15).
-- Overall "nice and playable" at 90 Hz with diagnostics off (2026-10-15).
+- Overall "nice and playable" at 90 Hz with diagnostics off, no stutter (2026-10-15).
