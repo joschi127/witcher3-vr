@@ -47,8 +47,7 @@ Test setup unless noted: Pico 4 over Virtual Desktop (VDXR), symmetric projectio
   editor script; untested on 5.01).
 
 ## Untested in the headset
-- Combat, horse, crossbow and the open world remain untested. The session of 2026-10-15 at 90 Hz
-  with diagnostics off was "nice and playable" overall.
+- Horse riding and aiming (crossbow).
 
 ## Not ported yet
 - Foliage native snapshot (V1521) on 5.01.
@@ -60,3 +59,5 @@ Test setup unless noted: Pico 4 over Virtual Desktop (VDXR), symmetric projectio
 - Third-person gameplay with correct 3D depth in both eyes, intro, menus, loading screens, HUD,
   fire/smoke (2026-10-13).
 - Cutscenes, including the cinema camera position (2026-10-15).
+- Combat: combat tutorial and the first ghoul fight work well (2026-10-15).
+- Overall "nice and playable" at 90 Hz with diagnostics off (2026-10-15).

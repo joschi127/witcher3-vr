@@ -434,6 +434,7 @@ Layout changes that block a direct port:
 - Pico 4 over Virtual Desktop at 90 Hz, same FOV and render size as before, all `[debug]`
   diagnostics off (no log).
 - Cutscenes work in the headset, including the cinema camera position.
+- Combat (combat tutorial, first ghoul fight) works well. Horse and crossbow not yet tested.
 - New findings (details in `remaster-open-issues.md`): background trees in the first Ciri cutscene
   follow the head; the distant river switches between blue and white with the head pose (also per
   eye, light shafts off); one kind of grass is always almost black (courtyard and elsewhere); the
