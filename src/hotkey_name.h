@@ -5,11 +5,13 @@
 #include <string>
 
 // Parses a configurable hotkey from the INI: a function key name ("F1" to
-// "F24", case-insensitive) or a Windows virtual-key code in decimal or 0x hex.
+// "F24", case-insensitive), "Space", or a Windows virtual-key code in decimal
+// or 0x hex.
 // Returns 0 for anything else so the caller can fall back to its default.
 namespace w3vr::hotkey_name {
 
 inline constexpr int kVirtualKeyF1 = 0x70;  // VK_F1
+inline constexpr int kVirtualKeySpace = 0x20;  // VK_SPACE
 
 inline int parse_virtual_key(const std::string& text) {
     size_t begin = 0;
@@ -23,6 +25,13 @@ inline int parse_virtual_key(const std::string& text) {
     const std::string value = text.substr(begin, end - begin);
     if (value.empty()) {
         return 0;
+    }
+    std::string lower = value;
+    for (char& c : lower) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    if (lower == "space") {
+        return kVirtualKeySpace;
     }
     const bool function_key = (value[0] == 'F' || value[0] == 'f') &&
         value.size() >= 2 && value.size() <= 3 &&

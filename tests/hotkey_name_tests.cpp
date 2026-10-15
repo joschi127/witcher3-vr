@@ -21,6 +21,8 @@ int main() {
     require(parse_virtual_key("F24") == 0x87, "F24 is the last function key");
     require(parse_virtual_key("F0") == 0, "F0 is rejected");
     require(parse_virtual_key("F25") == 0, "F25 is rejected");
+    require(parse_virtual_key("Space") == 0x20, "Space maps to VK_SPACE");
+    require(parse_virtual_key("SPACE") == 0x20, "key names are case-insensitive");
     require(parse_virtual_key("0x74") == 0x74, "hex virtual-key code");
     require(parse_virtual_key("116") == 0x74, "decimal virtual-key code");
     require(parse_virtual_key("0") == 0, "zero is rejected");
