@@ -419,3 +419,10 @@ Layout changes that block a direct port:
 - 5.01 is not slower in VR; on this machine it delivers about 1.8x the frame rate. Both builds
   are CPU-bound here: 2.3x the pixels per eye barely changes the frame time, so a GPU-limited
   comparison (weaker GPU) is still open.
+- The mod's diagnostics are expensive: the same 5.01 run (1748x1468) with all `[debug]` switches
+  off (`logging_enabled`, `runtime_diagnostics`, both flight recorders, the TAAU-drop, cinema,
+  first-person and world-marker diagnostics) cuts SteamVR's app CPU time from 10.4 ms to 6.0 ms
+  per frame and GPU time from 3.9 ms to 2.5 ms (about 40 % less CPU). The numbers above were all
+  measured with diagnostics on, so they overstate the cost for normal play. Turn diagnostics off
+  for playing and for performance judgements; without them the mod writes no log, so smoke
+  tests need them on (`-IniSet 'debug.logging_enabled=1,debug.runtime_diagnostics=1'`).
