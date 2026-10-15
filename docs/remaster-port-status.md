@@ -3,6 +3,7 @@
 Chronological record of what has been verified. Details live in `remaster-porting-analysis.md` (code
 dependencies, runtime findings) and `remaster-research.md` (public information). Raw logs,
 reverse-engineering output and machine-specific data stay out of the repository.
+Current known problems and untested areas: `remaster-open-issues.md`.
 
 ## 2026-10-10
 
@@ -426,3 +427,13 @@ Layout changes that block a direct port:
   measured with diagnostics on, so they overstate the cost for normal play. Turn diagnostics off
   for playing and for performance judgements; without them the mod writes no log, so smoke
   tests need them on (`-IniSet 'debug.logging_enabled=1,debug.runtime_diagnostics=1'`).
+
+## 2026-10-15
+
+### Headset play session at 90 Hz (diagnostics off)
+- Pico 4 over Virtual Desktop at 90 Hz, same FOV and render size as before, all `[debug]`
+  diagnostics off (no log).
+- Cutscenes work in the headset, including the cinema camera position.
+- New findings (details in `remaster-open-issues.md`): background trees in the first Ciri cutscene
+  follow the head; the distant river switches between blue and white with the head pose (also per
+  eye, light shafts off); grass in the Kaer Morhen courtyard is almost black.

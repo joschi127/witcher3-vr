@@ -124,7 +124,8 @@ hashes per build: `src/shader_fingerprints.h`. Details: `docs/remaster-porting-a
   Its game hooks are raw RVAs patched blindly, and six are installed unconditionally at
   startup. This fork's build guard (`src/game_build.h`) disables engine hooks on unknown or
   unsupported builds. Only builds that contain it may be used on 5.01. Progress log:
-  `docs/remaster-port-status.md`.
+  `docs/remaster-port-status.md`; current known problems and untested areas:
+  `docs/remaster-open-issues.md`.
 - Keep the two game installations strictly separate. Never copy mod files into the wrong one.
   Both share `Documents\The Witcher 3` (saves, `dx12user.settings`), so back it up before
   switching versions or using the launcher's "Configure Settings for VR".
