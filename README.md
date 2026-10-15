@@ -232,7 +232,7 @@ Suggested values:
 | `F3` | Write the recent Route Log and Performance Log events |
 | `F7` | Switch between the VR and Cinema3D HUD layouts |
 | `F8` | Toggle Standard and Near views |
-| `F9` | Recenter the VR view |
+| `F9` | Recenter the VR view (configurable: `[openxr] recenter_key`, e.g. `F5`) |
 | `F10` | Toggle Cinema Mode |
 | `F11` | Toggle First Person |
 

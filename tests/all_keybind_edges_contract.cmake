@@ -6,7 +6,9 @@ file(READ "${DXGI_PROXY_SOURCE}" source)
 
 # All renderer-owned function-key inputs use physical-down state. Other
 # modules (OptiScaler/ReShade/game) may independently consume the low bit.
-foreach(key IN ITEMS F2 F3 F6 F8 F9 F10 F11)
+# F9 (recenter) is configurable via [openxr] recenter_key; its sampling is
+# covered by f9_key_edge_contract.cmake.
+foreach(key IN ITEMS F2 F3 F6 F8 F10 F11)
     string(FIND "${source}" "(GetAsyncKeyState(VK_${key}) & 0x8000) != 0" physical)
     if(physical EQUAL -1)
         message(FATAL_ERROR "${key} lacks physical-down sampling")

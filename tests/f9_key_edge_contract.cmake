@@ -6,7 +6,8 @@ file(READ "${DXGI_PROXY_SOURCE}" source)
 
 foreach(fragment IN ITEMS
         "std::atomic<bool> g_hmd_f9_latched{};"
-        "(GetAsyncKeyState(VK_F9) & 0x8000) != 0"
+        "int recenter_virtual_key{VK_F9};"
+        "(GetAsyncKeyState(g_config.recenter_virtual_key) & 0x8000) != 0"
         "!g_hmd_f9_latched.exchange(true, std::memory_order_relaxed)"
         "g_hmd_f9_latched.store(false, std::memory_order_relaxed);"
         "if (manual_recenter || !g_hmd_center_valid.load())")
@@ -17,7 +18,9 @@ foreach(fragment IN ITEMS
 endforeach()
 
 string(FIND "${source}" "GetAsyncKeyState(VK_F9) & 1" obsolete)
-if(NOT obsolete EQUAL -1)
+string(FIND "${source}" "GetAsyncKeyState(g_config.recenter_virtual_key) & 1"
+    obsolete_configured)
+if(NOT obsolete EQUAL -1 OR NOT obsolete_configured EQUAL -1)
     message(FATAL_ERROR "Unreliable F9 low-bit polling remains")
 endif()
 

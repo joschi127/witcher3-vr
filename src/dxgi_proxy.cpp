@@ -44,6 +44,7 @@
 #include "optiscaler_jitter_policy.h"
 #include "pipeline_flight_recorder.h"
 #include "prefix_hook.h"
+#include "hotkey_name.h"
 #include "route_flight_recorder.h"
 #include "rt_ingress_join.h"
 #include "thread_stack_sampler.h"
@@ -557,6 +558,7 @@ struct Config {
     int hud_stereo_shift_px{-16};
     float hud_size{1.0f};
     bool hud_controller_locked{};
+    int recenter_virtual_key{VK_F9};
     float menu_scale{0.7f};
     float cinema_scale{0.7f};
     float cinema_aspect_ratio{5.0f / 4.0f};
@@ -14426,6 +14428,17 @@ void load_config() {
             read_ini_float("openxr", "hud_size", 1.0f), 0.5f, 1.5f);
         g_config.hud_controller_locked =
             read_ini_bool("openxr", "hud_controller_locked", false);
+        {
+            const auto recenter_key = read_ini_string(
+                "openxr", "recenter_key", "F9");
+            const int virtual_key =
+                w3vr::hotkey_name::parse_virtual_key(recenter_key);
+            g_config.recenter_virtual_key = virtual_key != 0
+                ? virtual_key : VK_F9;
+            log_line("Recenter key %s -> vk=0x%02X%s", recenter_key.c_str(),
+                g_config.recenter_virtual_key,
+                virtual_key != 0 ? "" : " (invalid, using F9)");
+        }
         g_config.menu_scale = std::clamp(
             read_ini_float("openxr", "menu_scale", 0.7f), 0.3f, 1.5f);
         // [FEATURE:CINEMA-ASPECT V1138 1/5] One exact rational owns the
@@ -48750,7 +48763,8 @@ void update_hmd_freelook_pose() {
         (g_xr_views[0].pose.position.x + g_xr_views[1].pose.position.x) * 0.5f,
         (g_xr_views[0].pose.position.y + g_xr_views[1].pose.position.y) * 0.5f,
         (g_xr_views[0].pose.position.z + g_xr_views[1].pose.position.z) * 0.5f};
-    const bool f9_down = (GetAsyncKeyState(VK_F9) & 0x8000) != 0;
+    const bool f9_down =
+        (GetAsyncKeyState(g_config.recenter_virtual_key) & 0x8000) != 0;
     const bool manual_recenter = f9_down &&
         !g_hmd_f9_latched.exchange(true, std::memory_order_relaxed);
     if (!f9_down) {
