@@ -17,6 +17,13 @@ Test setup unless noted: Pico 4 over Virtual Desktop (VDXR), symmetric projectio
 - Suspect: the background is drawn with a camera or view that the mod does not update with the HMD
   pose on 5.01 (for example a cutscene-specific background layer, distant-forest LOD or impostor
   pass with its own view constants). Not yet checked on 4.04 at the same scene.
+- Strong candidate: the foliage native snapshot (V1521), which is not working on 5.01. It covers
+  exactly two shader pairs, distant trees and near fronds, and copies their per-draw camera
+  constants (VS b0, and b12 with the previous-frame camera) into private buffers so that each eye's
+  draw keeps its own values. On 5.01 it falls back on every draw (`reason=graphics_state`: b0 is a
+  root CBV there, b12 sits in another table), so these draws read the game's transient constants,
+  which may hold another eye's or a non-HMD camera. Open: why it shows in cutscenes but not in
+  gameplay; whether "near fronds" also covers the black grass.
 
 ### Distant water switches between blue and white depending on head pose
 - River seen from the Kaer Morhen balcony. It shows either blue or white. Holding the head still
