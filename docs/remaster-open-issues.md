@@ -45,9 +45,10 @@ Test setup unless noted: Pico 4 over Virtual Desktop (VDXR), symmetric projectio
   `hud_controller_locked=1` is an experimental alternative). Options to try: `[openxr] hud_size`
   (0.5-1.5), `hud_stereo_shift_px` (perceived depth), the in-game HUD editor (`Insert`, needs the
   editor script; untested on 5.01).
+- `hud_size=0.8` was clearly better to read than 1.0 (2026-10-15); 0.85 is next to try.
 
 ## Untested in the headset
-- Horse riding and aiming (crossbow).
+- Aiming (crossbow).
 
 ## Not ported yet
 - Foliage native snapshot (V1521) on 5.01.
@@ -60,4 +61,5 @@ Test setup unless noted: Pico 4 over Virtual Desktop (VDXR), symmetric projectio
   fire/smoke (2026-10-13).
 - Cutscenes, including the cinema camera position (2026-10-15).
 - Combat: combat tutorial and the first ghoul fight work well (2026-10-15).
+- Horse riding: works, nothing unusual (2026-10-15).
 - Overall "nice and playable" at 90 Hz with diagnostics off (2026-10-15).
