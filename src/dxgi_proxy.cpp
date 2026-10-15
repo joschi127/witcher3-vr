@@ -726,6 +726,9 @@ struct Config {
     // D3D12 debug layer (5.01: enabled from the early device hook); its
     // stored messages are logged when the XR command list fails to close.
     bool d3d12_debug_layer{false};
+    // Keeps REDengine's own HUD composite PSO bound (no per-eye replacement);
+    // isolates the replacement shader in colour comparisons.
+    bool disable_hud_composite_replacement{false};
     // Optional in-process RenderDoc integration. This is deliberately
     // independent from Diagnostic Logging and defaults off so an adjacent
     // renderdoc.dll can remain installed without touching the render path.
@@ -14748,6 +14751,8 @@ void load_config() {
             "debug", "thread_stack_sampler", false);
         g_config.d3d12_debug_layer = read_ini_bool(
             "debug", "d3d12_debug_layer", false);
+        g_config.disable_hud_composite_replacement = read_ini_bool(
+            "debug", "disable_hud_composite_replacement", false);
         g_config.focus_projection_shader_registry = read_ini_bool(
             "focus_projection", "shader_registry_enabled", false);
         g_config.cinema_camera_diagnostics = read_ini_bool(
@@ -23709,6 +23714,7 @@ void STDMETHODCALLTYPE hook_set_pipeline_state(
     }
     ID3D12PipelineState* bound_pipeline_state = pipeline_state;
     if (pipeline_state != nullptr &&
+        !g_config.disable_hud_composite_replacement &&
         g_hud_composite_original_pso.load(std::memory_order_acquire) == pipeline_state) {
         // [FIX:NATIVE-VIDEO-HUD-COMPOSITE-BYPASS 1/1] CRenderVideo owns one
         // native mono frame.  V881/V882 admitted automatic Full VR into this
