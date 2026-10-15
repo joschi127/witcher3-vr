@@ -29,10 +29,10 @@ Test setup unless noted: Pico 4 over Virtual Desktop (VDXR), symmetric projectio
   threshold of the camera angle or position. Next step: a test script with small camera movements on
   the balcony and a flat check (without the mod) with the same movements.
 
-### One kind of grass is always very dark, almost black
-- Seen in gameplay in the Kaer Morhen courtyard and at other places (2026-10-15). The same kind of
-  grass is always black, never right; other vegetation looks normal. A 5.01 save at the courtyard
-  exists locally.
+### One kind of grass is always very dark, almost black (next priority)
+- Seen in gameplay in the Kaer Morhen courtyard and everywhere outdoors (2026-10-15/16). The same
+  kind of grass is always black, never right; other vegetation looks normal. 5.01 saves at the
+  courtyard and outdoors exist locally.
 - Likely related to the open foliage port: the foliage native snapshot (V1521) falls back on every
   draw on 5.01 (`reason=graphics_state`, it expects the 4.04 VS bindings). Not yet checked flat or
   on 4.04 at the same spot.
@@ -45,7 +45,14 @@ Test setup unless noted: Pico 4 over Virtual Desktop (VDXR), symmetric projectio
   `hud_controller_locked=1` is an experimental alternative). Options to try: `[openxr] hud_size`
   (0.5-1.5), `hud_stereo_shift_px` (perceived depth), the in-game HUD editor (`Insert`, needs the
   editor script; untested on 5.01).
-- `hud_size=0.8` was clearly better to read than 1.0 (2026-10-15); 0.85 is next to try.
+- `hud_size=0.8` was clearly better to read than 1.0 (2026-10-15). `hud_size=0.85` with
+  `hud_controller_locked=1` (HUD stays in place when turning the head) works well on 5.01 and is
+  much better to read (2026-10-16). Kept open until it is a default or a launcher setting.
+
+### Anti-aliasing (FXAA only on 5.01)
+- Edges looked rough at Virtual Desktop "High" (1748x1468 per eye). Rendering at the runtime's
+  "Ultra" recommendation (1872x1572) was much better (2026-10-16). The render size is fixed in the
+  INI; the launcher's `resolution_auto` is not yet usable on 5.01.
 
 ## Untested in the headset
 - Aiming (crossbow).
