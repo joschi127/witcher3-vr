@@ -436,4 +436,5 @@ Layout changes that block a direct port:
 - Cutscenes work in the headset, including the cinema camera position.
 - New findings (details in `remaster-open-issues.md`): background trees in the first Ciri cutscene
   follow the head; the distant river switches between blue and white with the head pose (also per
-  eye, light shafts off); grass in the Kaer Morhen courtyard is almost black.
+  eye, light shafts off); one kind of grass is always almost black (courtyard and elsewhere); the
+  background-tree problem also appeared in a second cutscene. Overall: nice and playable at 90 Hz.
