@@ -23,7 +23,12 @@ Test setup unless noted: Pico 4 over Virtual Desktop (VDXR), symmetric projectio
   draw keeps its own values. On 5.01 it falls back on every draw (`reason=graphics_state`: b0 is a
   root CBV there, b12 sits in another table), so these draws read the game's transient constants,
   which may hold another eye's or a non-HMD camera. Open: why it shows in cutscenes but not in
-  gameplay; whether "near fronds" also covers the black grass.
+  gameplay.
+- Also possible: a 4.04 problem as well. Upstream removed its foliage orientation correction in
+  V1519/V1521 ("incomplete ... a complete correction can be reintroduced later"); the snapshot
+  that remains copies the constants unchanged. Upstream's README lists "Some terrain can still
+  look incorrect in a few Full VR cutscenes" as a known issue. Next step: the same cutscene on 4.04
+  in the headset.
 
 ### Distant water switches between blue and white depending on head pose
 - River seen from the Kaer Morhen balcony. It shows either blue or white. Holding the head still
@@ -40,9 +45,13 @@ Test setup unless noted: Pico 4 over Virtual Desktop (VDXR), symmetric projectio
 - Seen in gameplay in the Kaer Morhen courtyard and everywhere outdoors (2026-10-15/16). The same
   kind of grass is always black, never right; other vegetation looks normal. 5.01 saves at the
   courtyard and outdoors exist locally.
-- Likely related to the open foliage port: the foliage native snapshot (V1521) falls back on every
-  draw on 5.01 (`reason=graphics_state`, it expects the 4.04 VS bindings). Not yet checked flat or
-  on 4.04 at the same spot.
+- Reproduced without a headset (2026-10-16, outdoor save): black in the OpenXR null-driver run and
+  equally black **flat without OpenXR** (`openxr.enabled=0`, mono). So it is neither the dual
+  render nor the foliage snapshot (V1521 only runs with OpenXR); the mod has no grass-specific code.
+- Open: does it happen without the mod? Not yet checked: on 5.01 the game reads input through
+  GameInput, so injected keystrokes (SendInput) do not reach it and an unattended run without the
+  mod cannot load the save. Candidates if it also happens without the mod: the VR settings profile
+  (ray tracing off, `SSAOEnabled`, values copied from the 4.04 VR profile such as `GrassDensity`).
 
 ## Usability
 
