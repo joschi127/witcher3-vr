@@ -22,13 +22,16 @@
 //   3000 trigger R 1      right trigger 0..1
 //   9000 capture          request an image capture (handled by the host)
 //   9500 flight_dump      dump the flight recorders, like F3 (handled by the host)
+//   9800 hmd 20 -10       turn the located OpenXR head pose by yaw/pitch degrees
+//                         (-90..90, held until changed; handled by the host)
 //   60000 quit            close the game
 //
 // Button names: A B X Y LB RB BACK START LS RS UP DOWN LEFT RIGHT. The masks
 // equal XINPUT_GAMEPAD_* so the host can OR them into XINPUT_GAMEPAD.
 namespace w3vr::test_input {
 
-enum class Action : uint8_t { Down, Up, Stick, Trigger, Capture, FlightDump, Quit };
+enum class Action : uint8_t {
+    Down, Up, Stick, Trigger, Capture, FlightDump, Hmd, Quit };
 enum class Side : uint8_t { Left, Right };
 
 struct Event {
@@ -48,6 +51,12 @@ struct PadState {
     float ry{};
     float lt{};
     float rt{};
+};
+
+// Synthetic head rotation added to the located OpenXR views (degrees).
+struct HeadOffset {
+    float yaw_degrees{};
+    float pitch_degrees{};
 };
 
 struct ButtonName {
@@ -243,6 +252,13 @@ inline bool parse_script(
             event.action = Action::Capture;
         } else if (action == "flight_dump") {
             event.action = Action::FlightDump;
+        } else if (action == "hmd") {
+            if (words.size() < 4 ||
+                !detail::parse_float(words[2], -90.0f, 90.0f, event.x) ||
+                !detail::parse_float(words[3], -90.0f, 90.0f, event.y)) {
+                return fail("expected 'hmd <yaw> <pitch>' with degrees in -90..90");
+            }
+            event.action = Action::Hmd;
         } else if (action == "quit") {
             event.action = Action::Quit;
         } else {
@@ -286,6 +302,10 @@ public:
                 break;
             case Action::Capture: ++due.captures; break;
             case Action::FlightDump: ++due.flight_dumps; break;
+            case Action::Hmd:
+                head_.yaw_degrees = e.x;
+                head_.pitch_degrees = e.y;
+                break;
             case Action::Quit: due.quit = true; break;
             }
         }
@@ -293,12 +313,14 @@ public:
     }
 
     const PadState& state() const { return state_; }
+    const HeadOffset& head() const { return head_; }
     bool finished() const { return next_ >= events_.size(); }
 
 private:
     std::vector<Event> events_;
     size_t next_{};
     PadState state_{};
+    HeadOffset head_{};
 };
 
 // Converts successive physical pad states into script lines. Sticks use a

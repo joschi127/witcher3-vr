@@ -90,7 +90,9 @@ game folder. Add Defender exclusions for the build directory and the installed `
   `-OpenXrRuntimeJson <SteamVR>\steamxr_win64.json` runs the full OpenXR/dual-render path
   without a headset through the SteamVR null driver (setup in `docs/remaster-port-status.md`,
   2026-10-13). A `flight_dump` script action writes the flight recorders and, with
-  `[debug] thread_stack_sampler=1`, a render-thread CPU profile to the log. Captures include the
+  `[debug] thread_stack_sampler=1`, a render-thread CPU profile to the log. An `hmd <yaw> <pitch>`
+  action turns the located OpenXR head pose (degrees, held until changed), so head-motion bugs can
+  be reproduced with the static null HMD. Captures include the
   two images submitted to OpenXR (`*_xr_eye0/1.png`) when a stereo pair is active.
 - In-game test mode (`[test]` in `witcher3vr.ini`, logic in `src/test_input_script.h`):
   `record_input=1` records the physical gamepad to `witcher3vr-input-recording.txt`,

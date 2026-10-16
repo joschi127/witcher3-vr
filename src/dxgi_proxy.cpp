@@ -44766,6 +44766,36 @@ struct TestModeState {
 };
 
 TestModeState g_test_mode;
+// Synthetic head rotation from the script's "hmd" action, applied to every
+// located OpenXR view pair (headset-free tests with a static null HMD).
+std::atomic<float> g_test_hmd_yaw_degrees{};
+std::atomic<float> g_test_hmd_pitch_degrees{};
+
+void apply_test_hmd_offset(XrView* views, uint32_t view_count) {
+    const float yaw = g_test_hmd_yaw_degrees.load(std::memory_order_relaxed);
+    const float pitch =
+        g_test_hmd_pitch_degrees.load(std::memory_order_relaxed);
+    if (views == nullptr || view_count < 2 || (yaw == 0.0f && pitch == 0.0f)) {
+        return;
+    }
+    // Turn both eyes around the head centre in reference space, as a real
+    // head turn would.
+    const XrQuaternionf offset =
+        w3vr::openxr_eye_geometry::from_hmd_euler_degrees(pitch, yaw, 0.0f);
+    const XrVector3f centre{
+        (views[0].pose.position.x + views[1].pose.position.x) * 0.5f,
+        (views[0].pose.position.y + views[1].pose.position.y) * 0.5f,
+        (views[0].pose.position.z + views[1].pose.position.z) * 0.5f};
+    for (uint32_t eye = 0; eye < 2; ++eye) {
+        auto& pose = views[eye].pose;
+        const XrVector3f local{pose.position.x - centre.x,
+            pose.position.y - centre.y, pose.position.z - centre.z};
+        const XrVector3f turned = rotate_vector(offset, local);
+        pose.position = {centre.x + turned.x, centre.y + turned.y,
+            centre.z + turned.z};
+        pose.orientation = multiply_quaternions(offset, pose.orientation);
+    }
+}
 // Frames still to capture for pending "capture" actions, and the script time
 // that requested them (used in the file names).
 std::atomic<uint32_t> g_test_capture_frames_pending{};
@@ -44895,6 +44925,15 @@ bool test_mode_advance(uint64_t frame, uint32_t now_ms) {
     }
     const auto due = g_test_mode.player->advance(now_ms);
     g_test_mode.pad = g_test_mode.player->state();
+    const auto& head = g_test_mode.player->head();
+    const bool yaw_changed = g_test_hmd_yaw_degrees.exchange(
+        head.yaw_degrees, std::memory_order_relaxed) != head.yaw_degrees;
+    const bool pitch_changed = g_test_hmd_pitch_degrees.exchange(
+        head.pitch_degrees, std::memory_order_relaxed) != head.pitch_degrees;
+    if (yaw_changed || pitch_changed) {
+        log_line("Test mode hmd offset yaw=%.1f pitch=%.1f at_ms=%u",
+            head.yaw_degrees, head.pitch_degrees, now_ms);
+    }
     if (due.captures != 0) {
         // Two consecutive frames: in flat stereo the eyes alternate per frame.
         g_test_capture_request_ms.store(now_ms, std::memory_order_relaxed);
@@ -48923,6 +48962,9 @@ void prepare_openxr_render_frame(uint32_t origin) {
     result = pfn_xrLocateViews(g_xr_session, &locate_info, &view_state,
         static_cast<uint32_t>(g_xr_views.size()), &view_count, g_xr_views.data());
 
+    if (XR_SUCCEEDED(result)) {
+        apply_test_hmd_offset(g_xr_views.data(), view_count);
+    }
     g_xr_render_frame_state = frame_state;
     g_xr_render_views_valid = XR_SUCCEEDED(result) && view_count >= 2;
     g_xr_render_view_state_flags.store(
@@ -48983,6 +49025,7 @@ XrTime locate_openxr_mode3_pair_pose() {
         return 0;
     }
 
+    apply_test_hmd_offset(located_views.data(), view_count);
     g_xr_views[0] = located_views[0];
     g_xr_views[1] = located_views[1];
     g_xr_render_views_valid = true;
@@ -51071,6 +51114,9 @@ void render_openxr_test_frame(
             static_cast<uint32_t>(g_xr_views.size()), &view_count,
             locate_destination);
         views_valid = XR_SUCCEEDED(result) && view_count >= 2;
+        if (views_valid) {
+            apply_test_hmd_offset(locate_destination, view_count);
+        }
         located_view_state_flags = views_valid
             ? view_state.viewStateFlags
             : 0;

@@ -30,10 +30,11 @@ int main() {
         "2600 up LB\n"
         "4000 capture\n"
         "4200 flight_dump\n"
+        "4300 hmd 20 -10\n"
         "5000 stick L 0 0\n"
         "9000 quit";
     require(parse_script(script, events, error), "valid script parses");
-    require(events.size() == 12, "tap expands to down and up");
+    require(events.size() == 13, "tap expands to down and up");
     for (size_t i = 1; i < events.size(); ++i) {
         require(events[i - 1].time_ms <= events[i].time_ms, "events are time ordered");
     }
@@ -58,13 +59,16 @@ int main() {
     due = player.advance(4500);
     require(due.captures == 0, "capture not repeated");
     require(due.flight_dumps == 1, "flight dump reported once");
+    require(player.head().yaw_degrees == 20.0f &&
+            player.head().pitch_degrees == -10.0f,
+        "hmd offset applied and held");
     due = player.advance(10000);
     require(player.state().ly == 0.0f, "stick returned to centre");
     require(due.quit && player.finished(), "quit reported at the end");
 
     const char* bad[] = {
         "abc tap A", "100 tap Z", "100 stick L 2 0", "100 trigger L -1",
-        "100 jump", "100", "100 tap A x",
+        "100 jump", "100", "100 tap A x", "100 hmd 120 0", "100 hmd 10",
     };
     for (const char* text : bad) {
         require(!parse_script(text, events, error), "invalid line is rejected");
