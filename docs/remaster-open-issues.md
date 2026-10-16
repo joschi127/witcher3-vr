@@ -48,10 +48,15 @@ Test setup unless noted: Pico 4 over Virtual Desktop (VDXR), symmetric projectio
 - Reproduced without a headset (2026-10-16, outdoor save): black in the OpenXR null-driver run and
   equally black **flat without OpenXR** (`openxr.enabled=0`, mono). So it is neither the dual
   render nor the foliage snapshot (V1521 only runs with OpenXR); the mod has no grass-specific code.
-- Open: does it happen without the mod? Not yet checked: on 5.01 the game reads input through
-  GameInput, so injected keystrokes (SendInput) do not reach it and an unattended run without the
-  mod cannot load the save. Candidates if it also happens without the mod: the VR settings profile
-  (ray tracing off, `SSAOEnabled`, values copied from the 4.04 VR profile such as `GrassDensity`).
+- Not the settings either (flat runs, each still black): ray tracing on, the texture keys copied
+  from the 4.04 profile removed, grass/SpeedTree/foliage values at their 5.x defaults, FSR instead
+  of FXAA. Also black at the game's native 2560x1440 without the forced render size, where the mod
+  no longer changes any rendering.
+- **Most likely an AMD driver issue, not a port problem.** Community reports describe solid black
+  grass on Radeon GPUs since the 5.0 update and recommend AMD Adrenalin 26.9.2 or newer. The test
+  machine runs an AMD driver from August 2026, older than that. Next step: update the driver and
+  repeat the flat run. A run without the mod is still open (on 5.01 the game reads input through
+  GameInput, so injected keystrokes do not reach it).
 
 ## Usability
 
