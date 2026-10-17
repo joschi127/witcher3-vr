@@ -641,10 +641,11 @@ void TestProportionalCutsceneConvergence() {
 
 void TestReleaseDefaults() {
     const w3vr::LauncherState defaults;
-    Require(defaults.mode == w3vr::RenderMode::AerAfwDlss &&
+    // This fork defaults to Stereo - No AA / FXAA on both game versions.
+    Require(defaults.mode == w3vr::RenderMode::StereoNone &&
         defaults.dlss_quality == 3 &&
         defaults.width == 2688 && defaults.height == 2784,
-        "AER DLSS Performance and resolution release defaults changed");
+        "Stereo No AA and resolution release defaults changed");
     Require(defaults.presentation_scale == 1.0f,
         "Presentation Size must default to 1.00");
     Require(defaults.world_detail_range == 1.0f,
@@ -724,7 +725,7 @@ void TestEmbeddedLauncherDefaults() {
     Require(defaults.has_value(),
         "embedded launcher INI defaults could not be loaded");
     Require(defaults->Get("meta", "config_version") == "19" &&
-        defaults->Get("openxr", "mode3_aer_presentation") == "1" &&
+        defaults->Get("openxr", "mode3_aer_presentation") == "0" &&
         defaults->Get("openxr", "resolution_auto") == "1" &&
         defaults->Get("openxr", "presentation_scale") == "1.000" &&
         !defaults->Get("openxr", "presentation_black_resize").has_value() &&
@@ -732,7 +733,7 @@ void TestEmbeddedLauncherDefaults() {
         defaults->Get("openxr", "native_stereo") == "1" &&
         !defaults->Get(
             "openxr", "alternate_presentation_resize").has_value() &&
-        defaults->Get("engine", "temporal_backend") == "dlss" &&
+        defaults->Get("engine", "temporal_backend") == "none" &&
         defaults->Get("engine", "first_person_combat_exit") == "0" &&
         defaults->Get("engine", "raytracing_history_buffers") == "8" &&
         defaults->Get("renderdoc", "enabled") == "0" &&
@@ -1711,6 +1712,61 @@ void TestVrBaselineAndRestore(const w3vr::ConfigPaths& paths) {
         "restored backup should be consumed and disable the button");
 }
 
+void TestRemasteredVrSettingsAndRestore(const w3vr::ConfigPaths& paths) {
+    WriteBaseFixtures(paths);
+    Write(paths.game_settings, Read(paths.game_settings) +
+        "[PostProcess]\r\n"
+        "AllowShafts=true\r\n"
+        "GTAOQuality=3\r\n"
+        "[Rendering/RT]\r\n"
+        "EnableRT=true\r\n"
+        "[Input]\r\n"
+        "InvertCameraY=true\r\n");
+    const std::string original = Read(paths.game_settings);
+    std::wstring error;
+    Require(w3vr::ConfigureRemasteredGameSettingsForVr(paths, error),
+        "Remastered VR settings failed");
+    Require(Read(w3vr::OriginalSettingsBackupPath(paths)) == original,
+        "Remastered configure must back up the original file");
+    auto configured = w3vr::IniDocument::Load(paths.game_settings, error);
+    Require(configured.has_value(), "Remastered settings could not be read");
+    Require(configured->Get("PostProcess", "AAMode") == "1" &&
+        configured->Get("PostProcess", "AllowShafts") == "false" &&
+        configured->Get("Rendering/RT", "EnableRT") == "false" &&
+        configured->Get("Rendering/RT/PathTracer", "PTEnable") == "false" &&
+        configured->Get("Visuals", "HdrEnabled") == "false",
+        "Remastered VR settings were not applied");
+    Require(configured->Get("PostProcess", "GTAOQuality") == "3" &&
+        configured->Get("Galaxy", "tokenRefA") == "user-secret" &&
+        configured->Get("Input", "InvertCameraY") == "true",
+        "Remastered configure must keep all other settings");
+    Require(w3vr::RestoreOriginalGameSettings(paths, error) &&
+        Read(paths.game_settings) == original,
+        "Remastered restore did not reproduce the original file");
+
+    Require(w3vr::AvailableRenderMode(w3vr::RenderMode::AerAfwDlss, true, true) ==
+            w3vr::RenderMode::StereoNone &&
+        w3vr::AvailableRenderMode(w3vr::RenderMode::MonoDlss, true, true) ==
+            w3vr::RenderMode::MonoNone &&
+        w3vr::AvailableRenderMode(w3vr::RenderMode::AerAfwDlss, false, false) ==
+            w3vr::RenderMode::StereoDlssSequential &&
+        w3vr::AvailableRenderMode(w3vr::RenderMode::AerAfwTaau, false, false) ==
+            w3vr::RenderMode::StereoTaau &&
+        w3vr::AvailableRenderMode(w3vr::RenderMode::AerAfwDlss, false, true) ==
+            w3vr::RenderMode::AerAfwDlss,
+        "available render mode mapping");
+
+    WriteBaseFixtures(paths);
+    w3vr::LauncherState state;
+    state.remastered = true;
+    state.mode = w3vr::RenderMode::StereoNone;
+    w3vr::IniDocument vr;
+    w3vr::IniDocument game;
+    Require(w3vr::BuildUpdatedDocuments(paths, state, vr, game, error) &&
+        vr.Get("openxr", "native_stereo") == "0",
+        "Remastered save writes symmetric projection");
+}
+
 void TestFailurePaths(const fs::path& root) {
     const auto missing = MakePaths(root / "missing");
     w3vr::IniDocument vr;
@@ -1987,6 +2043,7 @@ int main() {
         TestInconsistentWarning(paths);
         TestFirstRunConfiguration(temporary.path);
         TestVrBaselineAndRestore(paths);
+        TestRemasteredVrSettingsAndRestore(paths);
         TestFailurePaths(temporary.path);
         TestOfxrLaunchEnvironment(temporary.path);
         TestOfxrAndPersistentOptiscalerSave();

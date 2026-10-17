@@ -91,7 +91,9 @@ struct ModeSettings {
 };
 
 struct LauncherState {
-    RenderMode mode{RenderMode::AerAfwDlss};
+    // This fork's default for both game versions: AER + AFW needs
+    // PDAFWPlugin.dll (not shipped) and 5.x has no TAAU/DLSS route yet.
+    RenderMode mode{RenderMode::StereoNone};
     bool resolution_auto{true};
     int width{2688};
     int height{2784};
@@ -148,6 +150,12 @@ enum class GameEdition {
 
 // Reads the major file version of witcher3.exe.
 GameEdition DetectGameEdition(const std::filesystem::path& game_executable);
+
+// The closest render mode that can be used: Stereo/Mono with FXAA on
+// Remastered 5.x, and the matching Stereo mode instead of AER + AFW when
+// PDAFWPlugin.dll is missing.
+RenderMode AvailableRenderMode(
+    RenderMode mode, bool remastered, bool afw_plugin_present);
 
 // Returns why the selected render mode cannot be used, or an empty string.
 // AER + AFW needs PureDark's PDAFWPlugin.dll, which this fork does not ship.
@@ -237,6 +245,11 @@ std::filesystem::path OriginalSettingsBackupPath(const ConfigPaths& paths);
 bool HasOriginalSettingsBackup(const ConfigPaths& paths);
 bool ConfigureGameSettingsForVr(const ConfigPaths& paths,
     const std::string& template_contents, std::wstring& error);
+// Remastered 5.x counterpart of ConfigureGameSettingsForVr: sets the VR
+// settings that matter on 5.x in the existing dx12user.settings and keeps
+// everything else (the 4.04 template must never be applied to 5.x).
+bool ConfigureRemasteredGameSettingsForVr(
+    const ConfigPaths& paths, std::wstring& error);
 bool RestoreOriginalGameSettings(const ConfigPaths& paths, std::wstring& error);
 
 } // namespace w3vr

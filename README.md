@@ -45,8 +45,8 @@ an AMD GPU with a Pico 4 over Virtual Desktop. What works and what does not:
   game does not break it blindly, but the mod then does nothing.
 - Release packages are on [this fork's releases page](https://github.com/joschi127/witcher3-vr/releases)
   and work for both game versions (see [Installation](#installation)).
-- Do **not** use the launcher's **Configure Settings for VR** on 5.x: it writes the 4.04 settings
-  profile. The 5.x settings that matter for VR are listed in `docs/guidelines.md`.
+- The launcher detects 5.x: **Configure Settings for VR** applies the 5.x VR settings there, and only
+  the modes that work on 5.x can be saved.
 - On AMD GPUs, use Adrenalin 26.9.2 or newer; older drivers render some 5.x grass solid black (with
   or without the mod). The automatic AMD update may not offer it yet.
 
@@ -175,10 +175,14 @@ Back up any files you have edited manually before installing a new release.
 
 Press **Configure Settings for VR** at least once before playing. It applies the tested game profile and creates a backup that can be restored later with **Restore Original Settings**.
 
-On Remastered 5.x this button is disabled: its profile is made for 4.04. Set these in the game's
-graphics options instead: anti-aliasing **FXAA**, ray tracing and path tracing **off**, light shafts
-**off** (they veil the image whenever the sun is in view), frame generation, low-latency modes and HDR
-**off**. In the launcher choose **Stereo - No AA / FXAA** and, ideally, **AUTO** resolution.
+On Remastered 5.x the button applies the 5.x VR settings to your existing game settings instead of
+the 4.04 profile: anti-aliasing **FXAA**; ray tracing, path tracing, light shafts (they veil the image
+whenever the sun is in view), frame generation, low-latency modes, HDR and motion blur/lens effects
+**off**. Everything else, such as texture quality, language and camera inversion, stays as you set it.
+
+The launcher starts in **Stereo - No AA / FXAA** with **AUTO** resolution on both game versions. A
+fresh installation therefore only needs: start the launcher, press **Configure Settings for VR** once,
+then **Save & Launch**.
 
 ### Resolution
 

@@ -213,6 +213,9 @@ same). The material they were derived from is not.
   detection) and AA/AO values whose meaning changed in 5.x (`AAMode`: 1 = FXAA on 5.x,
   `SSAOEnabled`). The current 4.04 profile (`launcher/vr_dx12user.settings`) must never be
   applied to 5.x. Keep the list of manual deviations up to date until the launcher implements it.
+  Implemented on 2026-10-17: on 5.x the button calls `ConfigureRemasteredGameSettingsForVr`
+  (`launcher/config.cpp`), which sets the list below in the existing settings file and keeps
+  everything else; new 5.x findings go into that table and this list.
 
   5.x VR settings the button must write (verified so far; details in
   `docs/remaster-port-status.md`):

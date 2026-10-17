@@ -1849,6 +1849,8 @@ bool BuildUpdatedDocuments(const ConfigPaths& paths, const LauncherState& state,
         game_settings.Set("PostProcess", "AAMode", "1");
         game_settings.Set("Rendering", "AllowDLSS", "false");
         game_settings.Set("DLC", "DlcEnabled_movementinputfix", "0");
+        // The native asymmetric projection is not ported to 5.x yet.
+        vr_ini.Set("openxr", "native_stereo", "0");
         return true;
     }
     game_settings.Set("PostProcess", "AAMode", std::to_string(mode.aa_mode));
@@ -2057,6 +2059,20 @@ GameEdition DetectGameEdition(const std::filesystem::path& game_executable) {
     }
 }
 
+RenderMode AvailableRenderMode(
+    RenderMode mode, bool remastered, bool afw_plugin_present) {
+    if (remastered) {
+        const bool mono = mode == RenderMode::MonoNone ||
+            mode == RenderMode::MonoTaau || mode == RenderMode::MonoDlss;
+        return mono ? RenderMode::MonoNone : RenderMode::StereoNone;
+    }
+    if (!afw_plugin_present) {
+        if (mode == RenderMode::AerAfwTaau) return RenderMode::StereoTaau;
+        if (mode == RenderMode::AerAfwDlss) return RenderMode::StereoDlssSequential;
+    }
+    return mode;
+}
+
 std::wstring RenderModeUnavailableReason(
     const LauncherState& state, bool afw_plugin_present) {
     const bool aer = state.mode == RenderMode::AerAfwTaau ||
@@ -2143,6 +2159,70 @@ bool ConfigureGameSettingsForVr(const ConfigPaths& paths,
         return false;
     }
     return AtomicWriteWithBackup(paths.game_settings, configured.Serialize(), error);
+}
+
+bool ConfigureRemasteredGameSettingsForVr(
+    const ConfigPaths& paths, std::wstring& error) {
+    auto configured = IniDocument::Load(paths.game_settings, error);
+    if (!configured) return false;
+    // Verified for VR on Remastered 5.x (docs/guidelines.md, "5.x VR settings
+    // the button must write"). Resolution and AAMode follow from the launcher
+    // state, which the caller saves right afterwards.
+    struct Setting {
+        const char* section;
+        const char* key;
+        const char* value;
+    };
+    static constexpr Setting kSettings[] = {
+        // No temporal AA route on 5.x yet: FXAA.
+        {"PostProcess", "AAMode", "1"},
+        // Light shafts veil the whole image whenever the sun is in view.
+        {"PostProcess", "AllowShafts", "false"},
+        // Ray and path tracing, ray reconstruction.
+        {"Rendering/RT", "EnableRT", "false"},
+        {"Rendering/RT", "RTAOEnabled", "false"},
+        {"Rendering/RT", "RTGIPreset", "false"},
+        {"Rendering/RT", "Shadows", "0"},
+        {"Rendering/RT", "EnableRtRadiance", "false"},
+        {"Rendering/RT", "BalanceModeRT", "false"},
+        {"Rendering/RT/PathTracer", "PTEnable", "false"},
+        {"PostProcess", "EnableDLSSRR", "false"},
+        {"Rendering", "AllowDLSSRR", "false"},
+        {"Rendering", "AllowDLSS", "false"},
+        // Frame generation and low-latency modes.
+        {"PostProcess", "FSRFramegen", "0"},
+        {"PostProcess", "XessFrameGeneration", "false"},
+        {"PostProcess", "DLSSGMode", "0"},
+        {"PostProcess", "XeLowLatency", "false"},
+        {"Viewport", "AMDAntiLag", "0"},
+        {"Viewport", "ReflexMode", "0"},
+        {"Viewport", "VSync", "false"},
+        {"Engine", "LimitFPS", "0"},
+        {"Visuals", "HdrEnabled", "false"},
+        {"Rendering", "ShouldDetectEditorGraphicsPreset", "false"},
+        // Effects that look detached or uncomfortable in VR (as in the 4.04
+        // profile and the README recommendations).
+        {"PostProcess", "AllowMotionBlur", "false"},
+        {"PostProcess", "AllowBlur", "false"},
+        {"PostProcess", "AllowDOF", "false"},
+        {"PostProcess", "AllowLensEffects", "false"},
+        {"PostProcess", "AllowVignette", "false"},
+        {"PostProcess", "AllowChromaticAberration", "false"},
+        {"Rendering", "SSREnabled", "false"},
+        {"Rendering", "HairWorksLevel", "0"},
+    };
+    for (const auto& setting : kSettings) {
+        configured->Set(setting.section, setting.key, setting.value);
+    }
+
+    const auto backup = OriginalSettingsBackupPath(paths);
+    if (!HasOriginalSettingsBackup(paths) &&
+        !CopyFileW(paths.game_settings.c_str(), backup.c_str(), TRUE)) {
+        error = LastErrorMessage(L"Creating original settings backup", backup);
+        return false;
+    }
+    return AtomicWriteWithBackup(
+        paths.game_settings, configured->Serialize(), error);
 }
 
 bool RestoreOriginalGameSettings(const ConfigPaths& paths, std::wstring& error) {

@@ -803,14 +803,35 @@ std::optional<std::string> LoadVrSettingsTemplate() {
     return LoadTextResource(IDR_VR_SETTINGS);
 }
 
+void ConfigureRemasteredSettingsForVr() {
+    if (IsGameRunning()) {
+        MessageBoxW(g_app.window,
+            L"Close The Witcher 3 before changing its settings.",
+            L"Witcher 3 VR Launcher", MB_OK | MB_ICONWARNING);
+        return;
+    }
+    LauncherState state;
+    std::wstring error;
+    if (!CaptureState(state, error)) {
+        MessageBoxW(g_app.window, error.c_str(), L"Invalid settings",
+            MB_OK | MB_ICONWARNING);
+        return;
+    }
+    if (!w3vr::ConfigureRemasteredGameSettingsForVr(g_app.paths, error) ||
+        !w3vr::SaveConfiguration(g_app.paths, state, error)) {
+        MessageBoxW(g_app.window, error.c_str(), L"Configuration failed",
+            MB_OK | MB_ICONERROR);
+        return;
+    }
+    g_app.loaded = state;
+    EnableWindow(Item(IdRestoreOriginal), TRUE);
+    SetStatus(L"Remastered VR settings applied (FXAA; ray tracing, light shafts, "
+              L"frame generation and HDR off). Press Save & Launch to play.");
+}
+
 void ConfigureSettingsForVr() {
     if (Remastered()) {
-        MessageBoxW(g_app.window,
-            L"The Witcher 3 Remastered (5.x) is detected. The built-in VR "
-            L"settings profile is made for Next-Gen 4.04 and would change "
-            L"5.x settings incorrectly, so this button is disabled.\n\n"
-            L"See the README for the 5.x settings that matter for VR.",
-            L"Witcher 3 VR Launcher", MB_OK | MB_ICONINFORMATION);
+        ConfigureRemasteredSettingsForVr();
         return;
     }
     if (IsGameRunning()) {
@@ -1281,18 +1302,41 @@ void PopulateControls() {
     UpdateTrackLabels();
     EnableWindow(Item(IdRestoreOriginal),
         w3vr::HasOriginalSettingsBackup(g_app.paths));
-    if (Remastered()) {
-        EnableWindow(Item(IdConfigureVr), FALSE);
+    // The Fast Transitions DLC is optional (not in this fork's package) and
+    // based on 4.04 game data.
+    std::error_code dlc_error;
+    const bool movement_dlc_installed = std::filesystem::is_directory(
+        g_app.paths.launcher_directory.parent_path().parent_path() /
+            L"dlc" / L"dlcmovementinputfix", dlc_error);
+    if (Remastered() || !movement_dlc_installed) {
+        SendMessageW(Item(IdFastMovementTransitions), BM_SETCHECK, BST_UNCHECKED, 0);
         EnableWindow(Item(IdFastMovementTransitions), FALSE);
     }
-    if (!loaded.warning.empty()) {
-        SetStatus(loaded.warning);
-    } else if (Remastered()) {
-        SetStatus(L"Remastered 5.x detected: Stereo or Mono with FXAA only. "
-                  L"Changes apply on the next game launch.");
-    } else {
-        SetStatus(L"Ready. Changes apply on the next game launch.");
+    // Start from a mode that works on this installation: Stereo/Mono with
+    // FXAA on Remastered 5.x, and Stereo instead of AER + AFW when the
+    // optional PDAFWPlugin.dll is not installed.
+    const auto available_mode = w3vr::AvailableRenderMode(
+        loaded.state.mode, Remastered(), g_app.afw_plugin_present);
+    const bool mode_adjusted = available_mode != loaded.state.mode;
+    if (mode_adjusted) {
+        SendMessageW(mode, CB_SETCURSEL, static_cast<int>(available_mode), 0);
+        UpdateModeControls();
     }
+    const bool first_start = !w3vr::HasOriginalSettingsBackup(g_app.paths);
+    std::wstring status;
+    if (Remastered()) {
+        status = L"The Witcher 3 Remastered (5.x) detected: Stereo or Mono with FXAA. ";
+    } else if (mode_adjusted) {
+        status = L"PDAFWPlugin.dll not installed: Stereo selected instead of AER + AFW. ";
+    }
+    if (first_start) {
+        status += L"First start: press Configure Settings for VR once, then Save & Launch.";
+    } else if (mode_adjusted) {
+        status += L"Press Save to apply the selected mode.";
+    } else {
+        status += L"Ready. Changes apply on the next game launch.";
+    }
+    SetStatus(loaded.warning.empty() ? status : loaded.warning);
 }
 
 void CreateInterface(HWND window) {
