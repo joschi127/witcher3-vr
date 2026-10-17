@@ -306,6 +306,15 @@ void UpdateTrackLabels() {
 }
 
 void UpdateOfxrControls() {
+    if (Remastered()) {
+        // ReShade, OptiScaler and OFXR are not ported to 5.x yet.
+        SendMessageW(Item(IdIntegrationMode), CB_SETCURSEL,
+            static_cast<int>(IntegrationMode::Off), 0);
+        SendMessageW(Item(IdOfxrBridge), CB_SETCURSEL,
+            static_cast<int>(FrameGenerationBackend::Off), 0);
+        EnableWindow(Item(IdIntegrationMode), FALSE);
+        EnableWindow(Item(IdOfxrBridge), FALSE);
+    }
     const int backend = static_cast<int>(SendMessageW(
         Item(IdOfxrBridge), CB_GETCURSEL, 0, 0));
     const bool ofxr_selected = backend >

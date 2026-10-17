@@ -215,6 +215,15 @@ void TestRemasteredAndOptionalAfw(const w3vr::ConfigPaths& paths) {
         Require(!w3vr::RenderModeUnavailableReason(state, true).empty(),
             "Remastered rejects TAAU, DLSS and AER");
     }
+    state.mode = w3vr::RenderMode::StereoNone;
+    state.integration_mode = w3vr::IntegrationMode::Reshade;
+    Require(!w3vr::RenderModeUnavailableReason(state, true).empty(),
+        "Remastered rejects ReShade/OptiScaler");
+    state.integration_mode = w3vr::IntegrationMode::Off;
+    state.frame_generation_backend = w3vr::FrameGenerationBackend::FidelityFx;
+    Require(!w3vr::RenderModeUnavailableReason(state, true).empty(),
+        "Remastered rejects OFXR frame generation");
+    state.frame_generation_backend = w3vr::FrameGenerationBackend::Off;
     state.remastered = false;
     state.mode = w3vr::RenderMode::AerAfwTaau;
     Require(!w3vr::RenderModeUnavailableReason(state, false).empty(),

@@ -2083,6 +2083,13 @@ std::wstring RenderModeUnavailableReason(
             L"\"Stereo - No AA / FXAA\" and \"Mono - No AA / FXAA\" are "
             L"supported on it; TAAU, DLSS and AER + AFW are not ported yet.";
     }
+    if (state.remastered &&
+        (state.integration_mode != IntegrationMode::Off ||
+            state.frame_generation_backend != FrameGenerationBackend::Off)) {
+        return L"The Witcher 3 Remastered (5.x) is detected. ReShade, OptiScaler "
+            L"and OFXR frame generation are not ported to it yet; set "
+            L"Integration and Frame generation to Off.";
+    }
     if (aer && !afw_plugin_present) {
         return L"AER + AFW needs PureDark's PDAFWPlugin.dll, which is not "
             L"included in this package.\n\nCopy PDAFWPlugin.dll from the "
