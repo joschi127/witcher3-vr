@@ -472,7 +472,18 @@ Layout changes that block a direct port:
 - Fix: mirror the corrected camera into the secondary view for the frame build and restore it
   afterwards, like the primary. Verified with the null HMD (whole image turns together) and in
   the headset (Pico 4, Virtual Desktop): background no longer attached to the head.
-- The code path is the same on 4.04, which likely had the same problem (upstream lists "some
-  terrain can still look incorrect in a few Full VR cutscenes" as a known issue). Open: a 4.04
-  regression run through such a cutscene.
-- Found in the same scene: a cutscene camera light that follows the head (see open issues).
+- Found in the same scene: a cutscene camera light that follows the head; fixed in `64b7aad`
+  (camera lights placed with the game camera's yaw, see open issues).
+
+### Both cutscene fixes also apply to 4.04 (2026-10-17)
+- A 4.04 checkpoint before the same evening cutscene (made flat on 4.04) loads on 4.04 and on 5.01.
+  On 4.04 the cutscene also takes the Full VR reused-camera fallback.
+- 4.04 without the fixes (build `bbb0231`, No-AA route, null HMD, 20 degrees synthetic yaw):
+  characters and ground turn, trees and sky stay fixed in the image, the same as 5.01 before the
+  fix. So upstream 4.04 has the background problem too.
+- 4.04 with the fixes (`7cbef19`): the whole image turns together; the secondary-view mirror runs
+  (offset 0x530, 1296 bytes); the camera light hook at 0x718310 is active and replaces the
+  composed yaw (129 degrees) with the game camera's (109 degrees). The TAAU route runs through the
+  scene without errors (its desktop captures do not show the HMD view, so only stability was
+  checked there).
+- Open: headset check on 4.04.
