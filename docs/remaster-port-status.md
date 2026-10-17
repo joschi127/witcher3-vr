@@ -458,3 +458,21 @@ Layout changes that block a direct port:
 - New script action `hmd <yaw> <pitch>` turns the located OpenXR head pose, so head-motion bugs can
   be reproduced with the static null HMD (verified: 30 degrees yaw and -25 degrees pitch turn the
   submitted eye images as expected).
+
+### Cutscene background following the head: fixed (`8d94088`)
+- In some cutscenes trees and sky stayed fixed in the image while the head turned (reported from
+  the headset on 2026-10-15). Reproduced without a headset with a 5.01 checkpoint before an evening
+  cutscene and image pairs at 0 and 20 degrees synthetic yaw: characters and ground shifted, trees
+  and sky did not move by a pixel.
+- Cause: these cutscenes reuse the native camera stored in the frame data, so the mod's Full VR
+  fallback (`prepare_full_vr_frame_camera`) writes the HMD-corrected camera into the frame
+  itself. It corrected only the primary view at frame+0x20; the frame carries a second camera
+  copy right after it (`FrameSecondaryViewOffset`, 0x600 on 5.01, 0x530 on 4.04), and sky and
+  trees read that one.
+- Fix: mirror the corrected camera into the secondary view for the frame build and restore it
+  afterwards, like the primary. Verified with the null HMD (whole image turns together) and in
+  the headset (Pico 4, Virtual Desktop): background no longer attached to the head.
+- The code path is the same on 4.04, which likely had the same problem (upstream lists "some
+  terrain can still look incorrect in a few Full VR cutscenes" as a known issue). Open: a 4.04
+  regression run through such a cutscene.
+- Found in the same scene: a cutscene camera light that follows the head (see open issues).

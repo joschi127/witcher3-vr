@@ -12,26 +12,13 @@ black, with or without the mod (see `remaster-port-status.md`, 2026-10-17).
 
 ## Bugs
 
-### Cutscene background trees follow the head (critical)
-- Seen in the first Ciri cutscene and in at least one other cutscene (2026-10-15): the cutscene
-  itself and its camera are fine, but the trees/forest in the background do not stay in place. They
-  move with the head like a HUD element, so they end up completely displaced.
-- Not seen in gameplay.
-- Suspect: the background is drawn with a camera or view that the mod does not update with the HMD
-  pose on 5.01 (for example a cutscene-specific background layer, distant-forest LOD or impostor
-  pass with its own view constants). Not yet checked on 4.04 at the same scene.
-- Strong candidate: the foliage native snapshot (V1521), which is not working on 5.01. It covers
-  exactly two shader pairs, distant trees and near fronds, and copies their per-draw camera
-  constants (VS b0, and b12 with the previous-frame camera) into private buffers so that each eye's
-  draw keeps its own values. On 5.01 it falls back on every draw (`reason=graphics_state`: b0 is a
-  root CBV there, b12 sits in another table), so these draws read the game's transient constants,
-  which may hold another eye's or a non-HMD camera. Open: why it shows in cutscenes but not in
-  gameplay.
-- Also possible: a 4.04 problem as well. Upstream removed its foliage orientation correction in
-  V1519/V1521 ("incomplete ... a complete correction can be reintroduced later"); the snapshot
-  that remains copies the constants unchanged. Upstream's README lists "Some terrain can still
-  look incorrect in a few Full VR cutscenes" as a known issue. Next step: the same cutscene on 4.04
-  in the headset.
+### Camera-attached light in cutscenes moves with the head
+- Some cutscenes (clearly visible in a dark evening scene at a camp fire, also in a brighter one)
+  have a light attached to the camera, pointing where the camera looks (2026-10-17). Flat this is
+  invisible; in VR it follows head turns like a head lamp and moves its light spot around.
+- Wanted: the light keeps the cutscene camera's own direction (no HMD rotation).
+- Suspect: REDengine's camera lights for dialogues/cutscenes are derived from the render camera,
+  which the mod rotates with the HMD. Not yet checked on 4.04.
 
 ### Distant water switches between blue and white depending on head pose
 - River seen from the Kaer Morhen balcony. It shows either blue or white. Holding the head still
