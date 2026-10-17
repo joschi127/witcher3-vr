@@ -327,6 +327,18 @@ a restriction on using mods.
 
 ## Troubleshooting
 
+### Windows Defender or SmartScreen blocks a file
+
+The mod's `dxgi.dll` hooks into the game, and neither it nor the launcher is code-signed. Windows
+Defender can therefore flag the DLL as a false positive (for example `Trojan:Win32/Wacatac.C!ml`)
+and remove it, and SmartScreen can show "Windows protected your PC" when the launcher starts.
+
+- Only use packages from the [releases page](https://github.com/joschi127/witcher3-vr/releases);
+  each release lists the SHA256 checksum of its archive.
+- SmartScreen: choose **More info**, then **Run anyway**.
+- Defender: restore the file from **Protection history** and add an exclusion for the game's
+  `bin\x64_dx12` folder, or extract the package again after adding the exclusion.
+
 ### The game crashes when ReShade is enabled
 
 - Select **Off** in the launcher's integration dropdown and save.
