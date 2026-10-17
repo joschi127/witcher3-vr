@@ -44,12 +44,6 @@ black, with or without the mod (see `remaster-port-status.md`, 2026-10-17).
   threshold of the camera angle or position. Next step: a test script with small camera movements on
   the balcony and a flat check (without the mod) with the same movements.
 
-### Sky colour banding in the submitted eye images
-- Null-driver captures of the eye images (`*_xr_eye0/1`) show strong banding in the sky gradients
-  (clouds in flat steps). Flat captures of the same scene are mostly smooth. Not yet reported from
-  the headset; could also be an artefact of the capture conversion. Next step: check in the
-  headset, then compare the swapchain format with the game's backbuffer format.
-
 ## Usability
 
 ### Gameplay HUD is head-locked and close to the edges of the view
@@ -82,4 +76,6 @@ black, with or without the mod (see `remaster-port-status.md`, 2026-10-17).
 - Cutscenes, including the cinema camera position (2026-10-15).
 - Combat: combat tutorial and the first ghoul fight work well (2026-10-15).
 - Horse riding: works, nothing unusual (2026-10-15).
+- Grass correct with the AMD driver update; sky gradients smooth in the headset (the banding in
+  null-driver eye captures is a capture artefact) (2026-10-17).
 - Overall "nice and playable" at 90 Hz with diagnostics off, no stutter (2026-10-15).
