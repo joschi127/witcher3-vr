@@ -219,10 +219,17 @@ same). The material they were derived from is not.
 - Remaster support was asked about upstream in
   [issue #27](https://github.com/tig3rmast3r/witcher3-vr/issues/27); on 2026-10-13 the maintainer
   reported the first playable 5.01 version there and asked how to proceed (fork review, summary
-  or PR). Check it for news before larger work.
-- As of 2026-10-07 the author intended to port the mod to the Remaster himself, "not this
-  month" ([#31](https://github.com/tig3rmast3r/witcher3-vr/issues/31)). The Next-Gen version is
-  frozen upstream. See `docs/remaster-research.md` for the public information collected so far.
+  or PR). Check it for news before larger work. On 2026-10-14 the author replied there that he
+  had not looked at the code yet, is open to the fork continuing, is unsure about supporting both
+  game versions in one mod, and sees the Remaster as a chance to clean up the code.
+- On 2026-10-07 the author had no plan yet for a Remaster port, "not this month" (#27). In
+  [#31](https://github.com/tig3rmast3r/witcher3-vr/issues/31) he wrote that he would not add or
+  change anything else in the Next-Gen version, but later released Next-Gen hotfixes, so this is
+  not settled. See `docs/remaster-research.md` for the public information collected so far.
+- Fixes found in the fork that also apply to 4.04 are offered upstream as issues with backport
+  branches (`backport/*`, based on `main`, never merged into `remaster`):
+  [#33](https://github.com/tig3rmast3r/witcher3-vr/issues/33) (Full VR cutscenes: head-locked
+  sky/trees and camera lights, posted 2026-10-17).
 - Upstream's scope rules apply to bug reports: do not report problems from this fork or from
   Remaster builds upstream as regular bugs.
 - Coordination with the upstream author is the maintainer's decision; agents never contact
