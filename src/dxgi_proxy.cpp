@@ -731,6 +731,10 @@ struct Config {
     // Keeps REDengine's own HUD composite PSO bound (no per-eye replacement);
     // isolates the replacement shader in colour comparisons.
     bool disable_hud_composite_replacement{false};
+    // Experiment: the Full VR reused-camera fallback also writes the corrected
+    // camera into the frame's secondary view (otherwise left at the game's
+    // camera).
+    bool full_vr_reused_secondary_view{false};
     // Optional in-process RenderDoc integration. This is deliberately
     // independent from Diagnostic Logging and defaults off so an adjacent
     // renderdoc.dll can remain installed without touching the render path.
@@ -14766,6 +14770,8 @@ void load_config() {
             "debug", "d3d12_debug_layer", false);
         g_config.disable_hud_composite_replacement = read_ini_bool(
             "debug", "disable_hud_composite_replacement", false);
+        g_config.full_vr_reused_secondary_view = read_ini_bool(
+            "debug", "full_vr_reused_secondary_view", false);
         g_config.focus_projection_shader_registry = read_ini_bool(
             "focus_projection", "shader_registry_enabled", false);
         g_config.cinema_camera_diagnostics = read_ini_bool(
@@ -33584,6 +33590,58 @@ bool safe_write_engine_view_snapshot(
     }
 }
 
+// [debug] full_vr_reused_secondary_view: the frame carries a second camera
+// copy right after the primary one. The reused-camera fallback only corrects
+// the primary; this experiment mirrors the corrected camera into the secondary
+// for the duration of one frame build. Same thread as the frame builder.
+thread_local std::array<float, 512> t_full_vr_secondary_original{};
+thread_local size_t t_full_vr_secondary_bytes{};
+
+void write_full_vr_secondary_view(
+    void* frame_data, const std::array<float, 512>& corrected) {
+    t_full_vr_secondary_bytes = 0;
+    if (!g_config.full_vr_reused_secondary_view || frame_data == nullptr) {
+        return;
+    }
+    constexpr size_t kPrimaryCameraOffset = 0x20;
+    const size_t secondary_offset = engine_frame_offset(
+        w3vr::engine_addresses::Value::FrameSecondaryViewOffset);
+    if (secondary_offset <= kPrimaryCameraOffset) {
+        return;
+    }
+    const size_t view_bytes = secondary_offset - kPrimaryCameraOffset;
+    if (view_bytes > sizeof(corrected)) {
+        return;
+    }
+    auto* secondary = reinterpret_cast<float*>(
+        static_cast<uint8_t*>(frame_data) + secondary_offset);
+    if (!safe_copy_engine_view_snapshot(
+            secondary, t_full_vr_secondary_original.data(), view_bytes) ||
+        !safe_write_engine_view_snapshot(
+            secondary, corrected.data(), view_bytes)) {
+        return;
+    }
+    t_full_vr_secondary_bytes = view_bytes;
+    static std::atomic<uint32_t> logs{};
+    if (logs.fetch_add(1, std::memory_order_relaxed) < 8) {
+        log_line("Full VR reused camera mirrored into secondary view "
+                 "offset=0x%zX bytes=%zu",
+            secondary_offset, view_bytes);
+    }
+}
+
+void restore_full_vr_secondary_view(void* frame_data) {
+    if (t_full_vr_secondary_bytes == 0 || frame_data == nullptr) {
+        return;
+    }
+    auto* secondary = reinterpret_cast<float*>(
+        static_cast<uint8_t*>(frame_data) + engine_frame_offset(
+            w3vr::engine_addresses::Value::FrameSecondaryViewOffset));
+    safe_write_engine_view_snapshot(secondary,
+        t_full_vr_secondary_original.data(), t_full_vr_secondary_bytes);
+    t_full_vr_secondary_bytes = 0;
+}
+
 bool shadow_cascade_shared_view_active() {
     return g_config.openxr_enabled && g_config.openxr_mode == 3 &&
         g_engine_dual_render_active.load(std::memory_order_acquire) &&
@@ -35131,6 +35189,7 @@ bool prepare_full_vr_frame_camera(
             frame_camera, corrected.data(), sizeof(corrected))) {
         return false;
     }
+    write_full_vr_secondary_view(frame_data, corrected);
     // The first complete fallback pair is deliberately centered proof in both
     // Stereo and AER. Publish its exact content FOV only after the corrected
     // camera write; every subsequently admitted pair publishes raw FOV through
@@ -35342,8 +35401,10 @@ bool restore_full_vr_frame_camera(
     constexpr size_t kPrimaryCameraOffset = 0x20;
     auto* frame_camera = reinterpret_cast<float*>(
         static_cast<uint8_t*>(frame_data) + kPrimaryCameraOffset);
-    return safe_write_engine_view_snapshot(
+    const bool restored = safe_write_engine_view_snapshot(
         frame_camera, original_camera.data(), sizeof(original_camera));
+    restore_full_vr_secondary_view(frame_data);
+    return restored;
 }
 
 void capture_engine_view_snapshot(float* view, uint64_t present, bool after_rebuild) {
