@@ -7,6 +7,9 @@ update an entry when something new is learned.
 Test setup unless noted: Pico 4 over Virtual Desktop (VDXR), symmetric projection
 (`native_stereo=0`), 1748x1468 per eye, FXAA, No-AA route, `AllowShafts=false`.
 
+Requirement on AMD GPUs: Adrenalin 26.9.2 or newer. Older drivers render some 5.x grass solid
+black, with or without the mod (see `remaster-port-status.md`, 2026-10-17).
+
 ## Bugs
 
 ### Cutscene background trees follow the head (critical)
@@ -41,22 +44,11 @@ Test setup unless noted: Pico 4 over Virtual Desktop (VDXR), symmetric projectio
   threshold of the camera angle or position. Next step: a test script with small camera movements on
   the balcony and a flat check (without the mod) with the same movements.
 
-### One kind of grass is always very dark, almost black (next priority)
-- Seen in gameplay in the Kaer Morhen courtyard and everywhere outdoors (2026-10-15/16). The same
-  kind of grass is always black, never right; other vegetation looks normal. 5.01 saves at the
-  courtyard and outdoors exist locally.
-- Reproduced without a headset (2026-10-16, outdoor save): black in the OpenXR null-driver run and
-  equally black **flat without OpenXR** (`openxr.enabled=0`, mono). So it is neither the dual
-  render nor the foliage snapshot (V1521 only runs with OpenXR); the mod has no grass-specific code.
-- Not the settings either (flat runs, each still black): ray tracing on, the texture keys copied
-  from the 4.04 profile removed, grass/SpeedTree/foliage values at their 5.x defaults, FSR instead
-  of FXAA. Also black at the game's native 2560x1440 without the forced render size, where the mod
-  no longer changes any rendering.
-- **Most likely an AMD driver issue, not a port problem.** Community reports describe solid black
-  grass on Radeon GPUs since the 5.0 update and recommend AMD Adrenalin 26.9.2 or newer. The test
-  machine runs an AMD driver from August 2026, older than that. Next step: update the driver and
-  repeat the flat run. A run without the mod is still open (on 5.01 the game reads input through
-  GameInput, so injected keystrokes do not reach it).
+### Sky colour banding in the submitted eye images
+- Null-driver captures of the eye images (`*_xr_eye0/1`) show strong banding in the sky gradients
+  (clouds in flat steps). Flat captures of the same scene are mostly smooth. Not yet reported from
+  the headset; could also be an artefact of the capture conversion. Next step: check in the
+  headset, then compare the swapchain format with the game's backbuffer format.
 
 ## Usability
 

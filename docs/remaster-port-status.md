@@ -439,3 +439,22 @@ Layout changes that block a direct port:
   follow the head; the distant river switches between blue and white with the head pose (also per
   eye, light shafts off); one kind of grass is always almost black (courtyard and elsewhere); the
   background-tree problem also appeared in a second cutscene. Overall: nice and playable at 90 Hz.
+
+## 2026-10-16/17
+
+### Black grass: AMD driver, not the port
+- One kind of grass rendered solid black everywhere outdoors. Reproduced without a headset with an
+  outdoor save, both with OpenXR (null driver) and flat without OpenXR. Not changed by any of: ray
+  tracing on, the texture keys copied from the 4.04 profile removed, grass/SpeedTree/foliage values
+  at their 5.x defaults, FSR instead of FXAA, the game's native 2560x1440 without the forced render
+  size (where the mod no longer changes rendering).
+- Community reports describe the same black grass on Radeon GPUs since the 5.0 update. The game's
+  launcher also asks for a newer driver. The automatic AMD update offered only Adrenalin 26.8.1;
+  26.9.2 WHQL (full download from the AMD website) fixes it: grass correct flat and in the OpenXR
+  eye images with the same save and script.
+- AMD users need Adrenalin 26.9.2 or newer for 5.x.
+
+### Test action for head motion
+- New script action `hmd <yaw> <pitch>` turns the located OpenXR head pose, so head-motion bugs can
+  be reproduced with the static null HMD (verified: 30 degrees yaw and -25 degrees pitch turn the
+  submitted eye images as expected).
