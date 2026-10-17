@@ -51,6 +51,30 @@ A full package cannot be built from this repo alone. `package-release.ps1` requi
 prebuilt third-party binaries under `runtime/` and `external/` that are not in git:
 PureDark AFW plugin, OFXR API layer, the ReShade and OptiScaler forks, RenderDoc.
 
+### Releases of this fork
+
+`scripts/package-fork-release.ps1 -Version <name> -ReleaseNotes docs/releases/<name>.md` builds the
+release zip from the pinned original release (downloaded with `gh`, SHA256-checked; third-party
+runtime files and game scripts unchanged) plus this repository's `dxgi.dll`, launcher, documents and
+example INI. It leaves out PureDark's `PDAFWPlugin.dll` and the Fast Transitions DLC (not
+redistributed, see `THIRD_PARTY_NOTICES.md`). Output goes to `local/releases/`.
+
+Procedure when the maintainer asks for a release:
+1. `remaster` clean and pushed; Release build and CTest green.
+2. Write `docs/releases/<name>.md` (user-facing changes, not included parts, known issues);
+   naming `v<original version>-remastered.<n>`, e.g. `v0.9.8v2-remastered.1`.
+3. Run the script; check the zip (no `PDAFWPlugin.dll`, no `dlc`, our DLL/launcher hashes in
+   `Witcher3VR/BUILD.txt`).
+4. Install test from the zip on 5.x (and 4.04 when 4.04 code changed), launcher included, with the
+   maintainer's go-ahead for game-directory changes.
+5. With the maintainer's go-ahead: tag the commit and create the GitHub release with
+   `gh release create <name> --target <commit> --title ... --notes-file docs/releases/<name>.md`
+   plus the zip and SHA256 file, marked as pre-release.
+
+When the original project publishes a new release, update `-UpstreamTag`, `-UpstreamAsset` and
+`-UpstreamSha256` defaults in the script (asset digest from `gh release view <tag> -R
+tig3rmast3r/witcher3-vr --json assets`).
+
 Dev install procedure:
 1. Install the official release once into the target game.
 2. Replace only the self-built files: `dxgi.dll` goes to
