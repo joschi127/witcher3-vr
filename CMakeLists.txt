@@ -753,6 +753,15 @@ if(BUILD_TESTING)
             -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/reshade_immediate_command_list_isolation_contract.cmake"
     )
 
+    add_executable(w3vr_camera_light_yaw_tests
+        tests/camera_light_yaw_tests.cpp
+    )
+    target_include_directories(w3vr_camera_light_yaw_tests PRIVATE src)
+    add_test(
+        NAME camera_light_yaw
+        COMMAND w3vr_camera_light_yaw_tests
+    )
+
     add_executable(w3vr_reshade_overlay_policy_tests
         tests/reshade_overlay_policy_tests.cpp
     )
