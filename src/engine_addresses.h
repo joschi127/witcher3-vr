@@ -30,6 +30,7 @@ enum class Function : size_t {
     CameraEnableManualControl,  // native CCustomCamera.EnableManualControl
     CameraDirection,   // native CCameraDirector.GetCameraDirection (first of two copies)
     ViewportResolution,  // (fullscreen, resolution setting, int* width, int* height)
+    CameraLightPlacement,  // places one camera light from the render camera (pos + yaw)
     Count,
 };
 
@@ -123,6 +124,13 @@ inline constexpr uint8_t kViewportResolution501Bytes[] = {
     0x48, 0x8B, 0xC4, 0x88, 0x48, 0x08, 0x57, 0x48, 0x81, 0xEC, 0xB0, 0x00,
     0x00, 0x00, 0x48, 0x89};
 
+// (light out, render camera, light params, setup, colour, ...): rotates the
+// light offset by the camera's yaw (camera[6]) only and adds camera[0..2].
+// Only caller: the frame light list (the one reading DisableAllCameraLights).
+inline constexpr uint8_t kCameraLightPlacement501Bytes[] = {
+    0x48, 0x8B, 0xC4, 0x48, 0x89, 0x70, 0x10, 0x4C, 0x89, 0x60, 0x18, 0x55,
+    0x41, 0x56, 0x41, 0x57, 0x48, 0x8D, 0xA8, 0xF8, 0xFE, 0xFF, 0xFF, 0x48};
+
 inline constexpr Entry kEntries[] = {
     {"IsAnyMenu", 0x01F3C5C0, 0x01DF41A0, {kIsAnyMenuBytes, sizeof(kIsAnyMenuBytes)}},
     {"IsLoadingScreenVideoPlaying", 0x0154EED0, 0x0227A0F0,
@@ -153,6 +161,8 @@ inline constexpr Entry kEntries[] = {
         {kCameraDirection501Bytes, sizeof(kCameraDirection501Bytes)}},
     {"ViewportResolution", 0x01563DC0, 0x0228F3B0,
         {kViewportResolution501Bytes, sizeof(kViewportResolution501Bytes)}},
+    {"CameraLightPlacement", 0x00718310, 0x0035B500,
+        {kCameraLightPlacement501Bytes, sizeof(kCameraLightPlacement501Bytes)}},
 };
 static_assert(sizeof(kEntries) / sizeof(kEntries[0]) ==
     static_cast<size_t>(Function::Count));

@@ -45,6 +45,7 @@
 #include "pipeline_flight_recorder.h"
 #include "prefix_hook.h"
 #include "hotkey_name.h"
+#include "camera_light_yaw.h"
 #include "route_flight_recorder.h"
 #include "rt_ingress_join.h"
 #include "thread_stack_sampler.h"
@@ -2132,6 +2133,8 @@ using GetDisplayModeListFn = HRESULT(STDMETHODCALLTYPE*)(
 using GetDisplayModeList1Fn = HRESULT(STDMETHODCALLTYPE*)(
     IDXGIOutput1*, DXGI_FORMAT, UINT, UINT*, DXGI_MODE_DESC1*);
 using EngineViewportResolutionFn = void(__fastcall*)(bool, void*, uint32_t*, uint32_t*);
+using EngineCameraLightPlacementFn = uint64_t(__fastcall*)(
+    float*, const float*, const float*, void*, uint64_t, uint32_t, float*);
 using ExecuteCommandListsFn = void(STDMETHODCALLTYPE*)(ID3D12CommandQueue*, UINT, ID3D12CommandList* const*);
 using CreateCommittedResourceFn = HRESULT(STDMETHODCALLTYPE*)(
     ID3D12Device*,
@@ -2264,6 +2267,8 @@ PresentFn g_present{};
 Present1Fn g_present1{};
 ResizeBuffersFn g_resize_buffers{};
 EngineViewportResolutionFn g_engine_viewport_resolution{};
+EngineCameraLightPlacementFn g_engine_camera_light_placement{};
+w3vr::camera_light_yaw::Ledger g_camera_light_yaw_ledger;
 ExecuteCommandListsFn g_execute_command_lists{};
 CreateCommittedResourceFn g_create_committed_resource{};
 CreateDescriptorHeapFn g_create_descriptor_heap{};
@@ -35073,6 +35078,7 @@ bool prepare_full_vr_frame_camera(
             hmd_pose.pitch_degrees * g_config.hmd_pitch_scale,
             hmd_pose.yaw_degrees * g_config.hmd_yaw_scale};
         w3vr::hmd_camera_orientation::EulerDegrees composed_rotation{};
+        const float game_yaw = corrected[6];
         const bool vertical_pitch_rotation_composed =
             !g_config.hmd_lock_game_pitch &&
             w3vr::hmd_camera_orientation::compose_game_camera_with_local_hmd(
@@ -35088,6 +35094,7 @@ bool prepare_full_vr_frame_camera(
             corrected[6] += hmd_rotation.yaw;
             corrected[4] += hmd_rotation.roll;
         }
+        g_camera_light_yaw_ledger.record(corrected[6], game_yaw);
         applied_hmd_orientation = quaternion_from_hmd_euler(
             hmd_pose.pitch_degrees * g_config.hmd_pitch_scale,
             hmd_pose.yaw_degrees * g_config.hmd_yaw_scale,
@@ -39055,6 +39062,7 @@ void __fastcall hook_engine_view_rebuild(float* view) {
                 view[6] += scaled_hmd_yaw;
                 view[4] += scaled_hmd_roll;
             }
+            g_camera_light_yaw_ledger.record(view[6], original_yaw);
             applied_hmd_orientation = quaternion_from_hmd_euler(
                 camera_hmd_pitch * g_config.hmd_pitch_scale,
                 camera_hmd_yaw * g_config.hmd_yaw_scale,
@@ -44709,6 +44717,60 @@ void install_engine_viewport_resolution_hook() {
     }
 }
 
+// [FIX:CAMERA-LIGHT-GAME-YAW] REDengine places camera lights from the render
+// camera's position and yaw (camera[6]). With the HMD rotation composed into
+// that yaw they follow every head turn like a head lamp. Place them with the
+// game camera's own yaw; position (head and eye offset) stays as rendered.
+uint64_t __fastcall hook_engine_camera_light_placement(
+    float* light, const float* camera, const float* params, void* setup,
+    uint64_t colour, uint32_t flags, float* extra) {
+    float base_yaw{};
+    const bool found = camera != nullptr &&
+        g_camera_light_yaw_ledger.lookup(camera[6], base_yaw);
+    if (g_config.runtime_diagnostics) {
+        static std::atomic<uint64_t> placements{};
+        static std::atomic<uint64_t> replaced{};
+        const uint64_t count = placements.fetch_add(1) + 1;
+        const uint64_t hits = replaced.fetch_add(found ? 1 : 0) + (found ? 1 : 0);
+        if (count <= 4 || count % 2000 == 0) {
+            log_line("Camera light placement count=%llu game_yaw=%llu camera_yaw=%.3f base_yaw=%.3f",
+                static_cast<unsigned long long>(count),
+                static_cast<unsigned long long>(hits),
+                camera != nullptr ? camera[6] : 0.0f, found ? base_yaw : 0.0f);
+        }
+    }
+    if (found) {
+        // The placement reads camera[0..2] and camera[6] only.
+        std::array<float, 8> game_yaw_camera{};
+        memcpy(game_yaw_camera.data(), camera, sizeof(game_yaw_camera));
+        game_yaw_camera[6] = base_yaw;
+        return g_engine_camera_light_placement(light, game_yaw_camera.data(),
+            params, setup, colour, flags, extra);
+    }
+    return g_engine_camera_light_placement(
+        light, camera, params, setup, colour, flags, extra);
+}
+
+void install_engine_camera_light_placement_hook() {
+    if (g_engine_camera_light_placement != nullptr ||
+        !g_config.openxr_enabled || !g_config.hmd_freelook) {
+        return;
+    }
+    auto* target = engine_function_target(
+        w3vr::engine_addresses::Function::CameraLightPlacement);
+    if (target == nullptr) {
+        return;
+    }
+    if (MH_CreateHook(target, &hook_engine_camera_light_placement,
+            reinterpret_cast<void**>(&g_engine_camera_light_placement)) == MH_OK &&
+        MH_EnableHook(target) == MH_OK) {
+        log_line("Hooked REDengine camera light placement target=%p", target);
+    } else {
+        g_engine_camera_light_placement = nullptr;
+        log_line("Failed REDengine camera light placement hook target=%p", target);
+    }
+}
+
 // [TRIAL:FIRST-PERSON-SNAP-MOVEMENT-HEADING V9518 1/2] During the bounded
 // discrete-snap owner, rotate only the returned locomotion vector by the
 // remaining native yaw error.  REDengine and the clean-room strafe request then
@@ -46377,6 +46439,7 @@ void ensure_initialized() {
         install_engine_upscaler_pipeline_hook();
         install_engine_menu_state_probe();
         install_engine_viewport_resolution_hook();
+        install_engine_camera_light_placement_hook();
         log_line(
             "Hook routes taau_functional=%u taau_metadata=%u dlss=%u reverse_diagnostics=%u mode=%d",
             taau_functional_hooks_needed() ? 1u : 0u,

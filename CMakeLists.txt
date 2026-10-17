@@ -293,6 +293,15 @@ if(BUILD_TESTING)
         COMMAND w3vr_prefix_hook_tests
     )
 
+    add_executable(w3vr_camera_light_yaw_tests
+        tests/camera_light_yaw_tests.cpp
+    )
+    target_include_directories(w3vr_camera_light_yaw_tests PRIVATE src)
+    add_test(
+        NAME camera_light_yaw
+        COMMAND w3vr_camera_light_yaw_tests
+    )
+
     add_executable(w3vr_hotkey_name_tests
         tests/hotkey_name_tests.cpp
     )
