@@ -731,10 +731,6 @@ struct Config {
     // Keeps REDengine's own HUD composite PSO bound (no per-eye replacement);
     // isolates the replacement shader in colour comparisons.
     bool disable_hud_composite_replacement{false};
-    // Experiment: the Full VR reused-camera fallback also writes the corrected
-    // camera into the frame's secondary view (otherwise left at the game's
-    // camera).
-    bool full_vr_reused_secondary_view{false};
     // Optional in-process RenderDoc integration. This is deliberately
     // independent from Diagnostic Logging and defaults off so an adjacent
     // renderdoc.dll can remain installed without touching the render path.
@@ -14770,8 +14766,6 @@ void load_config() {
             "debug", "d3d12_debug_layer", false);
         g_config.disable_hud_composite_replacement = read_ini_bool(
             "debug", "disable_hud_composite_replacement", false);
-        g_config.full_vr_reused_secondary_view = read_ini_bool(
-            "debug", "full_vr_reused_secondary_view", false);
         g_config.focus_projection_shader_registry = read_ini_bool(
             "focus_projection", "shader_registry_enabled", false);
         g_config.cinema_camera_diagnostics = read_ini_bool(
@@ -33590,17 +33584,18 @@ bool safe_write_engine_view_snapshot(
     }
 }
 
-// [debug] full_vr_reused_secondary_view: the frame carries a second camera
-// copy right after the primary one. The reused-camera fallback only corrects
-// the primary; this experiment mirrors the corrected camera into the secondary
-// for the duration of one frame build. Same thread as the frame builder.
+// [FIX:FULL-VR-REUSED-CAMERA-SECONDARY-VIEW] The frame carries a second camera
+// copy right after the primary one. Sky and trees read it, so a fallback that
+// corrects only the primary leaves them head-locked in cutscenes that reuse
+// the native camera. Mirror the corrected camera into the secondary for the
+// duration of one frame build and restore it afterwards (frame-builder thread).
 thread_local std::array<float, 512> t_full_vr_secondary_original{};
 thread_local size_t t_full_vr_secondary_bytes{};
 
 void write_full_vr_secondary_view(
     void* frame_data, const std::array<float, 512>& corrected) {
     t_full_vr_secondary_bytes = 0;
-    if (!g_config.full_vr_reused_secondary_view || frame_data == nullptr) {
+    if (frame_data == nullptr) {
         return;
     }
     constexpr size_t kPrimaryCameraOffset = 0x20;
