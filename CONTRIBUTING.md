@@ -4,12 +4,15 @@ Thanks for helping improve Witcher 3 VR.
 
 ## Bug reports
 
-Use the
-[bug report form](https://github.com/tig3rmast3r/witcher3-vr/issues/new?template=bug_report.yml)
-and provide enough information to reproduce the problem.
+This is a fork of [tig3rmast3r/witcher3-vr](https://github.com/tig3rmast3r/witcher3-vr) that adds
+Remastered (5.x) support. Report problems with this fork in its own issues using the
+[bug report form](https://github.com/joschi127/witcher3-vr/issues/new?template=bug_report.yml)
+and provide enough information to reproduce the problem. Do not report them in the original
+repository.
 
-Bug reports must be reproduced on the latest official PC version of the game.
-Older versions and rollback branches are outside the support scope.
+Bug reports must be reproduced on the latest Next-Gen version (4.04) or the latest Remastered
+version (5.x) of the game. Other versions and rollback branches are outside the support scope.
+Development notes for this fork are in [docs/guidelines.md](docs/guidelines.md).
 
 Third-party mods may be used, but mod compatibility is outside the current
 support scope. Disable all other mods and reproduce the problem before opening

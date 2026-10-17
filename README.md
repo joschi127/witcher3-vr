@@ -1,6 +1,16 @@
 # The Witcher 3 VR
 
-Play The Witcher 3 Next-Gen in VR with configurable stereo rendering, a movable VR HUD, first-person gameplay, cinema modes, DLSS, DLAA and TAAU support, optional frame generation, ReShade and OptiScaler integration.
+> [!NOTE]
+> This is a fork of [Witcher 3 VR](https://github.com/tig3rmast3r/witcher3-vr) by
+> [tig3rmast3r](https://github.com/tig3rmast3r). All credit for the mod goes to him: the VR
+> renderer, launcher, integrations and nearly all of the code in this repository are his work. This
+> fork only adds support for The Witcher 3 Remastered (patch 5.x) on top of it.
+
+The goal of this fork is to support both the latest Next-Gen version (4.04) and the latest
+Remastered version (5.x) of the game. Once Remastered support is stable and has at least all
+essential features, support for Next-Gen may be dropped.
+
+Play The Witcher 3 in VR with configurable stereo rendering, a movable VR HUD, first-person gameplay, cinema modes, DLSS, DLAA and TAAU support, optional frame generation, ReShade and OptiScaler integration. On Remastered 5.x only a subset is available so far; see [Remastered (5.x) status](#remastered-5x-status) below.
 
 Its DX12 and VR architecture was informed by
 [REFramework](https://github.com/praydog/REFramework) and
@@ -21,7 +31,27 @@ as a runtime dependency.
 > [!IMPORTANT]
 > Gameplay currently requires a mouse and keyboard or a gamepad. VR motion
 > controllers are not supported and are not currently planned at this time.
-> Remastered version support too is not yet planned.
+
+## Remastered (5.x) status
+
+Remastered support is experimental. It is developed and tested with the GOG release, patch 5.01, on
+an AMD GPU with a Pico 4 over Virtual Desktop. What works and what does not:
+
+- Third-person gameplay in Stereo mode with correct 3D depth, HUD, menus, loading screens, combat,
+  horse riding and cutscenes.
+- Anti-aliasing: No AA route with the game's FXAA only. TAAU does not exist in 5.x; DLSS, ray
+  tracing, OptiScaler, OFXR and the other integrations are not ported yet.
+- Unknown or newer game builds are detected and the game hooks stay disabled, so an update of the
+  game does not break it blindly, but the mod then does nothing.
+- There is no release package for 5.x yet. It has to be built from this branch and installed over
+  the regular release (see [CONTRIBUTING.md](CONTRIBUTING.md) and `docs/guidelines.md`).
+- Do **not** use the launcher's **Configure Settings for VR** on 5.x: it writes the 4.04 settings
+  profile. The 5.x settings that matter for VR are listed in `docs/guidelines.md`.
+- On AMD GPUs, use Adrenalin 26.9.2 or newer; older drivers render some 5.x grass solid black (with
+  or without the mod). The automatic AMD update may not offer it yet.
+
+Details: [port status log](docs/remaster-port-status.md) and
+[known problems](docs/remaster-open-issues.md).
 
 ## Highlights
 
@@ -71,8 +101,12 @@ HUD elements can be positioned in VR and saved from inside the game. Separate pr
 
 ## Current Support
 
+The table describes Next-Gen 4.04. For Remastered 5.x see [Remastered (5.x) status](#remastered-5x-status).
+
 | Feature | Status |
 | --- | --- |
+| The Witcher 3 Next-Gen 4.04 | Supported |
+| The Witcher 3 Remastered 5.x | Experimental (Stereo, No AA / FXAA) |
 | OpenXR | Supported |
 | VDXR | Supported and recommended for Quest headsets |
 | SteamVR OpenXR | Supported; standard Presentation Size |
@@ -100,7 +134,8 @@ The ForceDLAA parameter-query and resolution-override approach is adapted from
 
 ## Requirements
 
-- The Witcher 3 Next-Gen (2022), v4.0.4, DirectX 12 version
+- The Witcher 3 Next-Gen (2022), v4.0.4, DirectX 12 version, or The Witcher 3 Remastered, patch
+  5.01 (experimental, see [Remastered (5.x) status](#remastered-5x-status))
 - A working OpenXR runtime for your headset
 - A mouse and keyboard or gamepad
 - Windows 10 or Windows 11
@@ -309,7 +344,13 @@ The Witcher 3 is already CPU-bound in busy cities, and the VR mod increases CPU 
 
 ## Bug Reports
 
+Report problems with this fork, and anything on Remastered 5.x, in
+[this fork's issues](https://github.com/joschi127/witcher3-vr/issues), not in the original
+repository.
+
 When reporting a problem, include:
+
+- Game version (Next-Gen 4.04 or Remastered 5.x)
 
 - Headset and OpenXR runtime
 - GPU and driver version
@@ -324,9 +365,9 @@ When reporting a problem, include:
 The mod is free and publicly available. Donations are entirely optional and
 never provide exclusive builds, features, or support.
 
-If you would like to support development, you can do so through
-[Ko-fi](https://ko-fi.com/tig3rmast3r) or by using the Sponsor button at the
-top of the repository.
+If you would like to support the original author's work on the mod, you can do so through
+[Ko-fi](https://ko-fi.com/tig3rmast3r) or by using the Sponsor button on the
+[original repository](https://github.com/tig3rmast3r/witcher3-vr).
 
 ## Credits
 
