@@ -201,6 +201,44 @@ void WriteBaseFixtures(const w3vr::ConfigPaths& paths) {
         "tokenRefA=user-secret\r\n");
 }
 
+void TestRemasteredAndOptionalAfw(const w3vr::ConfigPaths& paths) {
+    w3vr::LauncherState state;
+    state.remastered = true;
+    for (const auto mode : {w3vr::RenderMode::StereoNone, w3vr::RenderMode::MonoNone}) {
+        state.mode = mode;
+        Require(w3vr::RenderModeUnavailableReason(state, false).empty(),
+            "Remastered allows Stereo/Mono No AA without AFW");
+    }
+    for (const auto mode : {w3vr::RenderMode::StereoTaau, w3vr::RenderMode::StereoDlssSequential,
+             w3vr::RenderMode::AerAfwDlss, w3vr::RenderMode::MonoTaau}) {
+        state.mode = mode;
+        Require(!w3vr::RenderModeUnavailableReason(state, true).empty(),
+            "Remastered rejects TAAU, DLSS and AER");
+    }
+    state.remastered = false;
+    state.mode = w3vr::RenderMode::AerAfwTaau;
+    Require(!w3vr::RenderModeUnavailableReason(state, false).empty(),
+        "AER needs the AFW plugin");
+    Require(w3vr::RenderModeUnavailableReason(state, true).empty(),
+        "AER is available with the AFW plugin");
+
+    WriteBaseFixtures(paths);
+    state.remastered = true;
+    state.mode = w3vr::RenderMode::StereoNone;
+    state.fast_movement_transitions = true;
+    w3vr::IniDocument vr;
+    w3vr::IniDocument game;
+    std::wstring error;
+    Require(w3vr::BuildUpdatedDocuments(paths, state, vr, game, error),
+        "Remastered documents build");
+    Require(game.Get("PostProcess", "AAMode") == "1",
+        "Remastered writes 5.x FXAA (AAMode 1)");
+    Require(game.Get("Rendering", "AllowDLSS") == "false",
+        "Remastered disables DLSS");
+    Require(game.Get("DLC", "DlcEnabled_movementinputfix") == "0",
+        "Remastered keeps the 4.04 movement DLC off");
+}
+
 void TestAllModes(const w3vr::ConfigPaths& paths) {
     for (int index = 0;
         index < static_cast<int>(w3vr::RenderMode::Count); ++index) {
@@ -1942,6 +1980,7 @@ int main() {
         TestVrProfileHighShadows();
         TestHudEditorSetup(temporary.path);
         TestAllModes(paths);
+        TestRemasteredAndOptionalAfw(paths);
         TestOptiscalerAndAlwaysAsym(paths);
         TestDlssLabelsAndLegacyAuto(paths);
         TestFallbackAndAtomicSave(paths);

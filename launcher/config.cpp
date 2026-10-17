@@ -1842,6 +1842,15 @@ bool BuildUpdatedDocuments(const ConfigPaths& paths, const LauncherState& state,
 
     game_settings.Set("Viewport", "Resolution", "\"" +
         std::to_string(state.width) + "x" + std::to_string(state.height) + "\"");
+    if (state.remastered) {
+        // Remastered 5.x: the mod runs the No-AA route with the game's FXAA
+        // (5.x AAMode values: 0 off, 1 FXAA, 5 FSR, 6 DLSS, 7 XeSS). The Fast
+        // Transitions DLC modifies 4.04 behavior data and stays disabled.
+        game_settings.Set("PostProcess", "AAMode", "1");
+        game_settings.Set("Rendering", "AllowDLSS", "false");
+        game_settings.Set("DLC", "DlcEnabled_movementinputfix", "0");
+        return true;
+    }
     game_settings.Set("PostProcess", "AAMode", std::to_string(mode.aa_mode));
     game_settings.Set("PostProcess", "DLSSQuality",
         std::to_string(state.dlss_quality == 0
@@ -2025,6 +2034,47 @@ bool AtomicWriteWithBackup(const std::filesystem::path& path,
         return false;
     }
     return true;
+}
+
+GameEdition DetectGameEdition(const std::filesystem::path& game_executable) {
+    DWORD handle{};
+    const DWORD size = GetFileVersionInfoSizeW(
+        game_executable.c_str(), &handle);
+    if (size == 0) return GameEdition::Unknown;
+    std::vector<uint8_t> data(size);
+    VS_FIXEDFILEINFO* info{};
+    UINT info_size{};
+    if (!GetFileVersionInfoW(game_executable.c_str(), 0, size, data.data()) ||
+        !VerQueryValueW(data.data(), L"\\",
+            reinterpret_cast<void**>(&info), &info_size) ||
+        info == nullptr || info_size < sizeof(VS_FIXEDFILEINFO)) {
+        return GameEdition::Unknown;
+    }
+    switch (HIWORD(info->dwFileVersionMS)) {
+    case 4: return GameEdition::NextGen;
+    case 5: return GameEdition::Remastered;
+    default: return GameEdition::Unknown;
+    }
+}
+
+std::wstring RenderModeUnavailableReason(
+    const LauncherState& state, bool afw_plugin_present) {
+    const bool aer = state.mode == RenderMode::AerAfwTaau ||
+        state.mode == RenderMode::AerAfwDlss;
+    if (state.remastered && state.mode != RenderMode::StereoNone &&
+        state.mode != RenderMode::MonoNone) {
+        return L"The Witcher 3 Remastered (5.x) is detected. So far only "
+            L"\"Stereo - No AA / FXAA\" and \"Mono - No AA / FXAA\" are "
+            L"supported on it; TAAU, DLSS and AER + AFW are not ported yet.";
+    }
+    if (aer && !afw_plugin_present) {
+        return L"AER + AFW needs PureDark's PDAFWPlugin.dll, which is not "
+            L"included in this package.\n\nCopy PDAFWPlugin.dll from the "
+            L"original Witcher 3 VR release "
+            L"(https://github.com/tig3rmast3r/witcher3-vr/releases) into "
+            L"bin\\x64_dx12, or select a Stereo or Mono mode.";
+    }
+    return {};
 }
 
 bool SaveConfiguration(const ConfigPaths& paths, const LauncherState& state,

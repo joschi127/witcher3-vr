@@ -15,7 +15,7 @@ add_library(w3vr_launcher_config STATIC
 )
 target_compile_definitions(w3vr_launcher_config PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
 target_compile_options(w3vr_launcher_config PRIVATE /W4 /permissive-)
-target_link_libraries(w3vr_launcher_config PUBLIC shell32 ole32)
+target_link_libraries(w3vr_launcher_config PUBLIC shell32 ole32 version)
 
 add_library(w3vr_launcher_startup_checks STATIC
     startup_checks.cpp

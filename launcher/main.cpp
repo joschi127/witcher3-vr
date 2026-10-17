@@ -114,10 +114,17 @@ struct App {
     // Advanced INI-only option. Keep the loaded value across launcher saves
     // without exposing a UI control or silently disabling a manual opt-in.
     bool fullscreen_projection{};
+    // Detected from witcher3.exe; PDAFWPlugin.dll is optional (not shipped).
+    w3vr::GameEdition edition{w3vr::GameEdition::Unknown};
+    bool afw_plugin_present{};
     std::vector<ControlLayout> controls;
 };
 
 App g_app;
+
+bool Remastered() {
+    return g_app.edition == w3vr::GameEdition::Remastered;
+}
 
 HWND Item(int id) {
     return GetDlgItem(g_app.window, id);
@@ -574,6 +581,13 @@ bool CaptureState(LauncherState& state, std::wstring& error) {
     state.steady_icons = SendMessageW(
         Item(IdSteadyIcons), BM_GETCHECK, 0, 0) == BST_CHECKED;
     state.fullscreen_projection = g_app.fullscreen_projection;
+    state.remastered = Remastered();
+    if (const auto reason = w3vr::RenderModeUnavailableReason(
+            state, g_app.afw_plugin_present);
+        !reason.empty()) {
+        error = reason;
+        return false;
+    }
     state.diagnostic_logging = SendMessageW(
         Item(IdDiagnosticLogging), BM_GETCHECK, 0, 0) == BST_CHECKED;
     state.route_logging = SendMessageW(
@@ -790,6 +804,15 @@ std::optional<std::string> LoadVrSettingsTemplate() {
 }
 
 void ConfigureSettingsForVr() {
+    if (Remastered()) {
+        MessageBoxW(g_app.window,
+            L"The Witcher 3 Remastered (5.x) is detected. The built-in VR "
+            L"settings profile is made for Next-Gen 4.04 and would change "
+            L"5.x settings incorrectly, so this button is disabled.\n\n"
+            L"See the README for the 5.x settings that matter for VR.",
+            L"Witcher 3 VR Launcher", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
     if (IsGameRunning()) {
         MessageBoxW(g_app.window,
             L"Close The Witcher 3 before replacing its settings.",
@@ -1258,8 +1281,18 @@ void PopulateControls() {
     UpdateTrackLabels();
     EnableWindow(Item(IdRestoreOriginal),
         w3vr::HasOriginalSettingsBackup(g_app.paths));
-    SetStatus(loaded.warning.empty() ? L"Ready. Changes apply on the next game launch."
-                                     : loaded.warning);
+    if (Remastered()) {
+        EnableWindow(Item(IdConfigureVr), FALSE);
+        EnableWindow(Item(IdFastMovementTransitions), FALSE);
+    }
+    if (!loaded.warning.empty()) {
+        SetStatus(loaded.warning);
+    } else if (Remastered()) {
+        SetStatus(L"Remastered 5.x detected: Stereo or Mono with FXAA only. "
+                  L"Changes apply on the next game launch.");
+    } else {
+        SetStatus(L"Ready. Changes apply on the next game launch.");
+    }
 }
 
 void CreateInterface(HWND window) {
@@ -1651,6 +1684,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
         ICC_BAR_CLASSES | ICC_STANDARD_CLASSES | ICC_LINK_CLASS};
     InitCommonControlsEx(&controls);
     g_app.paths = w3vr::DiscoverPaths();
+    g_app.edition = w3vr::DetectGameEdition(g_app.paths.game_executable);
+    {
+        std::error_code afw_error;
+        g_app.afw_plugin_present = std::filesystem::is_regular_file(
+            g_app.paths.launcher_directory / L"PDAFWPlugin.dll", afw_error);
+    }
     // [FIX:OFXR-ROOT-LAYOUT V1510 3/3] Remove the obsolete independent tray
     // and subfolder package before loading or saving the root-owned settings.
     std::wstring ofxr_cleanup_error;

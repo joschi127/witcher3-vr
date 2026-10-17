@@ -135,7 +135,24 @@ struct LauncherState {
     bool route_logging{};
     bool performance_logging{};
     bool renderdoc_enabled{};
+    // Detected game edition (not stored in the INI). Remastered 5.x only
+    // supports Stereo/Mono with FXAA so far and uses different AAMode values.
+    bool remastered{};
 };
+
+enum class GameEdition {
+    Unknown,
+    NextGen,     // witcher3.exe file version 4.x (Next-Gen 4.04)
+    Remastered,  // witcher3.exe file version 5.x
+};
+
+// Reads the major file version of witcher3.exe.
+GameEdition DetectGameEdition(const std::filesystem::path& game_executable);
+
+// Returns why the selected render mode cannot be used, or an empty string.
+// AER + AFW needs PureDark's PDAFWPlugin.dll, which this fork does not ship.
+std::wstring RenderModeUnavailableReason(
+    const LauncherState& state, bool afw_plugin_present);
 
 struct CompatibilityWarnings {
     bool ssr_high{};
