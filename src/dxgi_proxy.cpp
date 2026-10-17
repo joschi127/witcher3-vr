@@ -32379,6 +32379,54 @@ bool safe_write_engine_view_snapshot(
     }
 }
 
+// [FIX:FULL-VR-REUSED-CAMERA-SECONDARY-VIEW] The frame carries a second camera
+// copy right after the primary one (frame+0x530). Sky and trees read it, so a
+// fallback that corrects only the primary leaves them head-locked in cutscenes
+// that reuse the native camera. Mirror the corrected camera into the secondary
+// for the duration of one frame build and restore it afterwards (frame-builder
+// thread).
+constexpr size_t kFullVrPrimaryCameraOffset = 0x20;
+constexpr size_t kFullVrSecondaryCameraOffset = 0x530;
+constexpr size_t kFullVrCameraViewBytes =
+    kFullVrSecondaryCameraOffset - kFullVrPrimaryCameraOffset;
+thread_local std::array<float, 512> t_full_vr_secondary_original{};
+thread_local bool t_full_vr_secondary_written{};
+
+void write_full_vr_secondary_view(
+    void* frame_data, const std::array<float, 512>& corrected) {
+    static_assert(kFullVrCameraViewBytes <= sizeof(corrected));
+    t_full_vr_secondary_written = false;
+    if (frame_data == nullptr) {
+        return;
+    }
+    auto* secondary = reinterpret_cast<float*>(
+        static_cast<uint8_t*>(frame_data) + kFullVrSecondaryCameraOffset);
+    if (!safe_copy_engine_view_snapshot(secondary,
+            t_full_vr_secondary_original.data(), kFullVrCameraViewBytes) ||
+        !safe_write_engine_view_snapshot(
+            secondary, corrected.data(), kFullVrCameraViewBytes)) {
+        return;
+    }
+    t_full_vr_secondary_written = true;
+    static std::atomic<uint32_t> logs{};
+    if (logs.fetch_add(1, std::memory_order_relaxed) < 8) {
+        log_line("Full VR reused camera mirrored into secondary view "
+                 "offset=0x%zX bytes=%zu",
+            kFullVrSecondaryCameraOffset, kFullVrCameraViewBytes);
+    }
+}
+
+void restore_full_vr_secondary_view(void* frame_data) {
+    if (!t_full_vr_secondary_written || frame_data == nullptr) {
+        return;
+    }
+    auto* secondary = reinterpret_cast<float*>(
+        static_cast<uint8_t*>(frame_data) + kFullVrSecondaryCameraOffset);
+    safe_write_engine_view_snapshot(secondary,
+        t_full_vr_secondary_original.data(), kFullVrCameraViewBytes);
+    t_full_vr_secondary_written = false;
+}
+
 bool shadow_cascade_shared_view_active() {
     return g_config.openxr_enabled && g_config.openxr_mode == 3 &&
         g_engine_dual_render_active.load(std::memory_order_acquire) &&
@@ -33917,6 +33965,7 @@ bool prepare_full_vr_frame_camera(
             frame_camera, corrected.data(), sizeof(corrected))) {
         return false;
     }
+    write_full_vr_secondary_view(frame_data, corrected);
     // The first complete fallback pair is deliberately centered proof in both
     // Stereo and AER. Publish its exact content FOV only after the corrected
     // camera write; every subsequently admitted pair publishes raw FOV through
@@ -34128,8 +34177,10 @@ bool restore_full_vr_frame_camera(
     constexpr size_t kPrimaryCameraOffset = 0x20;
     auto* frame_camera = reinterpret_cast<float*>(
         static_cast<uint8_t*>(frame_data) + kPrimaryCameraOffset);
-    return safe_write_engine_view_snapshot(
+    const bool restored = safe_write_engine_view_snapshot(
         frame_camera, original_camera.data(), sizeof(original_camera));
+    restore_full_vr_secondary_view(frame_data);
+    return restored;
 }
 
 void capture_engine_view_snapshot(float* view, uint64_t present, bool after_rebuild) {
