@@ -17,8 +17,14 @@ black, with or without the mod (see `remaster-port-status.md`, 2026-10-17).
   have a light attached to the camera, pointing where the camera looks (2026-10-17). Flat this is
   invisible; in VR it follows head turns like a head lamp and moves its light spot around.
 - Wanted: the light keeps the cutscene camera's own direction (no HMD rotation).
-- Suspect: REDengine's camera lights for dialogues/cutscenes are derived from the render camera,
-  which the mod rotates with the HMD. Not yet checked on 4.04.
+- Cause: REDengine places each camera light from the render camera's position and yaw only
+  (`CameraLightPlacement`, called solely by the frame light list that also reads
+  `[Rendering] DisableAllCameraLights`); the mod composes the HMD rotation into that yaw.
+- Fix in `64b7aad` (pending headset check): the placement is hooked and gets the game camera's
+  yaw, recorded wherever the mod composes the HMD rotation (gameplay view rebuild and the Full VR
+  reused-camera fallback). Null-HMD check: with the head turned 20 degrees the light keeps the
+  camera direction. Camera cuts are unaffected (the light follows each shot's camera as flat).
+  Open: headset check; 4.04 regression run (its address 0x718310 has no signature check).
 
 ### Distant water switches between blue and white depending on head pose
 - River seen from the Kaer Morhen balcony. It shows either blue or white. Holding the head still
