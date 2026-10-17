@@ -161,8 +161,12 @@ same). The material they were derived from is not.
 - Remotes: `origin` = the fork (https://github.com/joschi127/witcher3-vr), default push target.
   `upstream` = tig3rmast3r/witcher3-vr, fetch only. Never push to `upstream`.
 - `main` mirrors `upstream/main` and gets fast-forwards only, no fork commits.
-- `remaster` is the working branch for the port. Commit directly to it in small, self-contained
-  commits (easy to cherry-pick for upstream PRs later). Every commit must build.
+- `remaster` is the working branch for the port and the fork's default branch on GitHub (its
+  README, issue templates and the fork's issues are what visitors see). Commit directly to it in
+  small, self-contained commits (easy to cherry-pick for upstream PRs later). Every commit must
+  build.
+- `backport/*`: fixes offered upstream, based on `main`, one commit each; never merged into
+  `remaster`, which carries the same fixes in its own form.
 - Which commit was verified in the game (5.01, plus a 4.04 regression check where relevant) is
   recorded in `docs/remaster-port-status.md`, including open checks. That is the reference for
   "known good".
