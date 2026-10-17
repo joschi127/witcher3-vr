@@ -43,8 +43,8 @@ an AMD GPU with a Pico 4 over Virtual Desktop. What works and what does not:
   tracing, OptiScaler, OFXR and the other integrations are not ported yet.
 - Unknown or newer game builds are detected and the game hooks stay disabled, so an update of the
   game does not break it blindly, but the mod then does nothing.
-- There is no release package for 5.x yet. It has to be built from this branch and installed over
-  the regular release (see [CONTRIBUTING.md](CONTRIBUTING.md) and `docs/guidelines.md`).
+- Release packages are on [this fork's releases page](https://github.com/joschi127/witcher3-vr/releases)
+  and work for both game versions (see [Installation](#installation)).
 - Do **not** use the launcher's **Configure Settings for VR** on 5.x: it writes the 4.04 settings
   profile. The 5.x settings that matter for VR are listed in `docs/guidelines.md`.
 - On AMD GPUs, use Adrenalin 26.9.2 or newer; older drivers render some 5.x grass solid black (with
@@ -146,7 +146,16 @@ DLSS and DLAA require a compatible NVIDIA GPU. OptiScaler and OFXR have their ow
 
 ## Installation
 
-**Everything needed for the launcher-managed integrations is already included except the NVIDIA NR DLL:** ReShade, the custom VR OptiScaler, OFXR and the launcher are supplied in the package. ReShade add-ons are optional and user-managed.
+Download the package from [this fork's releases page](https://github.com/joschi127/witcher3-vr/releases).
+It is a complete package for both game versions, with two optional parts that are **not** included:
+
+- **PureDark AFW** (`PDAFWPlugin.dll`), needed only for the AER + AFW render modes on Next-Gen 4.04.
+  Take it from the [original Witcher 3 VR release](https://github.com/tig3rmast3r/witcher3-vr/releases)
+  and copy it into `bin\x64_dx12`. Without it, use a Stereo or Mono mode.
+- **Fast Transitions DLC** (optional faster movement transitions on 4.04). It is also part of the
+  original release (`dlc` folder) if you want it.
+
+**Everything else needed for the launcher-managed integrations is included except the NVIDIA NR DLL:** ReShade, the custom VR OptiScaler, OFXR and the launcher are supplied in the package. ReShade add-ons are optional and user-managed. On Remastered 5.x these integrations are not ported yet.
 
 1. Extract the release archive into the Witcher 3 game folder, the directory containing `bin`, `content` and `mods`.
 2. Merge the folders and overwrite the package files when prompted.
@@ -154,7 +163,7 @@ DLSS and DLAA require a compatible NVIDIA GPU. OptiScaler and OFXR have their ow
 4. Run `bin\x64_dx12\Witcher3VRLauncher.exe`.
 5. Choose Off, OptiScaler, ReShade or OptiScaler + ReShade, then select **Save & Launch**. OptiScaler needs a DLSS/DLAA rendering mode. The launcher handles its own runtime files; choose **Off** and save to disable the integrations. ReShade add-ons, if desired, must be installed and configured separately by the user.
 
-The package layout includes the VR DLL, launcher, OFXR, ReShade, one OptiScaler reference, configuration, scripts and bundled mod files inside the correct `bin\x64_dx12`, `mods`, `dlc` and `Witcher3VR` folders. The launcher copies the selected integration from its reference folder into the DX12 directory; it never modifies the references. The NVIDIA NR DLL is not bundled. The root `OptiScaler.ini` stays in place and retains user settings. Install the whole package when changing release versions; replacing only the DLL can leave incompatible files behind.
+The package layout includes the VR DLL, launcher, OFXR, ReShade, one OptiScaler reference, configuration, scripts and bundled mod files inside the correct `bin\x64_dx12`, `mods` and `Witcher3VR` folders. The launcher copies the selected integration from its reference folder into the DX12 directory; it never modifies the references. The NVIDIA NR DLL is not bundled. The root `OptiScaler.ini` stays in place and retains user settings. Install the whole package when changing release versions; replacing only the DLL can leave incompatible files behind.
 
 The separate **RenderDoc Addon** is only for diagnostic captures. It is not required to play.
 
@@ -165,6 +174,11 @@ Back up any files you have edited manually before installing a new release.
 ### First-Time Setup
 
 Press **Configure Settings for VR** at least once before playing. It applies the tested game profile and creates a backup that can be restored later with **Restore Original Settings**.
+
+On Remastered 5.x this button is disabled: its profile is made for 4.04. Set these in the game's
+graphics options instead: anti-aliasing **FXAA**, ray tracing and path tracing **off**, light shafts
+**off** (they veil the image whenever the sun is in view), frame generation, low-latency modes and HDR
+**off**. In the launcher choose **Stereo - No AA / FXAA** and, ideally, **AUTO** resolution.
 
 ### Resolution
 

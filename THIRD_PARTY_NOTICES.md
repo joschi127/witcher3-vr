@@ -218,6 +218,21 @@ Credit: PureDark for the separately loaded `PDAFWPlugin.dll` used by AER + AFW.
 This third-party component is not relicensed under the Witcher3VR MIT license.
 Project: https://github.com/PureDark
 
+This fork's release packages do **not** include `PDAFWPlugin.dll`. AER + AFW is
+optional; to use it, copy `PDAFWPlugin.dll` from the original Witcher 3 VR
+release (https://github.com/tig3rmast3r/witcher3-vr/releases) into
+`bin\x64_dx12`.
+
+## Corresponding source for this fork's packages
+
+This fork's release packages take the third-party runtime files unchanged from
+the original Witcher 3 VR release. Mirrors of the corresponding sources are kept
+in this fork's account:
+
+- OptiScaler_DLSSNR_VR, tag `v23244`: https://github.com/joschi127/OptiScaler_DLSSNR_VR/tree/v23244
+- OFXR Bridge, tag `0.2.1`: https://github.com/joschi127/OFXR-Bridge/tree/0.2.1
+- ReShade VR, tag `v6.8.0-vr-v1530`: https://github.com/joschi127/ReShade_VR/tree/v6.8.0-vr-v1530
+
 ## RenderDoc in-application API and optional runtime
 
 - Source repository: https://github.com/baldurk/renderdoc
@@ -263,6 +278,10 @@ Its foundation is the **Next Gen Movement Input Lag Fix — Fumio Edition**
 (Nexus Mods project 7586); Witcher 3 VR adds narrowly scoped transition changes
 for direct run starts and quick reversals. This component and the underlying
 REDengine game data are not relicensed under Witcher 3 VR's MIT License.
+
+This fork's release packages do not include the Fast Transitions DLC (its
+redistribution terms are not documented here, and it is based on Next-Gen 4.04
+game data). It remains available in the original Witcher 3 VR release.
 
 Fan Content Guidelines:
 https://www.cdprojektred.com/en/fan-content
