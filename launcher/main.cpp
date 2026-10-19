@@ -431,7 +431,10 @@ bool ReadInteger(HWND edit, int& result) {
     return true;
 }
 
-bool CaptureState(LauncherState& state, std::wstring& error) {
+// With auto_resolution_unavailable, a failed OpenXR AUTO query is not an
+// error: the last known resolution is kept and the flag is set.
+bool CaptureState(LauncherState& state, std::wstring& error,
+    bool* auto_resolution_unavailable = nullptr) {
     const int mode = static_cast<int>(SendMessageW(Item(IdMode), CB_GETCURSEL, 0, 0));
     if (mode < 0 || mode >= static_cast<int>(RenderMode::Count)) {
         error = L"Select a render mode.";
@@ -439,15 +442,24 @@ bool CaptureState(LauncherState& state, std::wstring& error) {
     }
     state.mode = static_cast<RenderMode>(mode);
     state.resolution_auto = ResolutionAutoEnabled();
-    if (state.resolution_auto) {
-        w3vr::OpenXrRecommendedResolution recommended{};
-        if (!w3vr::QueryOpenXrRecommendedResolution(
-                g_app.paths.launcher_directory, recommended, error)) {
+    w3vr::OpenXrRecommendedResolution recommended{};
+    if (state.resolution_auto &&
+        !w3vr::QueryOpenXrRecommendedResolution(
+            g_app.paths.launcher_directory, recommended, error)) {
+        if (auto_resolution_unavailable == nullptr) {
             error = L"OpenXR AUTO resolution failed. " + error +
                 L"\n\nStart or wake your OpenXR runtime/headset, then try again; "
                 L"or disable AUTO and select a manual resolution.";
             return false;
         }
+        // No headset/runtime reachable: keep AUTO and the last known
+        // resolution; the next Save & Launch with the headset reads it again.
+        *auto_resolution_unavailable = true;
+        error.clear();
+        recommended.width = g_app.loaded.width;
+        recommended.height = g_app.loaded.height;
+    }
+    if (state.resolution_auto) {
         state.width = recommended.width;
         state.height = recommended.height;
         if (state.width <= 0 || state.width > 16384 ||
@@ -821,7 +833,8 @@ void ConfigureRemasteredSettingsForVr() {
     }
     LauncherState state;
     std::wstring error;
-    if (!CaptureState(state, error)) {
+    bool auto_unavailable{};
+    if (!CaptureState(state, error, &auto_unavailable)) {
         MessageBoxW(g_app.window, error.c_str(), L"Invalid settings",
             MB_OK | MB_ICONWARNING);
         return;
@@ -834,8 +847,11 @@ void ConfigureRemasteredSettingsForVr() {
     }
     g_app.loaded = state;
     EnableWindow(Item(IdRestoreOriginal), TRUE);
-    SetStatus(L"Remastered VR settings applied (FXAA; ray tracing, light shafts, "
-              L"frame generation and HDR off). Press Save & Launch to play.");
+    SetStatus(auto_unavailable
+        ? L"Remastered VR settings applied. Headset not reachable: the AUTO "
+          L"resolution is read on Save & Launch with the headset connected."
+        : L"Remastered VR settings applied (FXAA; ray tracing, light shafts, "
+          L"frame generation and HDR off). Press Save & Launch to play.");
 }
 
 void ConfigureSettingsForVr() {
@@ -851,12 +867,13 @@ void ConfigureSettingsForVr() {
     }
     LauncherState state;
     std::wstring error;
-    if (!CaptureState(state, error)) {
+    bool auto_unavailable{};
+    if (!CaptureState(state, error, &auto_unavailable)) {
         MessageBoxW(g_app.window, error.c_str(), L"Invalid settings",
             MB_OK | MB_ICONWARNING);
         return;
     }
-    if (state.resolution_auto &&
+    if (state.resolution_auto && !auto_unavailable &&
         w3vr::DlssNearSquareCompatibleWidth(state).has_value()) {
         MessageBoxW(g_app.window,
             L"OpenXR AUTO returned an exact square or near-square resolution, "
@@ -1076,10 +1093,25 @@ void Save(bool launch) {
     }
     LauncherState state;
     std::wstring error;
-    if (!CaptureState(state, error)) {
+    bool auto_unavailable{};
+    if (!CaptureState(state, error, &auto_unavailable)) {
         MessageBoxW(g_app.window, error.c_str(), L"Invalid settings",
             MB_OK | MB_ICONWARNING);
         return;
+    }
+    if (auto_unavailable && launch) {
+        const std::wstring question =
+            L"The headset or OpenXR runtime is not reachable, so the AUTO "
+            L"resolution could not be read.\n\nLaunch with the last known "
+            L"resolution " + std::to_wstring(state.width) + L" x " +
+            std::to_wstring(state.height) + L"?\n\nChoose No to connect the "
+            L"headset first and press Save & Launch again.";
+        if (MessageBoxW(g_app.window, question.c_str(),
+                L"Headset not reachable",
+                MB_YESNO | MB_ICONQUESTION) != IDYES) {
+            SetStatus(L"Nothing launched. Connect the headset and press Save & Launch.");
+            return;
+        }
     }
     if (const auto compatible_width =
             w3vr::DlssNearSquareCompatibleWidth(state)) {
@@ -1135,7 +1167,12 @@ void Save(bool launch) {
     }
     g_app.loaded = state;
     g_app.fullscreen_projection = state.fullscreen_projection;
-    SetStatus(state.resolution_auto
+    SetStatus(auto_unavailable
+        ? (L"Settings saved. Headset not reachable: kept " +
+            std::to_wstring(state.width) + L" x " +
+            std::to_wstring(state.height) +
+            L"; AUTO is read again on the next Save & Launch.")
+        : state.resolution_auto
         ? (L"Settings saved. OpenXR AUTO applied " +
             std::to_wstring(state.width) + L" x " +
             std::to_wstring(state.height) + L".")
