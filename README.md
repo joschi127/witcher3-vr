@@ -2,9 +2,10 @@
 
 > [!NOTE]
 > This is a fork of [Witcher 3 VR](https://github.com/tig3rmast3r/witcher3-vr) by
-> [tig3rmast3r](https://github.com/tig3rmast3r). All credit for the mod goes to him: the VR
-> renderer, launcher, integrations and nearly all of the code in this repository are his work. This
-> fork only adds support for The Witcher 3 Remastered (patch 5.x) on top of it.
+> [tig3rmast3r](https://github.com/tig3rmast3r). All credit for the mod goes to him and to the
+> other people and projects listed under [Credits](#credits): the VR renderer, launcher,
+> integrations and nearly all of the code in this repository are their work. This fork only adds
+> support for The Witcher 3 Remastered (patch 5.x) on top of it.
 
 The goal of this fork is to support both the latest Next-Gen version (4.04) and the latest
 Remastered version (5.x) of the game. Once Remastered support is stable and has at least all
