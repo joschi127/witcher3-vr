@@ -1208,6 +1208,26 @@ void TestInconsistentWarning(const w3vr::ConfigPaths& paths) {
     Require(!loaded.warning.empty(), "inconsistent settings should warn");
     Require(loaded.state.mode == w3vr::RenderMode::StereoDlssSequential,
         "best-effort mode should follow VR backend");
+
+    // Remastered 5.x: FXAA (AAMode=1) and the game's AllowDLSS default must not
+    // make the Stereo No-AA route look inconsistent.
+    auto vr = w3vr::IniDocument::Load(paths.vr_ini, error);
+    Require(vr.has_value(), "VR fixture load failed");
+    vr->Set("openxr", "mode", "3");
+    vr->Set("openxr", "mode3_aer_presentation", "0");
+    vr->Set("engine", "dual_render_probe", "1");
+    vr->Set("engine", "dual_render_start", "1");
+    vr->Set("engine", "temporal_backend", "none");
+    Write(paths.vr_ini, vr->Serialize());
+    game->Set("PostProcess", "AAMode", "1");
+    game->Set("Rendering", "AllowDLSS", "true");
+    Write(paths.game_settings, game->Serialize());
+    const auto remastered = w3vr::LoadConfiguration(paths, true);
+    Require(remastered.warning.empty() &&
+            remastered.state.mode == w3vr::RenderMode::StereoNone,
+        "5.x FXAA settings should load as Stereo No AA without a warning");
+    Require(!w3vr::LoadConfiguration(paths).warning.empty(),
+        "4.04 should still report AAMode=1 as inconsistent");
 }
 
 void TestFirstRunConfiguration(const fs::path& root) {

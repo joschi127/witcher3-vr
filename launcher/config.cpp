@@ -1519,7 +1519,7 @@ bool EnsureHudEditorSetup(const ConfigPaths& paths, std::wstring& error) {
     return true;
 }
 
-LoadResult LoadConfiguration(const ConfigPaths& paths) {
+LoadResult LoadConfiguration(const ConfigPaths& paths, bool remastered) {
     LoadResult result;
     std::wstring error;
     const auto vr = IniDocument::Load(paths.vr_ini, error);
@@ -1549,8 +1549,8 @@ LoadResult LoadConfiguration(const ConfigPaths& paths) {
     auto backend = ReadString(*vr, "engine", "temporal_backend", "none");
     if (backend == "dlss_packed") backend = "dlss";
     const bool dlss_dlaa = ReadBool(*vr, "engine", "dlss_dlaa", false);
-    const int aa_mode = ReadInt(*game, "PostProcess", "AAMode", 0);
-    const bool allow_dlss = ReadBool(*game, "Rendering", "AllowDLSS", false);
+    int aa_mode = ReadInt(*game, "PostProcess", "AAMode", 0);
+    bool allow_dlss = ReadBool(*game, "Rendering", "AllowDLSS", false);
     const int launcher_xr_mode = legacy_aer_mode
         ? 3
         : (legacy_mono_mode ? 1 : xr_mode);
@@ -1563,6 +1563,13 @@ LoadResult LoadConfiguration(const ConfigPaths& paths) {
     const bool launcher_aer = legacy_aer_mode
         ? true
         : (legacy_mono_mode ? false : mode3_aer_presentation);
+    if (remastered) {
+        // Compare against the table values of the VR INI's own route.
+        const auto& route = kModes.at(static_cast<size_t>(
+            BestEffortMode(launcher_xr_mode, launcher_aer, backend)));
+        aa_mode = route.aa_mode;
+        allow_dlss = route.allow_dlss;
+    }
     if (const auto exact = ExactMode(
             launcher_xr_mode, launcher_dual_probe, launcher_dual_start,
             launcher_aer, backend, aa_mode, allow_dlss)) {

@@ -1252,7 +1252,7 @@ void PopulateControls() {
     ComboAdd(camera_follow, L"Only Horse/Boat");
     ComboAdd(camera_follow, L"Always Off");
 
-    const auto loaded = w3vr::LoadConfiguration(g_app.paths);
+    const auto loaded = w3vr::LoadConfiguration(g_app.paths, Remastered());
     g_app.loaded = loaded.state;
     g_app.fullscreen_projection = loaded.state.fullscreen_projection;
     SendMessageW(mode, CB_SETCURSEL, static_cast<int>(loaded.state.mode), 0);

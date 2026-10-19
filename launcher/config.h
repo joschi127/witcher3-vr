@@ -224,7 +224,9 @@ bool EnsureVrConfiguration(const ConfigPaths& paths,
     const std::string& template_contents, bool& created, std::wstring& error);
 bool EnsureHudEditorSetup(const ConfigPaths& paths, std::wstring& error);
 std::wstring HudEditorManualSetupInstructions(const ConfigPaths& paths);
-LoadResult LoadConfiguration(const ConfigPaths& paths);
+// On Remastered 5.x the game's AA keys use other values and are written by
+// Save for every mode, so only the VR INI selects the displayed mode.
+LoadResult LoadConfiguration(const ConfigPaths& paths, bool remastered = false);
 CompatibilityWarnings InspectCompatibilitySettings(const ConfigPaths& paths);
 bool BuildUpdatedDocuments(const ConfigPaths& paths, const LauncherState& state,
     IniDocument& vr_ini, IniDocument& game_settings, std::wstring& error);
