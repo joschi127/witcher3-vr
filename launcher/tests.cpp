@@ -933,6 +933,14 @@ void TestHudEditorSetup(const fs::path& root) {
         "UTF-16BE HUD editor registration failed");
     Require(Read(filelist) == utf16_be_expected,
         "UTF-16BE filelist encoding or newlines were not preserved");
+
+    // Remastered 5.x has no dx12filelist.txt and loads every XML itself.
+    fs::remove(filelist);
+    error.clear();
+    Require(w3vr::EnsureHudEditorSetup(paths, error),
+        "HUD editor setup must work without dx12filelist.txt (5.x)");
+    Require(!fs::exists(filelist),
+        "HUD editor setup must not create a file list on 5.x");
 }
 
 void TestDlssNearSquareResolutionCompatibility() {

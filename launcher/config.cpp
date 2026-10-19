@@ -1434,7 +1434,7 @@ bool EnsureHudEditorSetup(const ConfigPaths& paths, std::wstring& error) {
     const auto input_settings =
         paths.game_settings.parent_path() / L"input.settings";
 
-    for (const auto& required : {script, xml, filelist, input_settings}) {
+    for (const auto& required : {script, xml, input_settings}) {
         const DWORD attributes = GetFileAttributesW(required.c_str());
         if (attributes == INVALID_FILE_ATTRIBUTES ||
             (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
@@ -1443,6 +1443,12 @@ bool EnsureHudEditorSetup(const ConfigPaths& paths, std::wstring& error) {
             return false;
         }
     }
+    // Next-Gen 4.04 only loads the menu XML files listed in dx12filelist.txt.
+    // Remastered 5.x has no file list and loads every *.xml in the folder, so
+    // there the XML file itself is the registration.
+    const DWORD filelist_attributes = GetFileAttributesW(filelist.c_str());
+    const bool uses_filelist = filelist_attributes != INVALID_FILE_ATTRIBUTES &&
+        (filelist_attributes & FILE_ATTRIBUTE_DIRECTORY) == 0;
 
     const auto read_text = [&error](const std::filesystem::path& path)
         -> std::optional<std::string> {
@@ -1459,18 +1465,20 @@ bool EnsureHudEditorSetup(const ConfigPaths& paths, std::wstring& error) {
         return contents;
     };
 
-    const auto original_filelist = read_text(filelist);
-    if (!original_filelist) return false;
-    const auto prepared_filelist =
-        PrepareHudEditorFilelist(*original_filelist);
-    if (!prepared_filelist) {
-        error = L"HUD Editor setup stopped because dx12filelist.txt has an "
-            L"invalid UTF-16 byte layout:\n" + filelist.wstring();
-        return false;
-    }
-    if (*prepared_filelist != *original_filelist &&
-        !AtomicWriteWithBackup(filelist, *prepared_filelist, error)) {
-        return false;
+    if (uses_filelist) {
+        const auto original_filelist = read_text(filelist);
+        if (!original_filelist) return false;
+        const auto prepared_filelist =
+            PrepareHudEditorFilelist(*original_filelist);
+        if (!prepared_filelist) {
+            error = L"HUD Editor setup stopped because dx12filelist.txt has an "
+                L"invalid UTF-16 byte layout:\n" + filelist.wstring();
+            return false;
+        }
+        if (*prepared_filelist != *original_filelist &&
+            !AtomicWriteWithBackup(filelist, *prepared_filelist, error)) {
+            return false;
+        }
     }
 
     const auto original_input = read_text(input_settings);
@@ -1484,17 +1492,19 @@ bool EnsureHudEditorSetup(const ConfigPaths& paths, std::wstring& error) {
     // A successful ReplaceFile call is not enough evidence: antivirus,
     // synchronization software, or a running game can replace the file again.
     // Read both targets back and validate the exact state consumed by REDengine.
-    const auto verified_filelist = read_text(filelist);
-    if (!verified_filelist) return false;
-    const auto verified_prepared_filelist =
-        PrepareHudEditorFilelist(*verified_filelist);
-    if (!verified_prepared_filelist ||
-        *verified_prepared_filelist != *verified_filelist) {
-        error = L"HUD Editor setup verification failed after writing:\n" +
-            filelist.wstring() +
-            L"\n\nThe required XML registration was not present in the file's "
-            L"original encoding when it was read back.";
-        return false;
+    if (uses_filelist) {
+        const auto verified_filelist = read_text(filelist);
+        if (!verified_filelist) return false;
+        const auto verified_prepared_filelist =
+            PrepareHudEditorFilelist(*verified_filelist);
+        if (!verified_prepared_filelist ||
+            *verified_prepared_filelist != *verified_filelist) {
+            error = L"HUD Editor setup verification failed after writing:\n" +
+                filelist.wstring() +
+                L"\n\nThe required XML registration was not present in the file's "
+                L"original encoding when it was read back.";
+            return false;
+        }
     }
 
     const auto verified_input = read_text(input_settings);
