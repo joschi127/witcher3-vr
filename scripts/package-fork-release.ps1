@@ -18,11 +18,12 @@ param(
 
 # Builds this fork's release package from the original release plus this
 # repository's build:
-# - third-party runtime files (OptiScaler, OFXR, ReShade, OpenXR loader, game
-#   scripts) are taken unchanged from the pinned original release;
+# - third-party runtime files (OptiScaler, OFXR, ReShade, OpenXR loader) are
+#   taken unchanged from the pinned original release;
 # - PureDark's PDAFWPlugin.dll and the Fast Transitions DLC are left out (not
 #   redistributed by this fork, see THIRD_PARTY_NOTICES.md);
-# - dxgi.dll, the launcher, the documents and the example INI come from here.
+# - dxgi.dll, the launcher, the game script mods (support/mod*), the documents
+#   and the example INI come from here.
 
 $ErrorActionPreference = 'Stop'
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
@@ -78,6 +79,15 @@ if ((Test-Path -LiteralPath $dlcRoot) -and -not (Get-ChildItem -LiteralPath $dlc
 # This fork's files.
 Copy-Item -LiteralPath $dll -Destination (Join-Path $staging 'bin/x64_dx12/witcher3vr-mod-reference/dxgi.dll') -Force
 Copy-Item -LiteralPath $launcher -Destination (Join-Path $staging 'bin/x64_dx12/Witcher3VRLauncher.exe') -Force
+# Game script mods: replace the original release's copies with this fork's.
+foreach ($mod in Get-ChildItem -LiteralPath (Join-Path $staging 'mods') -Directory) {
+    $source = Resolve-RepoPath "support/$($mod.Name)"
+    if (-not (Test-Path -LiteralPath $source -PathType Container)) {
+        throw "No support/$($mod.Name) in this repository for the packaged mod"
+    }
+    Remove-Item -LiteralPath $mod.FullName -Recurse -Force
+    Copy-Item -LiteralPath $source -Destination $mod.FullName -Recurse
+}
 $documentation = Join-Path $staging 'Witcher3VR'
 foreach ($name in @('README.md', 'LICENSE', 'THIRD_PARTY_NOTICES.md')) {
     Copy-Item -LiteralPath (Resolve-RepoPath $name) -Destination $documentation -Force
