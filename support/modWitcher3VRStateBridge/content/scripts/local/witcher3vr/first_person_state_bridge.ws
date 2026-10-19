@@ -244,7 +244,9 @@ function OnGameCameraTick(out moveData: SCameraMovementData, dt: float) {
   return result;
 }
 
-@wrapMethod(HorseRiding)
+// States are wrapped by their full class name (CR4PlayerState<Name>): the
+// Remastered 5.x script compiler does not resolve the short state name.
+@wrapMethod(CR4PlayerStateHorseRiding)
 function OnGameCameraPostTick(
   out moveData: SCameraMovementData,
   dt: float
@@ -270,7 +272,7 @@ function OnGameCameraPostTick(
 // Sailing and SailingPassive override the ordinary CR4Player camera tick, so
 // neither can rely on W3VR_GetFootState() to replace a retained FootIdle edge.
 // Publish boat authority directly from both native camera-state owners.
-@wrapMethod(Sailing)
+@wrapMethod(CR4PlayerStateSailing)
 function OnGameCameraPostTick(
   out moveData: SCameraMovementData,
   dt: float
@@ -284,7 +286,7 @@ function OnGameCameraPostTick(
   return result;
 }
 
-@wrapMethod(SailingPassive)
+@wrapMethod(CR4PlayerStateSailingPassive)
 function OnGameCameraPostTick(
   out moveData: SCameraMovementData,
   dt: float
