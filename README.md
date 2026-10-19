@@ -83,7 +83,7 @@ Choose the integration you want directly from the launcher:
 - **ReShade support**, on its own or alongside OptiScaler.
 - **OptiScaler support**, using our stereo-compatible DLSS5/VR fork.
 
-The bundled ReShade is [our unofficial ReShade VR fork](https://github.com/tig3rmast3r/ReShade_VR), based on ReShade 6.8.0. It includes a targeted fix for a startup crash when SteamVR uses DirectX 11 and 12 together. This fix has been validated with Witcher3VR; it is not a claim of compatibility with every game or VR setup.
+The bundled ReShade is [tig3rmast3r's unofficial ReShade VR fork](https://github.com/tig3rmast3r/ReShade_VR), based on ReShade 6.8.0. It includes a targeted fix for a startup crash when SteamVR uses DirectX 11 and 12 together. This fix has been validated with Witcher3VR; it is not a claim of compatibility with every game or VR setup.
 
 Disable DLSS Override before using OptiScaler. Its neural-rendering route requires a compatible NVIDIA NR DLL supplied separately; that file is not included with the mod.
 
@@ -117,7 +117,7 @@ The table describes Next-Gen 4.04. For Remastered 5.x see [Remastered (5.x) stat
 | Mono rendering | Preliminary |
 | No AA / FXAA / TAAU / DLSS / DLAA | Supported, depending on render mode |
 | OptiScaler | Supported |
-| ReShade | Supported through our fork with the validated SteamVR startup crash fix |
+| ReShade | Supported through tig3rmast3r's ReShade VR fork with the validated SteamVR startup crash fix |
 | DLSS5 via OptiScaler | Supported through the stereo-compatible fork |
 | OFXR frame generation | Experimental; tested with VDXR and partially with SteamVR OpenXR |
 
@@ -401,11 +401,19 @@ If you would like to support the original author's work on the mod, you can do s
 
 ## Credits
 
+### Witcher 3 VR
+
+- [tig3rmast3r](https://github.com/tig3rmast3r) — author of
+  [Witcher 3 VR](https://github.com/tig3rmast3r/witcher3-vr), on which this fork is based: the VR
+  renderer, launcher, game scripts and integrations, as well as the ReShade VR, OptiScaler VR and
+  OFXR Bridge projects listed below. Please support his work via
+  [Ko-fi](https://ko-fi.com/tig3rmast3r).
+
 ### ReShade, DLSS5 and upscaling
 
-- [Patrick Mours (crosire) and ReShade contributors](https://github.com/crosire/reshade) — post-processing runtime, overlay and add-on API. The package uses [our unofficial ReShade VR fork](https://github.com/tig3rmast3r/ReShade_VR), based on 6.8.0, with a targeted DirectX 11/12 compatibility fix for the reproduced SteamVR startup crash. Original copyright and license notices are retained.
+- [Patrick Mours (crosire) and ReShade contributors](https://github.com/crosire/reshade) — post-processing runtime, overlay and add-on API. The package uses [tig3rmast3r's unofficial ReShade VR fork](https://github.com/tig3rmast3r/ReShade_VR), based on 6.8.0, with a targeted DirectX 11/12 compatibility fix for the reproduced SteamVR startup crash. Original copyright and license notices are retained.
 - [The OptiScaler team and contributors](https://github.com/optiscaler/OptiScaler) — the original upscaling integration.
-- [Dagherbou / OptiScaler_DLSSNR](https://github.com/Dagherbou/OptiScaler_DLSSNR) — DLSS Neural Rendering support in OptiScaler. [Our VR fork](https://github.com/tig3rmast3r/OptiScaler_DLSSNR_VR) adds separate processing for each eye to prevent flickering and unstable colours.
+- [Dagherbou / OptiScaler_DLSSNR](https://github.com/Dagherbou/OptiScaler_DLSSNR) — DLSS Neural Rendering support in OptiScaler. [tig3rmast3r's VR fork](https://github.com/tig3rmast3r/OptiScaler_DLSSNR_VR) adds separate processing for each eye to prevent flickering and unstable colours.
 - [sadbee166](https://github.com/sadbee166) — author of [OptiScaler_DLSSNR PR #6](https://github.com/Dagherbou/OptiScaler_DLSSNR/pull/6), which introduced running DLSS Neural Rendering before DLSS upscaling and is the basis of the VR v2 pre-DLSS path.
 - [NVIDIA / Streamline and NGX](https://github.com/NVIDIA-RTX/Streamline) — DLSS technologies and integration interfaces. NVIDIA DLSS5 runtime DLLs are not distributed with Witcher3VR.
 - [AMD / FidelityFX](https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK) — upscaling and optical-flow technology used by the integrations.
@@ -414,7 +422,7 @@ If you would like to support the original author's work on the mod, you can do s
 ### VR, frame generation and other components
 
 - [PureDark](https://github.com/PureDark) — the AFW component used by AER + AFW.
-- [OFXR Bridge](https://github.com/tig3rmast3r/OFXR-Bridge) — optical-flow-based VR frame generation, with AMD and NVIDIA backends.
+- [OFXR Bridge](https://github.com/tig3rmast3r/OFXR-Bridge) by tig3rmast3r — optical-flow-based VR frame generation, with AMD and NVIDIA backends.
 - [praydog / REFramework](https://github.com/praydog/REFramework) — DX12
   hooking and VR architecture reference
 - [praydog / UEVR](https://github.com/praydog/UEVR) — additional VR
