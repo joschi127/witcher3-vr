@@ -1421,6 +1421,42 @@ bool EnsureVrConfiguration(const ConfigPaths& paths,
     return true;
 }
 
+bool EnsureEditionScripts(const std::filesystem::path& launcher_directory,
+    GameEdition edition, std::wstring& error) {
+    if (edition == GameEdition::Unknown) return true;
+    const auto mod_root = launcher_directory.parent_path().parent_path() /
+        L"mods" / L"modWitcher3VRStateBridge";
+    const auto source = mod_root / L"variants" /
+        (edition == GameEdition::Remastered ? L"remastered" : L"nextgen") /
+        L"vehicle_camera_bridge.ws";
+    const auto target = mod_root / L"content" / L"scripts" / L"local" /
+        L"witcher3vr" / L"vehicle_camera_bridge.ws";
+    std::error_code fs_error;
+    if (!std::filesystem::is_regular_file(source, fs_error)) return true;
+
+    const auto read_all = [](const std::filesystem::path& path)
+        -> std::optional<std::string> {
+        std::ifstream stream(path, std::ios::binary);
+        if (!stream) return std::nullopt;
+        return std::string((std::istreambuf_iterator<char>(stream)), {});
+    };
+    const auto wanted = read_all(source);
+    if (!wanted) {
+        error = L"Could not read the state bridge script:\n" + source.wstring();
+        return false;
+    }
+    if (const auto current = read_all(target); current && *current == *wanted) {
+        return true;
+    }
+    if (!std::filesystem::copy_file(source, target,
+            std::filesystem::copy_options::overwrite_existing, fs_error)) {
+        error = L"Could not install the state bridge script for this game "
+            L"version:\n" + target.wstring();
+        return false;
+    }
+    return true;
+}
+
 bool EnsureHudEditorSetup(const ConfigPaths& paths, std::wstring& error) {
     const auto bin_directory = paths.launcher_directory.parent_path();
     const auto game_root = bin_directory.parent_path();

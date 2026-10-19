@@ -1780,6 +1780,14 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
         g_app.afw_plugin_present = std::filesystem::is_regular_file(
             g_app.paths.launcher_directory / L"PDAFWPlugin.dll", afw_error);
     }
+    {
+        std::wstring script_error;
+        if (!w3vr::EnsureEditionScripts(
+                g_app.paths.launcher_directory, g_app.edition, script_error)) {
+            MessageBoxW(nullptr, script_error.c_str(),
+                L"Witcher 3 VR Launcher", MB_OK | MB_ICONWARNING);
+        }
+    }
     // [FIX:OFXR-ROOT-LAYOUT V1510 3/3] Remove the obsolete independent tray
     // and subfolder package before loading or saving the root-owned settings.
     std::wstring ofxr_cleanup_error;

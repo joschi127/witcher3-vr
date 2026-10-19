@@ -150,6 +150,11 @@ enum class GameEdition {
 
 // Reads the major file version of witcher3.exe.
 GameEdition DetectGameEdition(const std::filesystem::path& game_executable);
+// Installs the state bridge script variant for the detected game version
+// (4.04 and 5.x need different state wrapper names). Succeeds without changes
+// when the edition is unknown or the state bridge mod is not installed.
+bool EnsureEditionScripts(const std::filesystem::path& launcher_directory,
+    GameEdition edition, std::wstring& error);
 
 // The closest render mode that can be used: Stereo/Mono with FXAA on
 // Remastered 5.x, and the matching Stereo mode instead of AER + AFW when

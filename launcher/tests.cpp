@@ -790,6 +790,41 @@ void TestIntegrationModeContract() {
         "legacy RenoDX mode must migrate to plain ReShade");
 }
 
+void TestEditionScripts(const fs::path& root) {
+    const fs::path game = root / "edition-scripts";
+    const fs::path launcher_directory = game / "bin" / "x64_dx12";
+    const fs::path mod = game / "mods" / "modWitcher3VRStateBridge";
+    const fs::path target = mod / "content" / "scripts" / "local" /
+        "witcher3vr" / "vehicle_camera_bridge.ws";
+    std::wstring error;
+    Require(w3vr::EnsureEditionScripts(
+            launcher_directory, w3vr::GameEdition::Remastered, error) &&
+            !fs::exists(target),
+        "edition scripts must be optional when the mod is not installed");
+
+    fs::create_directories(launcher_directory);
+    fs::create_directories(target.parent_path());
+    fs::create_directories(mod / "variants" / "nextgen");
+    fs::create_directories(mod / "variants" / "remastered");
+    Write(mod / "variants" / "nextgen" / "vehicle_camera_bridge.ws",
+        "@wrapMethod(HorseRiding)\r\n");
+    Write(mod / "variants" / "remastered" / "vehicle_camera_bridge.ws",
+        "@wrapMethod(CR4PlayerStateHorseRiding)\r\n");
+
+    Require(w3vr::EnsureEditionScripts(
+            launcher_directory, w3vr::GameEdition::Unknown, error) &&
+            !fs::exists(target),
+        "unknown game builds must not get a state bridge variant");
+    Require(w3vr::EnsureEditionScripts(
+            launcher_directory, w3vr::GameEdition::Remastered, error) &&
+            Read(target) == "@wrapMethod(CR4PlayerStateHorseRiding)\r\n",
+        "Remastered state bridge variant was not installed");
+    Require(w3vr::EnsureEditionScripts(
+            launcher_directory, w3vr::GameEdition::NextGen, error) &&
+            Read(target) == "@wrapMethod(HorseRiding)\r\n",
+        "Next-Gen state bridge variant did not replace the 5.x one");
+}
+
 void TestHudEditorSetup(const fs::path& root) {
     const fs::path game = root / "hud-setup" / "game";
     const fs::path launcher_directory = game / "bin" / "x64_dx12";
@@ -2072,6 +2107,7 @@ int main() {
         TestIntegrationModeContract();
         TestVrProfileHighShadows();
         TestHudEditorSetup(temporary.path);
+        TestEditionScripts(temporary.path);
         TestAllModes(paths);
         TestRemasteredAndOptionalAfw(paths);
         TestOptiscalerAndAlwaysAsym(paths);
