@@ -57,6 +57,10 @@ int wmain() {
                 w3vr::IsKnownDx12Dll(
                     L"OFXR_AMD_FIDELITYFX_FRAMEGENERATION_DX12.DLL"),
             "managed FSR frame-generation DLLs were not allowlisted");
+        Require(w3vr::IsKnownDx12Dll(L"amd_ags_x64.dll") &&
+                w3vr::IsKnownDx12Dll(L"sl.pcl.dll") &&
+                w3vr::IsKnownDx12Dll(L"xaudio2_9redist.dll"),
+            "Remastered 5.x game DLLs were not allowlisted");
         Require(!w3vr::IsKnownDx12Dll(L"version.dll"),
             "foreign proxy DLL was incorrectly allowlisted");
 

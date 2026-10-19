@@ -51,6 +51,18 @@ const auto kKnownDx12Dlls = std::to_array<std::wstring_view>({
     L"steam_api64.dll",
     L"XeFX.dll",
     L"XeFX_Loader.dll",
+    // Additionally shipped by The Witcher 3 Remastered (5.x) DX12 runtime.
+    L"amd_ags_x64.dll",
+    L"amd_fidelityfx_loader_dx12.dll",
+    L"libxell.dll",
+    L"libxess_dx11.dll",
+    L"libxess_fg.dll",
+    L"msvcp110.dll",
+    L"normaliz.dll",
+    L"sl.dlss_d.dll",
+    L"sl.pcl.dll",
+    L"Wldap32.dll",
+    L"xaudio2_9redist.dll",
 
     // Witcher 3 VR and its dedicated optional release packages.
     L"dxgi.dll",
