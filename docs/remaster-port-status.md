@@ -487,3 +487,18 @@ Layout changes that block a direct port:
   scene without errors (its desktop captures do not show the HMD view, so only stability was
   checked there).
 - Open: headset check on 4.04.
+
+## 2026-10-22
+
+### Square render size breaks 5.01 with an upscaler
+- With a symmetric full field of view (Virtual Desktop FOV tangent 100/100, about 104 x 104
+  degrees) VDXR recommends a square per-eye size (2880x2880). With that size forced and the game's
+  FSR upscaler on (`AAMode=5`), 5.01 draws sky and clouds only into a top-left rectangle (width
+  scaled once, height twice by the upscale ratio: 1920x1280 at 2880x2880, Quality) and the camera
+  looked unstable in the headset. Without per-eye FSR the same build crashed reproducibly while
+  loading.
+- Reproduced with the null HMD and also flat (OpenXR off), at 1872x1872 too. FXAA at 2880x2880,
+  and 1872x1572, 2888x2880 and 2880x2888 with FSR are fine: only exactly square sizes fail.
+- Workaround: on 5.01 a square `render_width/height` drops 8 rows (2880x2872, 0.3 % aspect
+  error) for the game viewport and the OpenXR swapchain. Verified with the null HMD: no crash,
+  full sky; headset check open.
