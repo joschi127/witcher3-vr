@@ -30566,12 +30566,19 @@ w3vr::game_build::Build running_game_build() {
         }
         const auto identified =
             w3vr::game_build::identify(time_date_stamp, size_of_image);
+        // engine_hooks_supported() covers only the fixed 4.04 addresses; 5.01
+        // hooks come from the address table, each with a signature check.
+        const char* engine_hooks = "disabled_unknown_build";
+        if (w3vr::game_build::engine_hooks_supported(identified)) {
+            engine_hooks = "enabled";
+        } else if (identified == w3vr::game_build::Build::Remaster501) {
+            engine_hooks = "address_table";
+        }
         log_line(
             "Game build %s timestamp=0x%08X size_of_image=0x%08X "
             "engine_hooks=%s",
             w3vr::game_build::name(identified), time_date_stamp, size_of_image,
-            w3vr::game_build::engine_hooks_supported(identified) ?
-                "enabled" : "disabled_unsupported_build");
+            engine_hooks);
         return identified;
     }();
     return build;
