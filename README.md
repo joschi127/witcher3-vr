@@ -170,6 +170,24 @@ The separate **RenderDoc Addon** is only for diagnostic captures. It is not requ
 
 Back up any files you have edited manually before installing a new release.
 
+### Linux (Steam + Proton)
+
+On Linux the Windows launcher is replaced by `linux/w3vr-linux.py` (Python 3, standard library only),
+and `dxgi.dll` is built with clang-cl ([linux/BUILD-LINUX.md](linux/BUILD-LINUX.md)). Both come from
+[kaarele/witcher3-remastered-vr](https://github.com/kaarele/witcher3-remastered-vr) and are being taken
+over feature by feature; until the per-eye upscaler history is taken over, Remastered 5.01 runs with
+FXAA here. Short version, from a checkout of this repository with the headset connected to the OpenXR
+runtime (WiVRn is tested):
+
+```bash
+python3 linux/w3vr-linux.py status
+python3 linux/w3vr-linux.py install <release>.zip --dll build/linux-clang-cl/dxgi.dll
+python3 linux/w3vr-linux.py configure --res <runtime's recommended per-eye size, e.g. 2476x2594>
+python3 linux/w3vr-linux.py launch-options    # paste into Steam's launch options
+```
+
+The full guide, requirements and troubleshooting are in [LINUX.md](LINUX.md).
+
 ## Launcher Guide
 
 ### First-Time Setup
@@ -409,6 +427,11 @@ If you would like to support the original author's work on the mod, you can do s
   renderer, launcher, game scripts and integrations, as well as the ReShade VR, OptiScaler VR and
   OFXR Bridge projects listed below. Please support his work via
   [Ko-fi](https://ko-fi.com/tig3rmast3r).
+- [kaarele](https://github.com/kaarele) — author of
+  [witcher3-remastered-vr](https://github.com/kaarele/witcher3-remastered-vr): Linux/Proton support
+  (setup tool, clang-cl build, headless null OpenXR runtime) and many Remastered 5.x VR improvements,
+  taken over into this fork feature by feature. Please support his work via
+  [Ko-fi](https://ko-fi.com/kaarele).
 
 ### ReShade, DLSS5 and upscaling
 

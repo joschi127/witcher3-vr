@@ -378,6 +378,25 @@ def fix_state_bridge(g, build, dry_run=False):
     if fixed != data:
         print('State bridge script adapted for %s:' % ('Remastered 5.01' if build == '501' else '4.04'))
         write_with_backup(path, fixed, dry_run)
+    install_state_bridge_variant(g, build, dry_run)
+
+
+# joschi127/witcher3-vr ships the version-dependent vehicle camera wrappers as variants next to the mod
+# (variants/nextgen, variants/remastered); its Windows launcher copies the one for the detected build into the
+# mod's scripts, and so does this tool. Releases without the variants folder are left alone.
+STATE_BRIDGE_MOD = 'mods/modWitcher3VRStateBridge'
+STATE_BRIDGE_VARIANT_TARGET = 'content/scripts/local/witcher3vr/vehicle_camera_bridge.ws'
+
+
+def install_state_bridge_variant(g, build, dry_run=False):
+    mod = os.path.join(g['game'], STATE_BRIDGE_MOD)
+    source = os.path.join(mod, 'variants', 'remastered' if build == '501' else 'nextgen', 'vehicle_camera_bridge.ws')
+    if build not in ('404', '501') or not os.path.exists(source):
+        return
+    with open(source, 'rb') as f:
+        data = f.read()
+    print('State bridge vehicle camera variant for %s:' % ('Remastered 5.01' if build == '501' else '4.04'))
+    write_with_backup(os.path.join(mod, STATE_BRIDGE_VARIANT_TARGET), data, dry_run)
 
 
 def game_running():
@@ -541,7 +560,11 @@ def parse_release_sha256(path):
     """The release SHA256 file is key=HEX lines (main_archive.sha256=...), sometimes with stray bytes first."""
     with open(path, 'rb') as f:
         text = f.read().decode('utf-8', errors='replace')
-    return {m.group(1): m.group(2).lower() for m in re.finditer(r'([A-Za-z0-9_.]+)=([0-9A-Fa-f]{64})', text)}
+    sums = {m.group(1): m.group(2).lower() for m in re.finditer(r'([A-Za-z0-9_.]+)=([0-9A-Fa-f]{64})', text)}
+    # joschi127/witcher3-vr releases ship sha256sum lines (HEX  name); those are keyed as 'file:<name>'.
+    for m in re.finditer(r'(?m)^([0-9A-Fa-f]{64}) [ *]?(\S[^\r\n]*?)\s*$', text):
+        sums.setdefault('file:' + os.path.basename(m.group(2).replace('\\', '/')), m.group(1).lower())
+    return sums
 
 
 def safe_member_name(name):
@@ -560,9 +583,9 @@ def cmd_install(args):
         die('%s is not a zip file' % zip_path)
     if args.sha256:
         sums = parse_release_sha256(args.sha256)
-        expected = sums.get('main_archive.sha256')
+        expected = sums.get('main_archive.sha256') or sums.get('file:' + os.path.basename(zip_path))
         if not expected:
-            die('no main_archive.sha256 entry in %s' % args.sha256)
+            die('no main_archive.sha256 entry and no line for %s in %s' % (os.path.basename(zip_path), args.sha256))
         actual = sha256_file(zip_path)
         if actual != expected:
             die('SHA-256 mismatch: %s, expected %s' % (actual, expected))
@@ -675,7 +698,12 @@ def cmd_configure(args):
                 'use --force to apply the 4.04 preset anyway.' % build_description)
         print('warning: unknown witcher3.exe build; using the 4.04 preset')
     fix_state_bridge(g, build, args.dry_run)
-    aa = args.aa or ('dlss' if nvidia_gpu() else ('none' if remaster else 'taau'))
+    # joschi127/witcher3-vr: the per-eye DLSS and FSR histories on 5.01 are not taken over yet. Without them both
+    # eyes share one upscaler history (ghosting), so 5.01 uses FXAA until they are.
+    if remaster and args.aa in ('dlss', 'fsr'):
+        die('--aa %s on Remastered 5.01 needs the per-eye upscaler history, which this build does not have yet; '
+            'use --aa none (FXAA)' % args.aa)
+    aa = args.aa or ('none' if remaster else ('dlss' if nvidia_gpu() else 'taau'))
     mode_name = '%s_%s' % (args.mode, {'none': 'noaa'}.get(aa, aa))
     modes = MODES_501 if remaster else MODES
     if mode_name not in modes:

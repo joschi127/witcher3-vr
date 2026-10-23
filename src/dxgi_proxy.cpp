@@ -14381,6 +14381,22 @@ void apply_hud_frame_scale() {
         horizontal_written, vertical_written);
 }
 
+// 5.01 renders an exactly square size wrongly once an upscaler (FSR) runs: sky
+// and clouds cover only a top-left rectangle and loading may crash. Runtimes
+// recommend square sizes for symmetric full FOVs (VDXR: 2880x2880). Any
+// non-square size works, so drop 8 rows (0.3 %). Applied to the INI size and
+// again to the runtime's recommended size (render_size_from_runtime).
+void avoid_square_render_size() {
+    if (running_game_build() == w3vr::game_build::Build::Remaster501 &&
+        g_config.render_width > 8 &&
+        g_config.render_width == g_config.render_height) {
+        g_config.render_height -= 8;
+        log_line("Render size %dx%d is square; using %dx%d on 5.01",
+            g_config.render_width, g_config.render_width,
+            g_config.render_width, g_config.render_height);
+    }
+}
+
 void load_config() {
     std::call_once(g_config_once, []() {
         g_config.renderdoc_capture_enabled = read_ini_bool(
@@ -14917,18 +14933,7 @@ void load_config() {
                 g_config.runtime_diagnostics ? 1 : 0);
         }
 
-        // 5.01 renders an exactly square size wrongly once an upscaler (FSR)
-        // runs: sky and clouds cover only a top-left rectangle and loading may
-        // crash. Runtimes recommend square sizes for symmetric full FOVs
-        // (VDXR: 2880x2880). Any non-square size works, so drop 8 rows (0.3 %).
-        if (running_game_build() == w3vr::game_build::Build::Remaster501 &&
-            g_config.render_width > 8 &&
-            g_config.render_width == g_config.render_height) {
-            g_config.render_height -= 8;
-            log_line("Render size %dx%d is square; using %dx%d on 5.01",
-                g_config.render_width, g_config.render_width,
-                g_config.render_width, g_config.render_height);
-        }
+        avoid_square_render_size();
 
         log_line("Config openxr enabled=%d mode=%d resolution_scale=%.3f presentation_scale=%.3f native_stereo=%d fullscreen_projection=%d mono_shift=%d reverse enabled=%d periodic=%d unmap=%d cbv=%d active_nudge=%d nudge=%.3f start=%d cycle=%d pulse=%d orbit_probe=%d orbit_interval=%d orbit_max=%d copy_probe=%d copy_max=%d stereo_probe=%d geometry_shift=%d",
             g_config.openxr_enabled,
@@ -48715,6 +48720,7 @@ void apply_runtime_render_size() {
         new_width, new_height, g_config.render_width, g_config.render_height);
     g_config.render_width = static_cast<int>(new_width);
     g_config.render_height = static_cast<int>(new_height);
+    avoid_square_render_size();
 }
 
 void initialize_openxr_probe() {

@@ -6,7 +6,17 @@ branch). Patch 4.04 is covered briefly [at the end](#patch-404-next-gen-branch).
 
 `linux/w3vr-linux.py` replaces the Windows launcher on Linux. It is Python 3 with the standard
 library only, so it also runs on SteamOS. The [README](README.md#linux-steam--proton) has the short
-version of these steps; the tested setup is listed at the top of the README.
+version of these steps.
+
+> **State in this repository.** This guide and the Linux tools come from
+> [kaarele/witcher3-remastered-vr](https://github.com/kaarele/witcher3-remastered-vr) (tested there with an NVIDIA GPU, Proton and WiVRn on a
+> Quest 3) and are being taken over feature by feature. Until the per-eye upscaler history is taken
+> over, Remastered 5.01 runs with FXAA here: `configure` uses `--aa none` on 5.01 and refuses
+> `--aa dlss` and `--aa fsr`, which would otherwise blend both eyes into one history. Keys that
+> `configure` writes for features not taken over yet are ignored by the mod. The tool installs the
+> state-bridge variant of this repository's releases (`variants/remastered` or `variants/nextgen`),
+> as the Windows launcher does, and `install --sha256` also accepts this repository's release
+> checksum files (`sha256sum` format).
 
 ## Requirements
 
@@ -18,8 +28,8 @@ version of these steps; the tested setup is listed at the top of the README.
   also recognises Monado and SteamVR as the active runtime, but they are untested.
 - **Python 3.** SteamOS, Bazzite and most desktop distributions include it.
 - **A `dxgi.dll` built from this repository.** There is no release package yet. Build it as
-  described in [Building from source](README.md#linux-clang-cl-in-a-distrobox) or
-  [linux/BUILD-LINUX.md](linux/BUILD-LINUX.md); the result is `build/linux-clang-cl/dxgi.dll`.
+  described in [linux/BUILD-LINUX.md](linux/BUILD-LINUX.md); the result is
+  `build/linux-clang-cl/dxgi.dll`.
 - **A Witcher 3 VR Remastered release zip** from
   [joschi127/witcher3-vr releases](https://github.com/joschi127/witcher3-vr/releases). It supplies
   `openxr_loader.dll` and the base script mods. Check it against its SHA-256 file with
@@ -278,9 +288,10 @@ start the game once and run `configure` again.
 - **Frame rates move in steps.** Each pair is shown for a whole number of display refreshes, so a
   steady rate is 45, 30 or 22.5 pairs/s at 90 Hz (40, 30 or 24 at 120 Hz). The Steam FPS counter
   shows twice the pair rate. See
-  [Why the frame rate moves in steps](README.md#why-the-frame-rate-moves-in-steps).
-- **The headset refresh rate is set in the WiVRn headset app.** The README's
-  [recommended settings](README.md#recommended-settings) cover refresh rate and stream quality.
+  [Why the frame rate moves in steps](https://github.com/kaarele/witcher3-remastered-vr#why-the-frame-rate-moves-in-steps) in kaarele's README.
+- **The headset refresh rate is set in the WiVRn headset app.** The
+  [recommended settings](https://github.com/kaarele/witcher3-remastered-vr#recommended-settings) in kaarele's README cover refresh rate and stream
+  quality.
 - **Keep diagnostics off for play** (`[debug] logging_enabled=0`, `runtime_diagnostics=0`). They
   cost a noticeable share of the frame rate.
 
