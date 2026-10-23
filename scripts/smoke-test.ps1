@@ -96,9 +96,15 @@ if ([regex]::IsMatch($iniText, $sectionPattern)) {
 $IniSet = @($IniSet | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
 foreach ($assignment in $IniSet) {
     if ($assignment -notmatch '^([^.=\s]+)\.([^=\s]+)=(.*)$') { throw "Bad -IniSet value: $assignment" }
-    $section = [regex]::Escape($Matches[1]); $key = $Matches[2]; $value = $Matches[3]
+    $sectionName = $Matches[1]; $key = $Matches[2]; $value = $Matches[3]
+    $section = [regex]::Escape($sectionName)
     $sectionMatch = [regex]::Match($newIni, "(?ms)^\[$section\]\r?\n.*?(?=^\[|\z)")
-    if (-not $sectionMatch.Success) { throw "INI section not found: $($Matches[1])" }
+    if (-not $sectionMatch.Success) {
+        # Missing sections are appended, so switches of optional sections can be set too.
+        if (-not $newIni.EndsWith($newline)) { $newIni += $newline }
+        $newIni += "[$sectionName]$newline$key=$value$newline"
+        continue
+    }
     $body = $sectionMatch.Value
     $keyPattern = '(?m)^' + [regex]::Escape($key) + '=[^\r\n]*'
     if ([regex]::IsMatch($body, $keyPattern)) {
