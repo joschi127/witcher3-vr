@@ -11,7 +11,8 @@ on this fork's `remaster` branch and adds Linux/Proton support and many 5.01 imp
 (performance, per-eye upscaling, HUD and camera fixes). Much of it arrived in one large commit,
 later work in smaller ones; his project supports 5.01 only and has not been tested on 4.04. Both
 sides want one combined version. Splitting his work into pull requests would be extra work for
-him.
+him. The goal is one combined repository
+([ADR 0005](0005-merge-with-kaarele-repository-home.md)).
 
 ## Decision
 

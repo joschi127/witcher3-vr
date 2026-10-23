@@ -25,3 +25,4 @@ reverse-engineering material.
 | [0002](0002-one-codebase-for-404-and-5x.md) | One codebase for Next-Gen 4.04 and Remastered 5.x | Proposed |
 | [0003](0003-build-guard-and-per-build-address-tables.md) | Build guard and per-build address tables | Accepted |
 | [0004](0004-adopt-kaarele-changes-feature-by-feature.md) | Adopt kaarele's changes feature by feature | Accepted |
+| [0005](0005-merge-with-kaarele-repository-home.md) | Merge with kaarele's project; home of the combined repository | Proposed |
