@@ -1,0 +1,53 @@
+# Smoke test for the Remaster (5.01) on Linux/Proton: the Windows smoke-continue-remaster.txt
+# with Linux timings. Under Proton the game polls XInput (no GameInput redistributable), so the
+# test mode's virtual XInput gamepad drives it. Measured on a laptop iGPU under GE-Proton: main
+# menu ready by ~30 s, first stereo frame ~48 s after the first Present (16 s of loading after
+# Continue at 32 s); the gameplay part is shifted by +22 s for margin. Ends at ~105 s.
+# In gameplay the game may poll XInput only a few times per second under Proton; the test
+# mode holds every scripted state for two reads, so short taps still arrive.
+# Use [test] keep_focus=1 so clicking another window does not pause the game.
+# Each "capture" writes two consecutive frames to witcher3vr_captures\.
+14000 tap A            # "press any key": gamepad input
+15500 tap X            # skip intro part 1
+18500 tap X            # skip intro part 2
+22000 tap X            # skip intro part 3
+26000 tap X            # extra skip (slower start on Linux)
+30000 capture          # main menu
+32000 tap A            # main menu: Continue (latest save)
+
+70000 capture          # loaded, standing
+71000 stick L 0 1      # walk forward
+74000 stick L 0 0
+75000 capture          # after walking
+
+77000 stick R 0.6 0    # turn the camera
+78500 stick R 0 0
+79500 capture          # after turning
+
+81000 trigger L 1      # hold LT: Witcher Senses
+83500 capture
+85000 trigger L 0
+
+87000 tap START       # game menu (map, inventory, quests ...)
+90000 capture
+91000 tap B           # close the game menu
+
+94000 tap BACK        # system menu, cursor on RESUME
+96000 capture
+97000 stick L 0 -1    # six flicks down: RESUME -> EXIT
+97150 stick L 0 0
+97400 stick L 0 -1
+97550 stick L 0 0
+97800 stick L 0 -1
+97950 stick L 0 0
+98200 stick L 0 -1
+98350 stick L 0 0
+98600 stick L 0 -1
+98750 stick L 0 0
+99000 stick L 0 -1
+99150 stick L 0 0
+100000 capture         # EXIT selected
+101000 tap A           # EXIT
+102500 tap A           # confirm
+
+105000 quit            # fallback: close the game window
