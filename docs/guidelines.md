@@ -118,6 +118,15 @@ game folder. Add Defender exclusions for the build directory and the installed `
   action turns the located OpenXR head pose (degrees, held until changed), so head-motion bugs can
   be reproduced with the static null HMD. Captures include the
   two images submitted to OpenXR (`*_xr_eye0/1.png`) when a stereo pair is active.
+- Linux/Proton smoke test: `linux/w3vr-smoke.py [--dll <built dxgi.dll>] [--repeat N]` does the
+  same for a Heroic (GOG) or Steam install: refuses to start unless `[Gameplay] CrossProgression`
+  is false, backs up `dxgi.dll`, `witcher3vr.ini` and the saves, starts the game through the
+  launcher with `[test] keep_focus=1`, kills it after `--timeout`, collects into
+  `build/smoke-runs/<date>_lx<n>_<name>`, writes `summary.txt` and restores everything
+  (sha256-checked; changed saves are moved into the run folder). `dx12user.settings` is only
+  compared, never restored (the game may refresh the account token on exit). Default script:
+  `scripts/test-input/smoke-continue-remaster-linux.txt` (5.01, ~105 s), checked for XR eye images
+  in gameplay and an exit through the menu. Same go-ahead rule as above.
 - In-game test mode (`[test]` in `witcher3vr.ini`, logic in `src/test_input_script.h`):
   `record_input=1` records the physical gamepad to `witcher3vr-input-recording.txt`,
   `input_script=<file>` replays a script (same format) through the XInput hook (4.04) or
