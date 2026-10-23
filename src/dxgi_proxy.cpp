@@ -44968,6 +44968,15 @@ std::atomic<uint64_t> g_test_gameinput_gamepad_valid{};
 std::atomic<uint64_t> g_test_gameinput_reading_calls{};
 std::atomic<uint64_t> g_test_gameinput_reading_hits{};
 std::atomic<uint32_t> g_test_gameinput_reading_kinds{};
+// [DIAG:TEST-MODE-INPUT-FALLBACKS] Under Wine/Proton there is no
+// GameInputRedist.dll; the exe then may use Wine's GameInput.dll (v0,
+// GameInputCreate) or another XInput DLL than XINPUT9_1_0.dll. Pass-through
+// counters show which path the game actually polls.
+std::atomic<uint64_t> g_test_xinput1_4_calls{};
+std::atomic<uint64_t> g_test_xinput1_3_calls{};
+std::atomic<uint64_t> g_test_gameinput_v0_create_calls{};
+std::atomic<int32_t> g_test_gameinput_v0_create_hr{};
+std::atomic<uint32_t> g_test_input_summary_ms{};
 std::atomic<uint32_t> g_test_mode_packet{};
 
 bool test_mode_active() {
@@ -45032,26 +45041,40 @@ void initialize_test_mode_locked() {
 }
 
 // Caller holds g_test_mode.mutex.
-void test_mode_request_quit_locked(uint32_t now_ms, uint64_t frame) {
-    if (g_test_mode.quit_requested) {
-        return;
-    }
-    g_test_mode.quit_requested = true;
-    log_line("Test mode input xinput_calls=%llu xinput_connected=%llu "
+void test_mode_log_input_summary(uint32_t now_ms) {
+    log_line("Test mode input at_ms=%u xinput_calls=%llu xinput_connected=%llu "
+             "xinput1_4_calls=%llu xinput1_3_calls=%llu "
+             "gameinput_v0_create_calls=%llu gameinput_v0_create_hr=0x%08X "
              "gameinput_reading_calls=%llu gameinput_reading_hits=%llu "
              "gameinput_kinds=0x%08X "
              "gameinput_gamepad_calls=%llu gameinput_gamepad_valid=%llu "
-             "gameinput_loaded=%d xinput9_loaded=%d xinput1_4_loaded=%d",
+             "gameinput_loaded=%d gameinput_v0_loaded=%d xinput9_loaded=%d "
+             "xinput1_4_loaded=%d xinput1_3_loaded=%d",
+        now_ms,
         static_cast<unsigned long long>(g_test_xinput_calls.load()),
         static_cast<unsigned long long>(g_test_xinput_connected_calls.load()),
+        static_cast<unsigned long long>(g_test_xinput1_4_calls.load()),
+        static_cast<unsigned long long>(g_test_xinput1_3_calls.load()),
+        static_cast<unsigned long long>(g_test_gameinput_v0_create_calls.load()),
+        static_cast<uint32_t>(g_test_gameinput_v0_create_hr.load()),
         static_cast<unsigned long long>(g_test_gameinput_reading_calls.load()),
         static_cast<unsigned long long>(g_test_gameinput_reading_hits.load()),
         g_test_gameinput_reading_kinds.load(),
         static_cast<unsigned long long>(g_test_gameinput_gamepad_calls.load()),
         static_cast<unsigned long long>(g_test_gameinput_gamepad_valid.load()),
         GetModuleHandleW(L"GameInputRedist.dll") != nullptr ? 1 : 0,
+        GetModuleHandleW(L"GameInput.dll") != nullptr ? 1 : 0,
         GetModuleHandleW(L"XINPUT9_1_0.dll") != nullptr ? 1 : 0,
-        GetModuleHandleW(L"xinput1_4.dll") != nullptr ? 1 : 0);
+        GetModuleHandleW(L"xinput1_4.dll") != nullptr ? 1 : 0,
+        GetModuleHandleW(L"xinput1_3.dll") != nullptr ? 1 : 0);
+}
+
+void test_mode_request_quit_locked(uint32_t now_ms, uint64_t frame) {
+    if (g_test_mode.quit_requested) {
+        return;
+    }
+    g_test_mode.quit_requested = true;
+    test_mode_log_input_summary(now_ms);
     log_line("Test mode quit at_ms=%u presents=%llu draws_indexed=%llu "
              "draws_nonindexed=%llu window=%p",
         now_ms, static_cast<unsigned long long>(frame),
@@ -45123,6 +45146,13 @@ void test_mode_on_present(uint64_t frame) {
     g_test_mode_start_tick.compare_exchange_strong(
         expected, GetTickCount64(), std::memory_order_acq_rel);
     const uint32_t now_ms = test_mode_now_ms();
+    // [DIAG:TEST-MODE-INPUT-FALLBACKS] Also without a script quit (manual exit).
+    uint32_t last_summary_ms = g_test_input_summary_ms.load(std::memory_order_relaxed);
+    if (now_ms - last_summary_ms >= 15000 &&
+        g_test_input_summary_ms.compare_exchange_strong(
+            last_summary_ms, now_ms, std::memory_order_relaxed)) {
+        test_mode_log_input_summary(now_ms);
+    }
     // Outside the test-mode lock: the virtual pad calls back into the game,
     // which may read the pad (and take the lock) right away.
     if (test_mode_advance(frame, now_ms)) {
@@ -46386,6 +46416,57 @@ HRESULT WINAPI hook_gameinput_initialize(REFIID riid, void** object) {
     return hr;
 }
 
+// [DIAG:TEST-MODE-INPUT-FALLBACKS] Pass-through probes, installed only when
+// the GameInput v3 redistributable is missing (Wine/Proton). They count calls
+// and never change the result.
+using GameInputCreateV0Fn = HRESULT(WINAPI*)(void**);
+XInputGetStateFn g_test_xinput1_4_get_state{};
+XInputGetStateFn g_test_xinput1_3_get_state{};
+GameInputCreateV0Fn g_test_gameinput_v0_create{};
+
+DWORD WINAPI hook_test_xinput1_4_get_state(DWORD user_index, XINPUT_STATE* state) {
+    g_test_xinput1_4_calls.fetch_add(1, std::memory_order_relaxed);
+    return g_test_xinput1_4_get_state(user_index, state);
+}
+
+DWORD WINAPI hook_test_xinput1_3_get_state(DWORD user_index, XINPUT_STATE* state) {
+    g_test_xinput1_3_calls.fetch_add(1, std::memory_order_relaxed);
+    return g_test_xinput1_3_get_state(user_index, state);
+}
+
+HRESULT WINAPI hook_test_gameinput_v0_create(void** object) {
+    const HRESULT hr = g_test_gameinput_v0_create(object);
+    g_test_gameinput_v0_create_hr.store(hr, std::memory_order_relaxed);
+    if (g_test_gameinput_v0_create_calls.fetch_add(1, std::memory_order_relaxed) == 0) {
+        log_line("GameInput v0 GameInputCreate called hr=0x%08X object=%p",
+            static_cast<uint32_t>(hr), object != nullptr ? *object : nullptr);
+    }
+    return hr;
+}
+
+void install_test_input_fallback_probes() {
+    const auto probe = [](const wchar_t* dll, const char* function, void* detour,
+                           void** original, const char* name) {
+        HMODULE module = LoadLibraryW(dll);
+        void* target = module != nullptr ?
+            reinterpret_cast<void*>(GetProcAddress(module, function)) : nullptr;
+        const bool ok = target != nullptr &&
+            MH_CreateHook(target, detour, original) == MH_OK &&
+            MH_EnableHook(target) == MH_OK;
+        log_line("Test mode input probe %s %s target=%p", name,
+            ok ? "installed" : "failed", target);
+    };
+    probe(L"xinput1_4.dll", "XInputGetState",
+        reinterpret_cast<void*>(&hook_test_xinput1_4_get_state),
+        reinterpret_cast<void**>(&g_test_xinput1_4_get_state), "xinput1_4.XInputGetState");
+    probe(L"xinput1_3.dll", "XInputGetState",
+        reinterpret_cast<void*>(&hook_test_xinput1_3_get_state),
+        reinterpret_cast<void**>(&g_test_xinput1_3_get_state), "xinput1_3.XInputGetState");
+    probe(L"GameInput.dll", "GameInputCreate",
+        reinterpret_cast<void*>(&hook_test_gameinput_v0_create),
+        reinterpret_cast<void**>(&g_test_gameinput_v0_create), "GameInput.GameInputCreate");
+}
+
 void install_gameinput_hooks() {
     if (running_game_build() != w3vr::game_build::Build::Remaster501 ||
         !test_mode_active()) {
@@ -46401,6 +46482,9 @@ void install_gameinput_hooks() {
         MH_EnableHook(target) == MH_OK;
     log_line("GameInput GameInputInitialize hook %s target=%p",
         ok ? "installed" : "failed", target);
+    if (!ok) {
+        install_test_input_fallback_probes();
+    }
 }
 
 void install_xinput_snap_turn_hook() {
