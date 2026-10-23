@@ -248,7 +248,17 @@ same). The material they were derived from is not.
     generation off (`FSRFramegen=0`, `XessFrameGeneration=false`, `DLSSGMode=0`), low-latency
     modes off (`XeLowLatency=false`, `[Viewport] AMDAntiLag=0`, `ReflexMode=0`), HDR off
     (`[Visuals] HdrEnabled=false`), editor preset detection off
-    (`[Rendering] ShouldDetectEditorGraphicsPreset=false`).
+    (`[Rendering] ShouldDetectEditorGraphicsPreset=false`), the game's DLSS off
+    (`[Rendering] AllowDLSS=false`, until per-eye upscaling exists), no V-Sync or frame limit
+    (`[Viewport] VSync=false`, `[Engine] LimitFPS=0`; the OpenXR runtime paces the frames).
+  - Effects that look detached or uncomfortable in VR off, as in the 4.04 profile:
+    `[PostProcess] AllowMotionBlur=false`, `AllowBlur=false`, `AllowDOF=false`,
+    `AllowLensEffects=false`, `AllowVignette=false`, `AllowChromaticAberration=false`;
+    `[Rendering] SSREnabled=false`, `HairWorksLevel=0`. Motion blur is the suspected cause of
+    a whole image smeared towards the centre on the Linux test, where the setup tool did not turn
+    it off (two eyes per game tick).
+  - The full list the launcher writes is `kSettings` in `ConfigureRemasteredGameSettingsForVr`
+    (`launcher/config.cpp`); other setup tools (the Linux tool) should write the same list.
   - The colour-blindness filter must stay off (the mod's replacement HUD composite does not
     reproduce it).
   - Per-eye render size = the OpenXR runtime's recommended size (INI `render_width/height`; the
