@@ -111,6 +111,61 @@ int main() {
             "every script button round-trips through GameInput");
     }
 
+    // A tap between two slow polls still reaches the game.
+    PadLatch latch;
+    PadState down{};
+    down.buttons = 0x0010;
+    latch.publish(down);
+    latch.publish(PadState{});
+    require(latch.read().buttons == 0x0010, "tap shown on the first read after it");
+    require(latch.read().buttons == 0x0010, "tap held for a second read");
+    require(latch.read().buttons == 0, "release follows after two reads");
+    require(latch.read().buttons == 0 && latch.pending() == 0, "release stays");
+
+    // A frame that spans a whole tap still hands the press to the latch.
+    std::vector<Event> tap_events;
+    require(parse_script("1000 tap START\n", tap_events, error), "tap script parses");
+    Player slow{tap_events};
+    const auto slow_due = slow.advance(1500);
+    require(slow_due.states.size() == 2 && slow_due.states[0].buttons == 0x0010 &&
+            slow_due.states[1].buttons == 0, "down and up both reported for one long frame");
+    PadLatch slow_latch;
+    for (const auto& state : slow_due.states) {
+        slow_latch.publish(state);
+    }
+    require(slow_latch.read().buttons == 0x0010, "press survives a long frame");
+
+    // Stick-only changes coalesce instead of queueing behind each other.
+    PadLatch sticks;
+    for (int i = 5; i <= 10; ++i) {
+        PadState s{};
+        s.ly = i / 10.0f;
+        sticks.publish(s);
+    }
+    require(sticks.pending() == 1, "stick steps in one direction coalesce");
+    require(sticks.read().ly == 1.0f, "latest stick value is shown");
+
+    // A menu flick (deflect, centre) keeps both states.
+    PadLatch flick;
+    PadState deflected{};
+    deflected.ly = -1.0f;
+    flick.publish(deflected);
+    flick.publish(PadState{});
+    require(flick.pending() == 2, "flick queues deflect and centre");
+    require(flick.read().ly == -1.0f && flick.read().ly == -1.0f, "deflect held two reads");
+    require(flick.read().ly == 0.0f, "centre follows");
+
+    // Unchanged states queue nothing; button presses never merge.
+    PadLatch buttons;
+    PadState a{};
+    a.buttons = 0x1000;
+    PadState b{};
+    b.buttons = 0x2000;
+    buttons.publish(a);
+    buttons.publish(a);
+    buttons.publish(b);
+    require(buttons.pending() == 2, "distinct button states queue, repeats do not");
+
     if (failures != 0) {
         std::fprintf(stderr, "%d failure(s)\n", failures);
         return 1;

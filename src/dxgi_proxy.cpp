@@ -44920,7 +44920,8 @@ struct TestModeState {
     std::mutex mutex;
     bool initialized{};
     std::unique_ptr<w3vr::test_input::Player> player;
-    w3vr::test_input::PadState pad{};
+    // [FIX:TEST-MODE-SLOW-POLLING] Every script state reaches the game.
+    w3vr::test_input::PadLatch pad;
     w3vr::test_input::Recorder recorder;
     FILE* recording{};
     bool quit_requested{};
@@ -45108,7 +45109,9 @@ bool test_mode_advance(uint64_t frame, uint32_t now_ms) {
         return false;
     }
     const auto due = g_test_mode.player->advance(now_ms);
-    g_test_mode.pad = g_test_mode.player->state();
+    for (const auto& state : due.states) {
+        g_test_mode.pad.publish(state);
+    }
     const auto& head = g_test_mode.player->head();
     const bool yaw_changed = g_test_hmd_yaw_degrees.exchange(
         head.yaw_degrees, std::memory_order_relaxed) != head.yaw_degrees;
@@ -45187,7 +45190,22 @@ bool test_mode_exchange_pad(const w3vr::test_input::PadState* physical,
     if (g_test_mode.player == nullptr) {
         return false;
     }
-    script_pad = g_test_mode.pad;
+    script_pad = g_test_mode.pad.read();
+    // [DIAG:TEST-MODE-SLOW-POLLING] Read cadence per script state.
+    static w3vr::test_input::PadState last_logged{};
+    static uint32_t state_reads{}, state_first_ms{}, state_last_ms{};
+    const auto& p = script_pad;
+    if (!w3vr::test_input::same_pad(p, last_logged)) {
+        log_line("Test mode pad change at_ms=%u buttons=0x%04X lx=%.2f ly=%.2f lt=%.2f "
+                 "previous_reads=%u previous_span_ms=%u thread=%lu",
+            now_ms, p.buttons, p.lx, p.ly, p.lt, state_reads,
+            state_last_ms - state_first_ms, GetCurrentThreadId());
+        last_logged = p;
+        state_reads = 0;
+        state_first_ms = now_ms;
+    }
+    ++state_reads;
+    state_last_ms = now_ms;
     return true;
 }
 

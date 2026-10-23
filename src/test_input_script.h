@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <deque>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -52,6 +53,11 @@ struct PadState {
     float lt{};
     float rt{};
 };
+
+inline bool same_pad(const PadState& a, const PadState& b) {
+    return a.buttons == b.buttons && a.lx == b.lx && a.ly == b.ly && a.rx == b.rx &&
+        a.ry == b.ry && a.lt == b.lt && a.rt == b.rt;
+}
 
 // Synthetic head rotation added to the located OpenXR views (degrees).
 struct HeadOffset {
@@ -284,6 +290,10 @@ public:
         uint32_t captures{};
         uint32_t flight_dumps{};
         bool quit{};
+        // Pad state after each event time that became due, in order. A long
+        // frame can make a whole tap (down and up) due at once; feeding these
+        // to a PadLatch keeps the press instead of only the final state.
+        std::vector<PadState> states;
     };
 
     Due advance(uint32_t now_ms) {
@@ -308,6 +318,11 @@ public:
                 break;
             case Action::Quit: due.quit = true; break;
             }
+            const bool time_done = next_ >= events_.size() ||
+                events_[next_].time_ms != e.time_ms;
+            if (time_done && (due.states.empty() || !same_pad(due.states.back(), state_))) {
+                due.states.push_back(state_);
+            }
         }
         return due;
     }
@@ -321,6 +336,61 @@ private:
     size_t next_{};
     PadState state_{};
     HeadOffset head_{};
+};
+
+// Hands script pad states to the game so that none is lost when the game
+// polls the pad less often than the script changes it (under Proton 5.01 polls
+// XInput only a few times per second in gameplay, so a 100 ms tap could fall
+// between two polls). Every state stays visible for at least |min_reads| reads
+// before the next one is shown. Analog changes that keep the same digital
+// meaning (buttons, stick direction outside a dead zone, trigger pressed)
+// replace the pending state instead of queueing, so replayed recordings do not
+// lag; a flick (deflect, then centre) still queues both states.
+class PadLatch {
+public:
+    explicit PadLatch(uint32_t min_reads = 2) : min_reads_(min_reads), reads_(min_reads) {}
+
+    // Script side: the state the script wants now (called every frame).
+    void publish(const PadState& target) {
+        const PadState& last = pending_.empty() ? current_ : pending_.back();
+        if (same_pad(last, target)) {
+            return;
+        }
+        if (!pending_.empty() && signature(pending_.back()) == signature(target)) {
+            pending_.back() = target;
+        } else if (pending_.size() < kMaxPending) {
+            pending_.push_back(target);
+        } else {
+            pending_.back() = target;
+        }
+    }
+
+    // Game side: one pad read.
+    PadState read() {
+        if (reads_ >= min_reads_ && !pending_.empty()) {
+            current_ = pending_.front();
+            pending_.pop_front();
+            reads_ = 0;
+        }
+        ++reads_;
+        return current_;
+    }
+
+    size_t pending() const { return pending_.size(); }
+
+private:
+    static constexpr size_t kMaxPending = 64;
+    static uint32_t signature(const PadState& s) {
+        const auto axis = [](float v) -> uint32_t { return v > 0.25f ? 1 : (v < -0.25f ? 2 : 0); };
+        return static_cast<uint32_t>(s.buttons) | axis(s.lx) << 16 | axis(s.ly) << 18 |
+            axis(s.rx) << 20 | axis(s.ry) << 22 | (s.lt > 0.5f ? 1u : 0u) << 24 |
+            (s.rt > 0.5f ? 1u : 0u) << 25;
+    }
+
+    uint32_t min_reads_;
+    uint32_t reads_;
+    PadState current_{};
+    std::deque<PadState> pending_;
 };
 
 // Converts successive physical pad states into script lines. Sticks use a
