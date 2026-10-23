@@ -124,6 +124,9 @@ game folder. Add Defender exclusions for the build directory and the installed `
   GameInput (5.01), also without a controller (5.01: virtual GameInput gamepad; a connected
   gamepad disables it), and its `quit` action closes the game window. Times are ms since the
   first Present. Diagnostic census and inventory files from `[debug]` complement it.
+  Under Proton there is no GameInput redistributable; 5.01 then polls XInput, so scripts run
+  through the XInput hook there. The game pauses itself when its window loses focus;
+  `keep_focus=1` hides that from the game so runs survive clicks into other windows.
 
 ## Batching changes and test runs (optional)
 

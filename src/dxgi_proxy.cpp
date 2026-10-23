@@ -728,6 +728,9 @@ struct Config {
     // Test only: OpenXR loader (or loader-compatible runtime) to load instead
     // of openxr_loader.dll, e.g. the headless null HMD. Relative to the exe.
     std::string test_openxr_loader;
+    // Test only: the game window ignores losing focus (no auto-pause), so
+    // scripted runs keep going while other windows are used.
+    bool test_keep_focus{false};
     // Lightweight ten-second CPU/GPU phase recorder. Independent from broad
     // Diagnostic Logging; the shared F3 action is the only file writer.
     bool pipeline_flight_recorder{false};
@@ -14791,6 +14794,7 @@ void load_config() {
         g_config.test_record_input = read_ini_bool("test", "record_input", false);
         g_config.test_input_script = read_ini_string("test", "input_script", "");
         g_config.test_openxr_loader = read_ini_string("test", "openxr_loader", "");
+        g_config.test_keep_focus = read_ini_bool("test", "keep_focus", false);
         g_config.pipeline_flight_recorder = read_ini_bool(
             "debug", "pipeline_flight_recorder", false);
         g_config.route_flight_recorder = read_ini_bool(
@@ -56496,6 +56500,38 @@ HRESULT STDMETHODCALLTYPE hook_present1(
     return result;
 }
 
+// [FEATURE:TEST-MODE-KEEP-FOCUS] The game pauses itself (system menu) and
+// stops polling the gamepad when its window is deactivated, which breaks
+// scripted runs as soon as another window is clicked. With [test] keep_focus=1
+// the deactivation messages never reach the game's window procedure.
+WNDPROC g_test_keep_focus_original{};
+std::atomic<uint64_t> g_test_keep_focus_swallowed{};
+
+LRESULT CALLBACK test_keep_focus_wndproc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
+    const bool deactivation =
+        (message == WM_ACTIVATEAPP && wparam == FALSE) ||
+        (message == WM_ACTIVATE && LOWORD(wparam) == WA_INACTIVE) ||
+        message == WM_KILLFOCUS;
+    if (deactivation) {
+        if (g_test_keep_focus_swallowed.fetch_add(1, std::memory_order_relaxed) == 0) {
+            log_line("Test mode keep_focus swallowed first deactivation message=0x%04X", message);
+        }
+        return 0;
+    }
+    return CallWindowProcW(g_test_keep_focus_original, hwnd, message, wparam, lparam);
+}
+
+void install_test_keep_focus(HWND hwnd) {
+    if (!g_config.test_keep_focus || !test_mode_active() || hwnd == nullptr ||
+        g_test_keep_focus_original != nullptr) {
+        return;
+    }
+    g_test_keep_focus_original = reinterpret_cast<WNDPROC>(SetWindowLongPtrW(
+        hwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&test_keep_focus_wndproc)));
+    log_line("Test mode keep_focus %s hwnd=%p",
+        g_test_keep_focus_original != nullptr ? "installed" : "failed", hwnd);
+}
+
 HRESULT STDMETHODCALLTYPE hook_create_swapchain_for_hwnd(
     IDXGIFactory2* factory,
     IUnknown* device,
@@ -56513,6 +56549,7 @@ HRESULT STDMETHODCALLTYPE hook_create_swapchain_for_hwnd(
 
     capture_d3d12_objects(device);
     g_game_hwnd = hwnd;
+    install_test_keep_focus(hwnd);
     DXGI_SWAP_CHAIN_DESC1 forced_desc{};
     const DXGI_SWAP_CHAIN_DESC1* effective_desc = desc;
     if (desc != nullptr) {
