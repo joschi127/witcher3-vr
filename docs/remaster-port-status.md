@@ -540,3 +540,85 @@ were made on Linux/Proton with NVIDIA unless stated otherwise; our own results f
 - This fork (AMD GPU, Windows, SteamVR null driver): taken over unchanged and off by default.
   `scripts/smoke-test.ps1 -IniSet` can now set keys of sections that are missing from the INI,
   such as `vrs.mode=3`.
+
+### Descriptor metadata store (`[engine] descriptor_metadata_store`)
+- Problem (null HMD, 5.01, Proton): the `CopyDescriptors`/`CopyDescriptorsSimple` detours took
+  about 15% of the engine render thread and 16% of both RenderDispatcher threads. Every copied
+  descriptor did several hashed lookups (Witcher Senses cache, 1M-slot CBV table, resource
+  mirror), and each CBV miss, i.e. every non-CBV source, also locked a shared fallback-map mutex.
+  `[perf] skip_descriptor_tracking=1` raised CPU-bound throughput from 69 to about 100 eye
+  renders/s; the render thread's job wait at 0x141D335A9 fell from about 3.2 to 1.0 ms.
+- `shadow` (default): one 48-byte entry per descriptor holds every metadata kind (CBV address and
+  size, retained-HUD resource and format, Witcher Senses target). Entries are ordered by CPU
+  handle in lazily allocated pages of 2048 granules. The granule is the largest power of two
+  dividing the CBV_SRV_UAV increment: 32 on NVIDIA and on vkd3d-proton's default path, the
+  native descriptor size on its embedded/descriptor-heap paths (64 on RDNA2/Steam Deck, 128 on
+  Intel). Handle bits below the granule (vkd3d-proton's per-heap tag) are part of the page key,
+  so heaps whose handle windows overlap never share entries. A copy walks source and destination
+  entries run by run under a per-entry seqlock, with no hashing or lock; a per-thread page
+  cache resolves the pages. Waits on a writer pause, then yield the core. The startup log has
+  `Descriptor metadata store=...` (in the census log during a measurement run); an increment
+  that is not a multiple of 8 keeps `legacy`.
+- Deliberate difference: a copy now gives the destination exactly the source's metadata, empty
+  included. `legacy` kept the destination's old CBV/resource entry when the source had none.
+  The shadow store also never evicts (the legacy Witcher Senses cache and the full legacy
+  resource table could lose entries). The smoke lookup finds handles the legacy one could not:
+  those in the fallback map, and descriptors briefly mid-write (up to 8 attempts instead of 1).
+  Witcher Senses lookups wait for a writer instead of giving up after 3 attempts. All of these
+  only add hits. TAAU/RT keep the `g_resource_descriptors` map path unchanged under
+  `g_reverse_mutex`.
+- `legacy` runs the previous code; its CBV lookup no longer takes the fallback mutex on an empty
+  probe slot (slots are never cleared, so such a handle cannot be in the map).
+- Memory: 96 KiB per touched page, never freed; a fully used 1M-descriptor heap is 48 MiB. Each
+  census has `PERF descriptor store=... pages=... shadow_mib=...` and guard counters
+  (`directory_overflows`, `alloc_failures`, `owner_collisions` (should stay 0),
+  `long_waits`); a legacy run logs `PERF descriptor store=legacy`. One line warns past 4096
+  pages.
+- `[perf] descriptor_shadow_verify=1` (needs the VRS census log) keeps both stores and compares
+  every lookup. Each census adds a `PERF descriptor verify kind=...` line per kind with
+  `+window/total` counts: match, empty, legacy_only_stale (expected: legacy kept stale data
+  after a copy), legacy_only (shadow lost data), shadow_only (legacy evicted or missed),
+  differ, transient (a difference that did not repeat on a second look) and copy_source_lost
+  (copies whose legacy source had data the shadow source lost). The first 20 examples of
+  differ, shadow_only and legacy_only are logged once.
+- Status: on by default; verified with the null OpenXR runtime; headset confirmation pending.
+
+### Render-thread CPU trims (descriptor copy, aim detector, pair barrier)
+- Descriptor copy, shadow store (`copy_descriptor_shadow_ranges`): both copy detours read one
+  atomic route mask instead of about eight predicate chains per call. The mask holds only terms
+  that depend on the INI and build constants; it is computed in `load_config` and again when the
+  store falls back to legacy. The runtime-variable terms of `descriptor_metadata_hooks_needed()`
+  (native-asymmetric state, cinema panel, AFW) are evaluated in full only when the configured
+  terms are all off. The startup log has `Descriptor copy routes=0x...` (in the census log
+  during a measurement run).
+- Per copy: switches are read once per call instead of once per run. The last source and
+  destination pages are kept across runs, so a gather looks its destination page up once. With
+  one entry per descriptor (stride 1, NVIDIA/vkd3d-proton) the run limit needs no division.
+  The run minimum no longer uses the initializer-list `std::min`.
+- Per descriptor: source and destination are read header first. A source without metadata
+  kinds (or held by another owner) loads no value fields. An empty copy onto an entry that
+  already reads as empty is skipped: no owner stamp, lock or store. Owner bits alone are not
+  observable: every consumer checks the kind bits, and under verification also the
+  copied-empty markers, which count as content here. No new key: `[engine]
+  descriptor_metadata_store=legacy` bypasses the shadow copy entirely, and
+  `[perf] descriptor_shadow_verify=1` checks it (expected: differ 0, legacy_only 0).
+- Aim detector (`sample_aim_pso_probe`, feeds `g_aim_crosshair_last_present`): the 6x1 draw
+  check no longer takes `g_reverse_mutex` or runs `strstr` on the draw source. Every record into
+  `g_pipeline_infos` refreshes a 4-slot lock-free set of PSOs recorded with the AimProbe VS/PS
+  pair. A PSO recorded again with another pair leaves the set, so the set stays equal to the map.
+  A fifth AimProbe PSO logs `Aim probe PSO set full` and the detector goes back to the locked
+  map lookup. With `[debug] first_person_aim_diagnostics=1` every candidate draw is also checked
+  against that lookup: `FPAIM probe set hit ... lookup=1` (first 4), `FPAIM probe set mismatch`
+  (must never appear).
+- Strict-Stereo pair barrier (`wait_for_engine_pair_completion`): the spin before parking is a
+  pause budget, `[engine] pair_barrier_spin_pauses` (default 4096, roughly 60-130 us), instead
+  of a ~200 us window that called `QueryPerformanceCounter` (a syscall under Proton) on every
+  pause. `0` restores the timed spin. Measurement runs log `PERF pair_barrier_spin_pauses=...`.
+- This fork (AMD Radeon RX 7900 XTX, Windows, SteamVR null driver at 240 Hz, 1872x1572
+  per eye, FXAA, diagnostics off, scripted benchmark with about 70 s of gameplay): SteamVR application CPU
+  time per frame 13.77 / 13.85 ms with the previous release DLL, 10.12 / 10.14 / 10.10 ms with the
+  descriptor store and CPU trims (about -27 %); GPU time unchanged (4.2 ms). Verification run
+  (`descriptor_shadow_verify=1`, census with `[vrs] mode=3 uniform_rate=1x1`): differ 0,
+  legacy_only 0, shadow_only > 0 (extra hits, as expected); increment 32, no overflows,
+  collisions or long waits. Smoke test with diagnostics passed; eye images correct.
+  4.04 not checked yet.

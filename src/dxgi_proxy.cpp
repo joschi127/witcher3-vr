@@ -531,6 +531,14 @@ enum class TemporalBackend : uint8_t {
     Dlss,
 };
 
+// [PERF:DESCRIPTOR-SHADOW-STORE 1/14] Which store owns descriptor metadata
+// (CBV address/size, retained-HUD resource, Witcher Senses targets). Shadow is
+// the address-ordered page store; Legacy is the hashed tables of V1441/V1501.
+enum class DescriptorMetadataStore : uint8_t {
+    Shadow,
+    Legacy,
+};
+
 constexpr int kRtHistoryDefaultBufferCount = 8;
 constexpr int kRtHistoryMinimumBufferCount = 4;
 constexpr int kRtHistoryMaximumBufferCount = 16;
@@ -779,6 +787,16 @@ struct Config {
     // render thread's REDengine job waits per call site.
     bool perf_skip_descriptor_tracking{false};
     bool perf_job_wait_profile{false};
+    // [engine] descriptor_metadata_store: release switch, read whatever the
+    // [debug] switches say. [perf] descriptor_shadow_verify (VRS census log
+    // only) maintains both stores and compares every load.
+    DescriptorMetadataStore descriptor_metadata_store{
+        DescriptorMetadataStore::Shadow};
+    bool perf_descriptor_shadow_verify{false};
+    // [PERF:PAIR-BARRIER-SPIN 1/3] [engine] pair_barrier_spin_pauses: pause
+    // instructions the strict-Stereo producer pair barrier spins before it
+    // parks. 0 restores the QueryPerformanceCounter-timed ~200 us spin.
+    uint32_t pair_barrier_spin_pauses{4096};
 };
 
 Config g_config{};
@@ -1274,15 +1292,21 @@ bool mode3_hud_descriptor_hooks_needed() {
 
 bool native_temporal_terrain_motion_route_active();
 
-bool descriptor_metadata_hooks_needed() {
+// The terms that read only g_config and build constants; the descriptor copy
+// hooks cache them (see descriptor_copy_route_mask).
+bool descriptor_metadata_hooks_configured() {
     return taau_metadata_hooks_needed() ||
         mode3_hud_descriptor_hooks_needed() ||
         real_smoke_world_up_binding_route_active() ||
         foliage_bound_basis_route_active() ||
         focus_projection_metadata_hooks_needed() ||
-        asymmetric_tiled_culling_fix_needed() ||
-        native_temporal_terrain_motion_route_active() ||
         rt_symmetric_dlss_per_eye_ao_history_active();
+}
+
+bool descriptor_metadata_hooks_needed() {
+    return descriptor_metadata_hooks_configured() ||
+        asymmetric_tiled_culling_fix_needed() ||
+        native_temporal_terrain_motion_route_active();
 }
 
 bool graphics_binding_hooks_needed() {
@@ -4453,7 +4477,8 @@ bool load_cbv_descriptor_fallback(SIZE_T cpu_handle, CbvDescriptorInfo& info) {
     return true;
 }
 
-void store_cbv_descriptor(SIZE_T cpu_handle, const CbvDescriptorInfo& info) {
+void store_cbv_descriptor_legacy(
+    SIZE_T cpu_handle, const CbvDescriptorInfo& info) {
     const auto base = cbv_descriptor_slot_index(cpu_handle);
     for (size_t probe = 0; probe < kCbvDescriptorProbeCount; ++probe) {
         auto& slot = g_cbv_descriptor_slots[(base + probe) & (kCbvDescriptorSlotCount - 1)];
@@ -4488,13 +4513,20 @@ void store_cbv_descriptor(SIZE_T cpu_handle, const CbvDescriptorInfo& info) {
     store_cbv_descriptor_fallback(cpu_handle, info);
 }
 
-bool load_cbv_descriptor(SIZE_T cpu_handle, CbvDescriptorInfo& info) {
+bool load_cbv_descriptor_legacy(
+    SIZE_T cpu_handle, CbvDescriptorInfo& info) {
     const auto base = cbv_descriptor_slot_index(cpu_handle);
     for (size_t probe = 0; probe < kCbvDescriptorProbeCount; ++probe) {
         auto& slot = g_cbv_descriptor_slots[(base + probe) & (kCbvDescriptorSlotCount - 1)];
         const auto key = slot.key.load(std::memory_order_acquire);
         if (key == 0) {
-            return load_cbv_descriptor_fallback(cpu_handle, info);
+            // [PERF:DESCRIPTOR-SHADOW-STORE 2/14] Slots are claimed once and
+            // never cleared, and store_cbv_descriptor_legacy reaches the
+            // fallback map only after all 64 slots of this run were taken by
+            // other handles. An empty slot here therefore proves the handle
+            // was never sent to the map: a miss no longer takes the shard
+            // mutex. Only a completely full run still consults the map.
+            return false;
         }
         if (key == kCbvDescriptorClaimed) {
             YieldProcessor();
@@ -4513,7 +4545,7 @@ bool load_cbv_descriptor(SIZE_T cpu_handle, CbvDescriptorInfo& info) {
     return load_cbv_descriptor_fallback(cpu_handle, info);
 }
 
-bool load_cbv_descriptor_smoke_nonblocking(
+bool load_cbv_descriptor_smoke_nonblocking_legacy(
     SIZE_T cpu_handle, CbvDescriptorInfo& info) {
     const auto base = cbv_descriptor_slot_index(cpu_handle);
     for (size_t probe = 0; probe < kCbvDescriptorProbeCount; ++probe) {
@@ -4573,7 +4605,7 @@ size_t resource_descriptor_slot_index(SIZE_T cpu_handle) {
         (kResourceDescriptorSlotCount - 1);
 }
 
-void store_resource_descriptor_fast(
+void store_resource_descriptor_fast_legacy(
     SIZE_T cpu_handle,
     ID3D12Resource* resource,
     DXGI_FORMAT format) {
@@ -4614,7 +4646,7 @@ void store_resource_descriptor_fast(
     }
 }
 
-bool load_resource_descriptor_fast(
+bool load_resource_descriptor_fast_legacy(
     SIZE_T cpu_handle,
     ID3D12Resource*& resource_out,
     DXGI_FORMAT& format_out) {
@@ -4746,7 +4778,7 @@ void write_witcher_sense_descriptor_slot(
     slot.sequence.store(sequence + 2, std::memory_order_release);
 }
 
-void store_witcher_sense_descriptor_target(
+void store_witcher_sense_descriptor_target_legacy(
     SIZE_T cpu_handle,
     const WitcherSenseDescriptorInfo& info) {
     if (cpu_handle == 0 || info.resource == nullptr ||
@@ -4797,7 +4829,7 @@ void store_witcher_sense_descriptor_target(
     set.writer.clear(std::memory_order_release);
 }
 
-void invalidate_witcher_sense_descriptor_target(SIZE_T cpu_handle) {
+void invalidate_witcher_sense_descriptor_target_legacy(SIZE_T cpu_handle) {
     if (cpu_handle == 0) {
         return;
     }
@@ -4824,7 +4856,7 @@ void invalidate_witcher_sense_descriptor_target(SIZE_T cpu_handle) {
     set.writer.clear(std::memory_order_release);
 }
 
-bool load_witcher_sense_descriptor_target(
+bool load_witcher_sense_descriptor_target_legacy(
     SIZE_T cpu_handle,
     WitcherSenseDescriptorInfo& info_out,
     WitcherSenseDescriptorKind expected_kind =
@@ -4878,14 +4910,1045 @@ bool load_witcher_sense_descriptor_target(
     return false;
 }
 
+// Legacy-store copy, used only by the per-descriptor loop of the copy hooks.
 void copy_witcher_sense_descriptor_target(
     SIZE_T dest_cpu, SIZE_T src_cpu) {
     WitcherSenseDescriptorInfo source{};
-    if (load_witcher_sense_descriptor_target(src_cpu, source)) {
-        store_witcher_sense_descriptor_target(dest_cpu, source);
+    if (load_witcher_sense_descriptor_target_legacy(src_cpu, source)) {
+        store_witcher_sense_descriptor_target_legacy(dest_cpu, source);
     } else {
-        invalidate_witcher_sense_descriptor_target(dest_cpu);
+        invalidate_witcher_sense_descriptor_target_legacy(dest_cpu);
     }
+}
+
+// [PERF:DESCRIPTOR-SHADOW-STORE 3/14] Address-ordered descriptor shadow
+// store. The copy hooks run for every dynamic table REDengine builds on the
+// render thread and both RenderDispatcher threads; the hashed tables above
+// cost several random cache misses per copied descriptor, plus the CBV shard
+// mutex on every miss. Here one 48-byte entry holds every metadata kind of
+// one descriptor, entries follow the CPU handle address, and a copied range
+// is a sequential walk with no hashing, lock or syscall.
+//
+// Granule = the largest power of two (8 to 256 bytes) dividing the
+// CBV_SRV_UAV increment. The increment is 32 on NVIDIA and on vkd3d-proton's
+// default path; its embedded and descriptor-heap paths report the native
+// descriptor size (64 on RDNA2/Steam Deck, 128 on Intel). Each of those is
+// one entry per descriptor. A page covers 2048 granules (64 KiB of handle
+// space at 32), is VirtualAlloc'd zeroed on first store and is never freed.
+// Handle bits below the granule (vkd3d-proton keeps log2 of the heap size
+// there) are part of the page key: a vkd3d-proton heap's handle window is 32
+// bytes per descriptor but its allocation only 24, so another heap can sit
+// inside that window, always with a different tag, and must not share its
+// entries. The entry keeps the same bits as its owner, checked as a guard.
+// Each entry is a seqlock: writers take the odd sequence with a CAS
+// (REDengine writes one descriptor from several workers), readers retry until
+// both sides see one even sequence.
+constexpr uint32_t kDescriptorShadowPageEntryBits = 11;
+constexpr size_t kDescriptorShadowPageEntries =
+    size_t{1} << kDescriptorShadowPageEntryBits;
+constexpr uint32_t kDescriptorShadowMinGranuleShift = 3;
+constexpr uint32_t kDescriptorShadowMaxGranuleShift = 8;
+constexpr uint32_t kDescriptorShadowOwnerTagBits =
+    kDescriptorShadowMaxGranuleShift;
+constexpr UINT kDescriptorShadowMaxIncrement = 4096;
+constexpr size_t kDescriptorShadowDirectorySlots = 1u << 16;
+constexpr size_t kDescriptorShadowDirectoryProbeCount = 256;
+constexpr size_t kDescriptorShadowPageCacheSlots = 8;
+constexpr uint32_t kDescriptorShadowNonblockingAttempts = 8;
+constexpr uint32_t kDescriptorShadowSpinsBeforeYield = 64;
+// 384 MiB at 96 KiB per page; a fully used 1M-descriptor heap is 512 pages.
+constexpr uint64_t kDescriptorShadowPageBudget = 4096;
+static_assert((kDescriptorShadowDirectorySlots &
+    (kDescriptorShadowDirectorySlots - 1)) == 0);
+static_assert((kDescriptorShadowPageCacheSlots &
+    (kDescriptorShadowPageCacheSlots - 1)) == 0);
+
+void log_descriptor_store_line(const char* fmt, ...);
+
+// Entry header: owner tag | owned | metadata kinds | verification markers.
+constexpr uint32_t kDescriptorShadowOwnerTagMask =
+    (1u << kDescriptorShadowOwnerTagBits) - 1;
+constexpr uint32_t kDescriptorShadowOwned = 1u << 8;
+constexpr uint32_t kDescriptorShadowOwnerMask =
+    kDescriptorShadowOwned | kDescriptorShadowOwnerTagMask;
+constexpr uint32_t kDescriptorShadowHasCbv = 1u << 9;
+constexpr uint32_t kDescriptorShadowHasFastResource = 1u << 10;
+constexpr uint32_t kDescriptorShadowWitcherKindShift = 11;
+constexpr uint32_t kDescriptorShadowWitcherKindMask =
+    3u << kDescriptorShadowWitcherKindShift;
+constexpr uint32_t kDescriptorShadowMetadataMask =
+    kDescriptorShadowHasCbv | kDescriptorShadowHasFastResource |
+    kDescriptorShadowWitcherKindMask;
+// Verification only: a copy from a source without this kind emptied it while
+// the legacy store could keep the destination's stale CBV/resource data
+// (see descriptor_shadow_verify_copied_empty). Witcher Senses targets have no
+// marker: the legacy copy empties them too.
+constexpr uint32_t kDescriptorShadowCopiedEmptyCbv = 1u << 13;
+constexpr uint32_t kDescriptorShadowCopiedEmptyFastResource = 1u << 14;
+// Header bits a consumer can observe. An entry without any of them reads as
+// empty whatever its owner bits say (the markers exist only under
+// verification).
+constexpr uint32_t kDescriptorShadowContentMask =
+    kDescriptorShadowMetadataMask | kDescriptorShadowCopiedEmptyCbv |
+    kDescriptorShadowCopiedEmptyFastResource;
+static_assert(static_cast<uint32_t>(WitcherSenseDescriptorKind::Auxiliary) ==
+    (kDescriptorShadowWitcherKindMask >> kDescriptorShadowWitcherKindShift));
+
+// The legacy Witcher Senses cache holds a handle in at most one way: a store
+// clears the handle from the other partition under the set lock. One target
+// per entry therefore represents it completely.
+struct DescriptorShadowEntry {
+    std::atomic<uint32_t> sequence{};
+    std::atomic<uint32_t> header{};
+    std::atomic<uint64_t> cbv_gpu_va{};
+    std::atomic<uint32_t> cbv_size_in_bytes{};
+    std::atomic<uint32_t> fast_format{};
+    std::atomic<ID3D12Resource*> fast_resource{};
+    std::atomic<ID3D12Resource*> witcher_resource{};
+    // Witcher targets are Texture2D (at most 16384 wide), so 32 bits hold
+    // the UINT64 width exactly.
+    std::atomic<uint32_t> witcher_width{};
+    std::atomic<uint32_t> witcher_height{};
+};
+static_assert(sizeof(DescriptorShadowEntry) == 48);
+
+struct DescriptorShadowPage {
+    std::array<DescriptorShadowEntry, kDescriptorShadowPageEntries> entries;
+};
+
+struct DescriptorShadowRecord {
+    uint32_t header{};
+    uint64_t cbv_gpu_va{};
+    uint32_t cbv_size_in_bytes{};
+    uint32_t fast_format{};
+    ID3D12Resource* fast_resource{};
+    ID3D12Resource* witcher_resource{};
+    uint32_t witcher_width{};
+    uint32_t witcher_height{};
+    bool operator==(const DescriptorShadowRecord&) const = default;
+};
+
+// Lock-free page directory: key = page key + 1, claimed once by CAS and never
+// cleared. The page pointer is published after the allocation.
+struct DescriptorShadowDirectorySlot {
+    std::atomic<uintptr_t> key{};
+    std::atomic<DescriptorShadowPage*> page{};
+};
+DescriptorShadowPage* const kDescriptorShadowPageFailed =
+    reinterpret_cast<DescriptorShadowPage*>(static_cast<uintptr_t>(1));
+
+// Written once by initialize_descriptor_shadow_store before the descriptor
+// detours are installed and published by ready; read-only afterwards.
+struct DescriptorShadowLayout {
+    UINT increment{};
+    uint32_t granule_shift{};
+    uint32_t page_shift{};
+    uint32_t entry_stride{};
+    // One entry per descriptor (increment == granule): run limits need no
+    // division.
+    bool stride_is_one{};
+    SIZE_T owner_tag_mask{};
+    std::atomic<bool> ready{};
+};
+DescriptorShadowLayout g_descriptor_shadow_layout{};
+std::array<DescriptorShadowDirectorySlot, kDescriptorShadowDirectorySlots>
+    g_descriptor_shadow_directory{};
+std::atomic<uint64_t> g_descriptor_shadow_pages{};
+std::atomic<uint64_t> g_descriptor_shadow_directory_overflows{};
+std::atomic<uint64_t> g_descriptor_shadow_alloc_failures{};
+std::atomic<uint64_t> g_descriptor_shadow_owner_collisions{};
+std::atomic<uint64_t> g_descriptor_shadow_increment_mismatches{};
+std::atomic<uint64_t> g_descriptor_shadow_long_waits{};
+// Bumped after every directory claim; a cached miss is valid only while it
+// is unchanged.
+std::atomic<uint64_t> g_descriptor_shadow_directory_generation{};
+
+// This thread's recent pages, direct-mapped by page number, so a copy that
+// gathers from several staging pages into one table keeps all of them. A
+// cached miss (page nullptr) answers loads and copy sources until the
+// directory claims another page; stores never use it.
+struct DescriptorShadowPageCache {
+    std::array<uintptr_t, kDescriptorShadowPageCacheSlots> key{};
+    std::array<DescriptorShadowPage*, kDescriptorShadowPageCacheSlots> page{};
+    std::array<uint64_t, kDescriptorShadowPageCacheSlots> generation{};
+};
+thread_local DescriptorShadowPageCache g_descriptor_shadow_page_cache{};
+
+bool descriptor_shadow_store_selected() {
+    return g_config.descriptor_metadata_store ==
+        DescriptorMetadataStore::Shadow;
+}
+
+bool descriptor_shadow_store_maintained() {
+    return descriptor_shadow_store_selected() ||
+        g_config.perf_descriptor_shadow_verify;
+}
+
+bool descriptor_legacy_store_maintained() {
+    return !descriptor_shadow_store_selected() ||
+        g_config.perf_descriptor_shadow_verify;
+}
+
+// [PERF:DESCRIPTOR-COPY-ROUTE 1/4] The descriptor copy hooks run for every
+// dynamic table REDengine builds and used to evaluate about eight route
+// predicate chains per call. These bits read only g_config and build
+// constants, which are final after load_config and
+// initialize_descriptor_shadow_store (both refresh the mask), so the hooks
+// load one atomic instead. The runtime-variable terms of
+// descriptor_metadata_hooks_needed (native-asymmetric runtime state, cinema
+// panel, AFW route) stay out: the hooks evaluate it in full whenever the
+// configured terms alone do not decide it.
+constexpr uint32_t kDescriptorCopyRouteValid = 1u << 0;
+constexpr uint32_t kDescriptorCopyRouteMetadataConfigured = 1u << 1;
+constexpr uint32_t kDescriptorCopyRouteWitcherSense = 1u << 2;
+constexpr uint32_t kDescriptorCopyRouteCbv = 1u << 3;
+constexpr uint32_t kDescriptorCopyRouteLegacyResource = 1u << 4;
+constexpr uint32_t kDescriptorCopyRouteShadowStore = 1u << 5;
+constexpr uint32_t kDescriptorCopyRouteLegacyStore = 1u << 6;
+constexpr uint32_t kDescriptorCopyRouteVerify = 1u << 7;
+constexpr uint32_t kDescriptorCopyRouteLogCopies = 1u << 8;
+std::atomic<uint32_t> g_descriptor_copy_route_mask{};
+
+uint32_t compute_descriptor_copy_route_mask() {
+    // [PERF:WITCHER-SENSE-BOUNDED-DESCRIPTORS V1499 3/5] Witcher Senses owns
+    // only its bounded target cache here. It no longer enables the generic
+    // CBV mirror, legacy resource propagation, or global reverse mutex.
+    const bool cbv_metadata = taau_metadata_hooks_needed() ||
+        real_smoke_world_up_binding_route_active() ||
+        foliage_bound_basis_route_active() ||
+        focus_projection_metadata_hooks_needed() ||
+        rt_symmetric_dlss_per_eye_ao_history_active();
+    const bool legacy_resource_metadata = taau_metadata_hooks_needed() ||
+        rt_symmetric_dlss_per_eye_ao_history_active();
+    uint32_t mask = kDescriptorCopyRouteValid;
+    if (descriptor_metadata_hooks_configured()) {
+        mask |= kDescriptorCopyRouteMetadataConfigured;
+    }
+    if (witcher_sense_history_suppression_route_configured()) {
+        mask |= kDescriptorCopyRouteWitcherSense;
+    }
+    if (cbv_metadata) {
+        mask |= kDescriptorCopyRouteCbv;
+    }
+    if (legacy_resource_metadata) {
+        mask |= kDescriptorCopyRouteLegacyResource;
+    }
+    if (descriptor_shadow_store_maintained()) {
+        mask |= kDescriptorCopyRouteShadowStore;
+    }
+    if (descriptor_legacy_store_maintained()) {
+        mask |= kDescriptorCopyRouteLegacyStore;
+    }
+    if (g_config.perf_descriptor_shadow_verify) {
+        mask |= kDescriptorCopyRouteVerify;
+    }
+    if (g_config.runtime_diagnostics &&
+        !descriptor_legacy_store_maintained()) {
+        mask |= kDescriptorCopyRouteLogCopies;
+    }
+    return mask;
+}
+
+void refresh_descriptor_copy_route_mask() {
+    const uint32_t mask = compute_descriptor_copy_route_mask();
+    g_descriptor_copy_route_mask.store(mask, std::memory_order_release);
+    log_descriptor_store_line(
+        "Descriptor copy routes=0x%X metadata_configured=%d witcher=%d "
+        "cbv=%d legacy_resource=%d shadow=%d legacy=%d verify=%d",
+        mask, (mask & kDescriptorCopyRouteMetadataConfigured) != 0 ? 1 : 0,
+        (mask & kDescriptorCopyRouteWitcherSense) != 0 ? 1 : 0,
+        (mask & kDescriptorCopyRouteCbv) != 0 ? 1 : 0,
+        (mask & kDescriptorCopyRouteLegacyResource) != 0 ? 1 : 0,
+        (mask & kDescriptorCopyRouteShadowStore) != 0 ? 1 : 0,
+        (mask & kDescriptorCopyRouteLegacyStore) != 0 ? 1 : 0,
+        (mask & kDescriptorCopyRouteVerify) != 0 ? 1 : 0);
+}
+
+// Before the first refresh (never expected: load_config runs before any
+// detour) the bits are computed on the spot.
+uint32_t descriptor_copy_route_mask() {
+    const uint32_t mask =
+        g_descriptor_copy_route_mask.load(std::memory_order_acquire);
+    return (mask & kDescriptorCopyRouteValid) != 0
+        ? mask : compute_descriptor_copy_route_mask();
+}
+
+// page_key = (handle >> page_shift) << 8 | handle bits below the granule.
+// The page shift is at least 14, so the key stays below 2^58.
+struct DescriptorShadowLocation {
+    uintptr_t page_key{};
+    size_t index{};
+    uint32_t owner{};
+};
+
+DescriptorShadowLocation locate_descriptor_shadow_entry(SIZE_T cpu_handle) {
+    const auto& layout = g_descriptor_shadow_layout;
+    const auto tag = static_cast<uint32_t>(cpu_handle & layout.owner_tag_mask);
+    return DescriptorShadowLocation{
+        (static_cast<uintptr_t>(cpu_handle >> layout.page_shift) <<
+            kDescriptorShadowOwnerTagBits) | tag,
+        static_cast<size_t>(cpu_handle >> layout.granule_shift) &
+            (kDescriptorShadowPageEntries - 1),
+        kDescriptorShadowOwned | tag};
+}
+
+// Waits on another writer pause first, then give the core away, so a writer
+// preempted inside its window can finish (the Deck has four cores).
+void descriptor_shadow_backoff(uint32_t& spins) {
+    if (spins < kDescriptorShadowSpinsBeforeYield) {
+        ++spins;
+        YieldProcessor();
+        return;
+    }
+    if (spins == kDescriptorShadowSpinsBeforeYield) {
+        ++spins;
+        g_descriptor_shadow_long_waits.fetch_add(1, std::memory_order_relaxed);
+    }
+    SwitchToThread();
+}
+
+DescriptorShadowPage* allocate_descriptor_shadow_page() {
+    void* const memory = VirtualAlloc(nullptr, sizeof(DescriptorShadowPage),
+        MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    if (memory == nullptr) {
+        g_descriptor_shadow_alloc_failures.fetch_add(
+            1, std::memory_order_relaxed);
+        return kDescriptorShadowPageFailed;
+    }
+    const uint64_t pages =
+        g_descriptor_shadow_pages.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (pages == kDescriptorShadowPageBudget) {
+        log_descriptor_store_line(
+            "Descriptor metadata store: %llu shadow pages (%.0f MiB) exceed "
+            "the expected footprint; pages are never freed",
+            static_cast<unsigned long long>(pages),
+            static_cast<double>(pages * sizeof(DescriptorShadowPage)) /
+                (1024.0 * 1024.0));
+    }
+    // Zero-filled memory is the empty state of every entry atomic.
+    return static_cast<DescriptorShadowPage*>(memory);
+}
+
+DescriptorShadowPage* find_descriptor_shadow_page(
+    uintptr_t page_key, bool create) {
+    auto& cache = g_descriptor_shadow_page_cache;
+    const uintptr_t key = page_key + 1;
+    const size_t cached = static_cast<size_t>(
+        page_key >> kDescriptorShadowOwnerTagBits) &
+        (kDescriptorShadowPageCacheSlots - 1);
+    if (cache.key[cached] == key) {
+        if (cache.page[cached] != nullptr) {
+            return cache.page[cached];
+        }
+        if (!create &&
+            cache.generation[cached] ==
+                g_descriptor_shadow_directory_generation.load(
+                    std::memory_order_acquire)) {
+            return nullptr;
+        }
+    }
+    // Read before probing: a claim this probe misses bumps it afterwards and
+    // so invalidates the miss cached below.
+    const uint64_t generation =
+        g_descriptor_shadow_directory_generation.load(
+            std::memory_order_acquire);
+    const size_t base = static_cast<size_t>(
+        w3vr::cbv_descriptor_cache::mix_handle(page_key));
+    for (size_t probe = 0; probe < kDescriptorShadowDirectoryProbeCount;
+         ++probe) {
+        auto& slot = g_descriptor_shadow_directory[
+            (base + probe) & (kDescriptorShadowDirectorySlots - 1)];
+        uintptr_t slot_key = slot.key.load(std::memory_order_acquire);
+        if (slot_key == 0) {
+            if (!create) {
+                cache.key[cached] = key;
+                cache.page[cached] = nullptr;
+                cache.generation[cached] = generation;
+                return nullptr;
+            }
+            uintptr_t expected{};
+            if (slot.key.compare_exchange_strong(
+                    expected, key, std::memory_order_acq_rel)) {
+                g_descriptor_shadow_directory_generation.fetch_add(
+                    1, std::memory_order_acq_rel);
+                slot.page.store(allocate_descriptor_shadow_page(),
+                    std::memory_order_release);
+                slot_key = key;
+            } else {
+                slot_key = expected;
+            }
+        }
+        if (slot_key != key) {
+            continue;
+        }
+        DescriptorShadowPage* page =
+            slot.page.load(std::memory_order_acquire);
+        if (page == nullptr) {
+            // Another thread is allocating this page. A load sees it empty
+            // (not cached: the generation already counts this claim); a
+            // store waits for the allocation.
+            if (!create) {
+                return nullptr;
+            }
+            uint32_t spins = 0;
+            do {
+                descriptor_shadow_backoff(spins);
+                page = slot.page.load(std::memory_order_acquire);
+            } while (page == nullptr);
+        }
+        if (page == kDescriptorShadowPageFailed) {
+            return nullptr;
+        }
+        cache.key[cached] = key;
+        cache.page[cached] = page;
+        return page;
+    }
+    if (create) {
+        g_descriptor_shadow_directory_overflows.fetch_add(
+            1, std::memory_order_relaxed);
+    }
+    return nullptr;
+}
+
+void load_descriptor_shadow_fields(
+    const DescriptorShadowEntry& entry, DescriptorShadowRecord& record) {
+    record.header = entry.header.load(std::memory_order_relaxed);
+    record.cbv_gpu_va = entry.cbv_gpu_va.load(std::memory_order_relaxed);
+    record.cbv_size_in_bytes =
+        entry.cbv_size_in_bytes.load(std::memory_order_relaxed);
+    record.fast_format = entry.fast_format.load(std::memory_order_relaxed);
+    record.fast_resource = entry.fast_resource.load(std::memory_order_relaxed);
+    record.witcher_resource =
+        entry.witcher_resource.load(std::memory_order_relaxed);
+    record.witcher_width = entry.witcher_width.load(std::memory_order_relaxed);
+    record.witcher_height =
+        entry.witcher_height.load(std::memory_order_relaxed);
+}
+
+void store_descriptor_shadow_fields(
+    DescriptorShadowEntry& entry, const DescriptorShadowRecord& record) {
+    entry.header.store(record.header, std::memory_order_relaxed);
+    entry.cbv_gpu_va.store(record.cbv_gpu_va, std::memory_order_relaxed);
+    entry.cbv_size_in_bytes.store(
+        record.cbv_size_in_bytes, std::memory_order_relaxed);
+    entry.fast_format.store(record.fast_format, std::memory_order_relaxed);
+    entry.fast_resource.store(record.fast_resource, std::memory_order_relaxed);
+    entry.witcher_resource.store(
+        record.witcher_resource, std::memory_order_relaxed);
+    entry.witcher_width.store(record.witcher_width, std::memory_order_relaxed);
+    entry.witcher_height.store(
+        record.witcher_height, std::memory_order_relaxed);
+}
+
+// max_attempts 0 waits for a concurrent writer (with backoff); the smoke draw
+// passes a bound and only pauses.
+bool read_descriptor_shadow_entry(
+    const DescriptorShadowEntry& entry,
+    DescriptorShadowRecord& record,
+    uint32_t max_attempts) {
+    uint32_t spins = 0;
+    for (uint32_t attempt = 0; max_attempts == 0 || attempt < max_attempts;
+         ++attempt) {
+        const uint32_t begin = entry.sequence.load(std::memory_order_acquire);
+        if ((begin & 1u) == 0) {
+            load_descriptor_shadow_fields(entry, record);
+            std::atomic_thread_fence(std::memory_order_acquire);
+            if (entry.sequence.load(std::memory_order_relaxed) == begin) {
+                return true;
+            }
+        }
+        if (max_attempts != 0) {
+            YieldProcessor();
+        } else {
+            descriptor_shadow_backoff(spins);
+        }
+    }
+    return false;
+}
+
+uint32_t lock_descriptor_shadow_entry(DescriptorShadowEntry& entry) {
+    uint32_t spins = 0;
+    uint32_t sequence = entry.sequence.load(std::memory_order_relaxed);
+    for (;;) {
+        if ((sequence & 1u) == 0 &&
+            entry.sequence.compare_exchange_weak(sequence, sequence + 1,
+                std::memory_order_acquire, std::memory_order_relaxed)) {
+            // Readers must see the odd sequence before any field store.
+            std::atomic_thread_fence(std::memory_order_release);
+            return sequence + 1;
+        }
+        if ((sequence & 1u) != 0) {
+            descriptor_shadow_backoff(spins);
+            sequence = entry.sequence.load(std::memory_order_relaxed);
+        }
+    }
+}
+
+void unlock_descriptor_shadow_entry(
+    DescriptorShadowEntry& entry, uint32_t locked_sequence) {
+    entry.sequence.store(locked_sequence + 1, std::memory_order_release);
+}
+
+// Takes ownership for cpu_handle (resetting the entry when another handle
+// owned the granule, which the tagged page key rules out), applies update and
+// publishes the entry.
+template <typename Update>
+void update_descriptor_shadow_entry(SIZE_T cpu_handle, Update&& update) {
+    if (cpu_handle == 0 ||
+        !g_descriptor_shadow_layout.ready.load(std::memory_order_acquire)) {
+        return;
+    }
+    const auto location = locate_descriptor_shadow_entry(cpu_handle);
+    auto* page = find_descriptor_shadow_page(location.page_key, true);
+    if (page == nullptr) {
+        return;
+    }
+    auto& entry = page->entries[location.index];
+    DescriptorShadowRecord record{};
+    // REDengine's workers mostly rewrite a descriptor with the values it
+    // already holds. Leave such an entry alone (no lock, no dirty line), as
+    // the legacy CBV store let those rewrites run without serializing.
+    read_descriptor_shadow_entry(entry, record, 0);
+    if ((record.header & kDescriptorShadowOwnerMask) == location.owner) {
+        DescriptorShadowRecord updated = record;
+        update(updated);
+        if (updated == record) {
+            return;
+        }
+    }
+    const uint32_t locked = lock_descriptor_shadow_entry(entry);
+    load_descriptor_shadow_fields(entry, record);
+    if ((record.header & kDescriptorShadowOwnerMask) != location.owner) {
+        if ((record.header & kDescriptorShadowOwned) != 0) {
+            g_descriptor_shadow_owner_collisions.fetch_add(
+                1, std::memory_order_relaxed);
+        }
+        record = DescriptorShadowRecord{};
+        record.header = location.owner;
+    }
+    update(record);
+    store_descriptor_shadow_fields(entry, record);
+    unlock_descriptor_shadow_entry(entry, locked);
+}
+
+bool load_descriptor_shadow_record(
+    SIZE_T cpu_handle, DescriptorShadowRecord& record, uint32_t max_attempts) {
+    record = DescriptorShadowRecord{};
+    if (cpu_handle == 0 ||
+        !g_descriptor_shadow_layout.ready.load(std::memory_order_acquire)) {
+        return false;
+    }
+    const auto location = locate_descriptor_shadow_entry(cpu_handle);
+    const auto* page = find_descriptor_shadow_page(location.page_key, false);
+    if (page == nullptr ||
+        !read_descriptor_shadow_entry(
+            page->entries[location.index], record, max_attempts) ||
+        (record.header & kDescriptorShadowOwnerMask) != location.owner) {
+        record = DescriptorShadowRecord{};
+        return false;
+    }
+    return true;
+}
+
+void store_cbv_descriptor_shadow(
+    SIZE_T cpu_handle, const CbvDescriptorInfo& info) {
+    update_descriptor_shadow_entry(cpu_handle,
+        [&info](DescriptorShadowRecord& record) {
+            record.header = (record.header | kDescriptorShadowHasCbv) &
+                ~kDescriptorShadowCopiedEmptyCbv;
+            record.cbv_gpu_va = info.gpu_va;
+            record.cbv_size_in_bytes = info.size_in_bytes;
+        });
+}
+
+void store_resource_descriptor_fast_shadow(
+    SIZE_T cpu_handle, ID3D12Resource* resource, DXGI_FORMAT format) {
+    if (resource == nullptr) {
+        return;
+    }
+    update_descriptor_shadow_entry(cpu_handle,
+        [resource, format](DescriptorShadowRecord& record) {
+            record.header =
+                (record.header | kDescriptorShadowHasFastResource) &
+                ~kDescriptorShadowCopiedEmptyFastResource;
+            record.fast_resource = resource;
+            record.fast_format = static_cast<uint32_t>(format);
+        });
+}
+
+void store_witcher_sense_descriptor_target_shadow(
+    SIZE_T cpu_handle, const WitcherSenseDescriptorInfo& info) {
+    if (info.resource == nullptr ||
+        info.kind == WitcherSenseDescriptorKind::None) {
+        return;
+    }
+    update_descriptor_shadow_entry(cpu_handle,
+        [&info](DescriptorShadowRecord& record) {
+            record.header =
+                (record.header & ~kDescriptorShadowWitcherKindMask) |
+                (static_cast<uint32_t>(info.kind) <<
+                    kDescriptorShadowWitcherKindShift);
+            record.witcher_resource = info.resource;
+            record.witcher_width = static_cast<uint32_t>(info.width);
+            record.witcher_height = info.height;
+        });
+}
+
+void invalidate_witcher_sense_descriptor_target_shadow(SIZE_T cpu_handle) {
+    DescriptorShadowRecord current{};
+    if (!load_descriptor_shadow_record(cpu_handle, current, 0) ||
+        (current.header & kDescriptorShadowWitcherKindMask) == 0) {
+        return;
+    }
+    update_descriptor_shadow_entry(cpu_handle,
+        [](DescriptorShadowRecord& record) {
+            record.header &= ~kDescriptorShadowWitcherKindMask;
+            record.witcher_resource = nullptr;
+            record.witcher_width = 0;
+            record.witcher_height = 0;
+        });
+}
+
+bool shadow_record_cbv(
+    const DescriptorShadowRecord& record, CbvDescriptorInfo& info) {
+    if ((record.header & kDescriptorShadowHasCbv) == 0) {
+        return false;
+    }
+    info = CbvDescriptorInfo{record.cbv_gpu_va, record.cbv_size_in_bytes};
+    return true;
+}
+
+bool shadow_record_fast_resource(
+    const DescriptorShadowRecord& record,
+    ID3D12Resource*& resource_out,
+    DXGI_FORMAT& format_out) {
+    if ((record.header & kDescriptorShadowHasFastResource) == 0) {
+        return false;
+    }
+    resource_out = record.fast_resource;
+    format_out = static_cast<DXGI_FORMAT>(record.fast_format);
+    return resource_out != nullptr;
+}
+
+bool shadow_record_witcher_sense(
+    const DescriptorShadowRecord& record,
+    WitcherSenseDescriptorInfo& info_out,
+    WitcherSenseDescriptorKind expected_kind) {
+    const auto kind = static_cast<WitcherSenseDescriptorKind>(
+        (record.header & kDescriptorShadowWitcherKindMask) >>
+            kDescriptorShadowWitcherKindShift);
+    if (kind == WitcherSenseDescriptorKind::None ||
+        record.witcher_resource == nullptr ||
+        (expected_kind != WitcherSenseDescriptorKind::None &&
+            kind != expected_kind)) {
+        return false;
+    }
+    info_out.resource = record.witcher_resource;
+    info_out.width = record.witcher_width;
+    info_out.height = record.witcher_height;
+    info_out.kind = kind;
+    return true;
+}
+
+// [PERF:DESCRIPTOR-SHADOW-STORE 4/14] [perf] descriptor_shadow_verify keeps
+// both stores and compares every consumer load. legacy_only_stale is the
+// expected difference: a copy from a source without that CBV/resource
+// emptied the shadow entry while the legacy store kept the destination's old
+// data. legacy_only (the shadow store lost data), shadow_only and differ list
+// their first examples; transient is a difference that did not repeat.
+enum class DescriptorShadowVerifyKind : uint32_t {
+    Cbv,
+    FastResource,
+    WitcherSense,
+    Count,
+};
+
+enum class DescriptorShadowVerifyResult : uint32_t {
+    Match,
+    Empty,
+    LegacyOnlyStale,
+    LegacyOnly,
+    ShadowOnly,
+    Differ,
+    Transient,
+    Count,
+};
+
+constexpr size_t kDescriptorShadowVerifyKindCount =
+    static_cast<size_t>(DescriptorShadowVerifyKind::Count);
+constexpr size_t kDescriptorShadowVerifyResultCount =
+    static_cast<size_t>(DescriptorShadowVerifyResult::Count);
+constexpr size_t kDescriptorShadowVerifyExampleLimit = 20;
+// Example lists: differ, shadow_only, legacy_only.
+constexpr size_t kDescriptorShadowVerifyExampleLists = 3;
+
+struct DescriptorShadowVerifyExample {
+    std::atomic<bool> ready{};
+    bool logged{};
+    DescriptorShadowVerifyKind kind{};
+    SIZE_T cpu_handle{};
+    std::array<uint64_t, 4> shadow{};
+    std::array<uint64_t, 4> legacy{};
+};
+
+// One comparison of a load: hits, value equality, the destination's
+// copied-empty marker and the values for an example line.
+struct DescriptorShadowVerifySample {
+    bool shadow_hit{};
+    bool legacy_hit{};
+    bool equal{};
+    bool copied_empty{};
+    std::array<uint64_t, 4> shadow{};
+    std::array<uint64_t, 4> legacy{};
+};
+
+std::array<std::array<std::atomic<uint64_t>,
+    kDescriptorShadowVerifyResultCount>,
+    kDescriptorShadowVerifyKindCount> g_descriptor_shadow_verify_counts{};
+std::array<std::array<DescriptorShadowVerifyExample,
+    kDescriptorShadowVerifyExampleLimit>,
+    kDescriptorShadowVerifyExampleLists> g_descriptor_shadow_verify_examples{};
+std::array<std::atomic<uint32_t>, kDescriptorShadowVerifyExampleLists>
+    g_descriptor_shadow_verify_example_claims{};
+// Copies whose legacy source had a CBV/resource that the shadow source
+// lacked with no earlier copy to explain it: the shadow store lost it.
+std::array<std::atomic<uint64_t>, kDescriptorShadowVerifyKindCount>
+    g_descriptor_shadow_verify_copy_source_lost{};
+
+DescriptorShadowVerifyResult classify_descriptor_shadow_verify(
+    const DescriptorShadowVerifySample& sample) {
+    if (sample.shadow_hit && sample.legacy_hit) {
+        return sample.equal ? DescriptorShadowVerifyResult::Match
+                            : DescriptorShadowVerifyResult::Differ;
+    }
+    if (!sample.shadow_hit && !sample.legacy_hit) {
+        return DescriptorShadowVerifyResult::Empty;
+    }
+    if (sample.legacy_hit) {
+        return sample.copied_empty
+            ? DescriptorShadowVerifyResult::LegacyOnlyStale
+            : DescriptorShadowVerifyResult::LegacyOnly;
+    }
+    return DescriptorShadowVerifyResult::ShadowOnly;
+}
+
+void record_descriptor_shadow_verify_example(
+    DescriptorShadowVerifyKind kind,
+    DescriptorShadowVerifyResult result,
+    SIZE_T cpu_handle,
+    const DescriptorShadowVerifySample& sample) {
+    size_t list{};
+    switch (result) {
+    case DescriptorShadowVerifyResult::Differ: list = 0; break;
+    case DescriptorShadowVerifyResult::ShadowOnly: list = 1; break;
+    case DescriptorShadowVerifyResult::LegacyOnly: list = 2; break;
+    default: return;
+    }
+    auto& claims = g_descriptor_shadow_verify_example_claims[list];
+    if (claims.load(std::memory_order_relaxed) >=
+        kDescriptorShadowVerifyExampleLimit) {
+        return;
+    }
+    const uint32_t claim = claims.fetch_add(1, std::memory_order_relaxed);
+    if (claim >= kDescriptorShadowVerifyExampleLimit) {
+        return;
+    }
+    auto& example = g_descriptor_shadow_verify_examples[list][claim];
+    example.kind = kind;
+    example.cpu_handle = cpu_handle;
+    example.shadow = sample.shadow;
+    example.legacy = sample.legacy;
+    example.ready.store(true, std::memory_order_release);
+}
+
+// The two stores are read moments apart, so a write racing the comparison
+// (a Create*View updating shadow then legacy, or a copy hook between its
+// shadow and legacy passes) can look like a difference. An unexpected result
+// is sampled once more and counted only when it repeats, otherwise as
+// transient; a load racing a long copy can still repeat. take_sample
+// refreshes the caller's values, so the load answers from the last sample.
+template <typename TakeSample>
+void verify_descriptor_shadow_load(
+    DescriptorShadowVerifyKind kind,
+    SIZE_T cpu_handle,
+    TakeSample&& take_sample) {
+    DescriptorShadowVerifySample sample = take_sample();
+    auto result = classify_descriptor_shadow_verify(sample);
+    if (result != DescriptorShadowVerifyResult::Match &&
+        result != DescriptorShadowVerifyResult::Empty) {
+        sample = take_sample();
+        if (classify_descriptor_shadow_verify(sample) != result) {
+            result = DescriptorShadowVerifyResult::Transient;
+        }
+    }
+    g_descriptor_shadow_verify_counts[static_cast<size_t>(kind)]
+        [static_cast<size_t>(result)].fetch_add(1, std::memory_order_relaxed);
+    record_descriptor_shadow_verify_example(kind, result, cpu_handle, sample);
+}
+
+// Verification only, from the shadow copy: a kind the shadow source lacks is
+// marked copied-empty at the destination when the legacy store may keep a
+// stale value there, i.e. the legacy source lacks it too or the shadow
+// source was itself emptied by a copy. A legacy source that has it means the
+// shadow store lost it: counted, and the destination gets no marker, so its
+// loads count as legacy_only.
+uint32_t descriptor_shadow_verify_copied_empty(
+    const DescriptorShadowRecord& source, SIZE_T src_cpu) {
+    uint32_t copied_empty{};
+    if ((source.header & kDescriptorShadowHasCbv) == 0) {
+        CbvDescriptorInfo legacy{};
+        if ((source.header & kDescriptorShadowCopiedEmptyCbv) != 0 ||
+            !load_cbv_descriptor_legacy(src_cpu, legacy)) {
+            copied_empty |= kDescriptorShadowCopiedEmptyCbv;
+        } else {
+            g_descriptor_shadow_verify_copy_source_lost[static_cast<size_t>(
+                DescriptorShadowVerifyKind::Cbv)].fetch_add(
+                    1, std::memory_order_relaxed);
+        }
+    }
+    if ((source.header & kDescriptorShadowHasFastResource) == 0) {
+        ID3D12Resource* resource{};
+        DXGI_FORMAT format{DXGI_FORMAT_UNKNOWN};
+        if ((source.header & kDescriptorShadowCopiedEmptyFastResource) != 0 ||
+            !load_resource_descriptor_fast_legacy(src_cpu, resource, format)) {
+            copied_empty |= kDescriptorShadowCopiedEmptyFastResource;
+        } else {
+            g_descriptor_shadow_verify_copy_source_lost[static_cast<size_t>(
+                DescriptorShadowVerifyKind::FastResource)].fetch_add(
+                    1, std::memory_order_relaxed);
+        }
+    }
+    return copied_empty;
+}
+
+// Verification returns the configured store's answer.
+template <typename Value>
+bool select_verified_descriptor_load(
+    bool shadow_hit, const Value& shadow_value,
+    bool legacy_hit, const Value& legacy_value,
+    Value& value_out) {
+    const bool shadow = descriptor_shadow_store_selected();
+    const bool hit = shadow ? shadow_hit : legacy_hit;
+    if (hit) {
+        value_out = shadow ? shadow_value : legacy_value;
+    }
+    return hit;
+}
+
+DescriptorShadowVerifySample descriptor_shadow_cbv_verify_sample(
+    bool shadow_hit, const CbvDescriptorInfo& shadow_info,
+    bool legacy_hit, const CbvDescriptorInfo& legacy_info,
+    const DescriptorShadowRecord& record) {
+    return DescriptorShadowVerifySample{shadow_hit, legacy_hit,
+        shadow_info.gpu_va == legacy_info.gpu_va &&
+            shadow_info.size_in_bytes == legacy_info.size_in_bytes,
+        (record.header & kDescriptorShadowCopiedEmptyCbv) != 0,
+        {shadow_info.gpu_va, shadow_info.size_in_bytes, 0, 0},
+        {legacy_info.gpu_va, legacy_info.size_in_bytes, 0, 0}};
+}
+
+// [PERF:DESCRIPTOR-SHADOW-STORE 5/14] The consumer-facing names route to the
+// configured store (both under verification). Legacy mode calls exactly the
+// former functions, now suffixed _legacy.
+void store_cbv_descriptor(SIZE_T cpu_handle, const CbvDescriptorInfo& info) {
+    if (descriptor_shadow_store_maintained()) {
+        store_cbv_descriptor_shadow(cpu_handle, info);
+    }
+    if (descriptor_legacy_store_maintained()) {
+        store_cbv_descriptor_legacy(cpu_handle, info);
+    }
+}
+
+bool load_cbv_descriptor(SIZE_T cpu_handle, CbvDescriptorInfo& info) {
+    if (!g_config.perf_descriptor_shadow_verify) {
+        if (!descriptor_shadow_store_selected()) {
+            return load_cbv_descriptor_legacy(cpu_handle, info);
+        }
+        DescriptorShadowRecord record{};
+        return load_descriptor_shadow_record(cpu_handle, record, 0) &&
+            shadow_record_cbv(record, info);
+    }
+    CbvDescriptorInfo shadow_info{};
+    CbvDescriptorInfo legacy_info{};
+    bool shadow_hit{};
+    bool legacy_hit{};
+    verify_descriptor_shadow_load(DescriptorShadowVerifyKind::Cbv, cpu_handle,
+        [&]() {
+            DescriptorShadowRecord record{};
+            shadow_info = CbvDescriptorInfo{};
+            legacy_info = CbvDescriptorInfo{};
+            shadow_hit =
+                load_descriptor_shadow_record(cpu_handle, record, 0) &&
+                shadow_record_cbv(record, shadow_info);
+            legacy_hit = load_cbv_descriptor_legacy(cpu_handle, legacy_info);
+            return descriptor_shadow_cbv_verify_sample(
+                shadow_hit, shadow_info, legacy_hit, legacy_info, record);
+        });
+    return select_verified_descriptor_load(
+        shadow_hit, shadow_info, legacy_hit, legacy_info, info);
+}
+
+// Smoke draws never wait: a descriptor that stays mid-write for the bounded
+// attempts reads as missing, as a claimed legacy slot did.
+bool load_cbv_descriptor_smoke_nonblocking(
+    SIZE_T cpu_handle, CbvDescriptorInfo& info) {
+    if (!g_config.perf_descriptor_shadow_verify) {
+        if (!descriptor_shadow_store_selected()) {
+            return load_cbv_descriptor_smoke_nonblocking_legacy(
+                cpu_handle, info);
+        }
+        DescriptorShadowRecord record{};
+        return load_descriptor_shadow_record(cpu_handle, record,
+                   kDescriptorShadowNonblockingAttempts) &&
+            shadow_record_cbv(record, info) && info.gpu_va != 0;
+    }
+    CbvDescriptorInfo shadow_info{};
+    CbvDescriptorInfo legacy_info{};
+    bool shadow_hit{};
+    bool legacy_hit{};
+    verify_descriptor_shadow_load(DescriptorShadowVerifyKind::Cbv, cpu_handle,
+        [&]() {
+            DescriptorShadowRecord record{};
+            shadow_info = CbvDescriptorInfo{};
+            legacy_info = CbvDescriptorInfo{};
+            shadow_hit = load_descriptor_shadow_record(cpu_handle, record,
+                             kDescriptorShadowNonblockingAttempts) &&
+                shadow_record_cbv(record, shadow_info) &&
+                shadow_info.gpu_va != 0;
+            legacy_hit = load_cbv_descriptor_smoke_nonblocking_legacy(
+                cpu_handle, legacy_info);
+            return descriptor_shadow_cbv_verify_sample(
+                shadow_hit, shadow_info, legacy_hit, legacy_info, record);
+        });
+    return select_verified_descriptor_load(
+        shadow_hit, shadow_info, legacy_hit, legacy_info, info);
+}
+
+void store_resource_descriptor_fast(
+    SIZE_T cpu_handle,
+    ID3D12Resource* resource,
+    DXGI_FORMAT format) {
+    if (descriptor_shadow_store_maintained()) {
+        store_resource_descriptor_fast_shadow(cpu_handle, resource, format);
+    }
+    if (descriptor_legacy_store_maintained()) {
+        store_resource_descriptor_fast_legacy(cpu_handle, resource, format);
+    }
+}
+
+bool load_resource_descriptor_fast(
+    SIZE_T cpu_handle,
+    ID3D12Resource*& resource_out,
+    DXGI_FORMAT& format_out) {
+    if (!g_config.perf_descriptor_shadow_verify) {
+        if (!descriptor_shadow_store_selected()) {
+            return load_resource_descriptor_fast_legacy(
+                cpu_handle, resource_out, format_out);
+        }
+        DescriptorShadowRecord record{};
+        return load_descriptor_shadow_record(cpu_handle, record, 0) &&
+            shadow_record_fast_resource(record, resource_out, format_out);
+    }
+    std::pair<ID3D12Resource*, DXGI_FORMAT> shadow_value{};
+    std::pair<ID3D12Resource*, DXGI_FORMAT> legacy_value{};
+    bool shadow_hit{};
+    bool legacy_hit{};
+    verify_descriptor_shadow_load(DescriptorShadowVerifyKind::FastResource,
+        cpu_handle, [&]() {
+            DescriptorShadowRecord record{};
+            shadow_value = {};
+            legacy_value = {};
+            shadow_hit =
+                load_descriptor_shadow_record(cpu_handle, record, 0) &&
+                shadow_record_fast_resource(
+                    record, shadow_value.first, shadow_value.second);
+            legacy_hit = load_resource_descriptor_fast_legacy(
+                cpu_handle, legacy_value.first, legacy_value.second);
+            return DescriptorShadowVerifySample{shadow_hit, legacy_hit,
+                shadow_value == legacy_value,
+                (record.header & kDescriptorShadowCopiedEmptyFastResource) !=
+                    0,
+                {reinterpret_cast<uint64_t>(shadow_value.first),
+                    static_cast<uint64_t>(shadow_value.second), 0, 0},
+                {reinterpret_cast<uint64_t>(legacy_value.first),
+                    static_cast<uint64_t>(legacy_value.second), 0, 0}};
+        });
+    std::pair<ID3D12Resource*, DXGI_FORMAT> selected{};
+    if (!select_verified_descriptor_load(
+            shadow_hit, shadow_value, legacy_hit, legacy_value, selected)) {
+        return false;
+    }
+    resource_out = selected.first;
+    format_out = selected.second;
+    return true;
+}
+
+void store_witcher_sense_descriptor_target(
+    SIZE_T cpu_handle,
+    const WitcherSenseDescriptorInfo& info) {
+    if (descriptor_shadow_store_maintained()) {
+        store_witcher_sense_descriptor_target_shadow(cpu_handle, info);
+    }
+    if (descriptor_legacy_store_maintained()) {
+        store_witcher_sense_descriptor_target_legacy(cpu_handle, info);
+    }
+}
+
+void invalidate_witcher_sense_descriptor_target(SIZE_T cpu_handle) {
+    if (descriptor_shadow_store_maintained()) {
+        invalidate_witcher_sense_descriptor_target_shadow(cpu_handle);
+    }
+    if (descriptor_legacy_store_maintained()) {
+        invalidate_witcher_sense_descriptor_target_legacy(cpu_handle);
+    }
+}
+
+bool load_witcher_sense_descriptor_target(
+    SIZE_T cpu_handle,
+    WitcherSenseDescriptorInfo& info_out,
+    WitcherSenseDescriptorKind expected_kind =
+        WitcherSenseDescriptorKind::None) {
+    if (!g_config.perf_descriptor_shadow_verify) {
+        if (!descriptor_shadow_store_selected()) {
+            return load_witcher_sense_descriptor_target_legacy(
+                cpu_handle, info_out, expected_kind);
+        }
+        DescriptorShadowRecord record{};
+        return load_descriptor_shadow_record(cpu_handle, record, 0) &&
+            shadow_record_witcher_sense(record, info_out, expected_kind);
+    }
+    WitcherSenseDescriptorInfo shadow_info{};
+    WitcherSenseDescriptorInfo legacy_info{};
+    bool shadow_hit{};
+    bool legacy_hit{};
+    // The legacy copy empties a Witcher Senses destination too, so a legacy
+    // hit the shadow store lacks is never expected (no stale class).
+    verify_descriptor_shadow_load(DescriptorShadowVerifyKind::WitcherSense,
+        cpu_handle, [&]() {
+            DescriptorShadowRecord record{};
+            shadow_info = WitcherSenseDescriptorInfo{};
+            legacy_info = WitcherSenseDescriptorInfo{};
+            shadow_hit =
+                load_descriptor_shadow_record(cpu_handle, record, 0) &&
+                shadow_record_witcher_sense(
+                    record, shadow_info, expected_kind);
+            legacy_hit = load_witcher_sense_descriptor_target_legacy(
+                cpu_handle, legacy_info, expected_kind);
+            return DescriptorShadowVerifySample{shadow_hit, legacy_hit,
+                shadow_info.resource == legacy_info.resource &&
+                    shadow_info.width == legacy_info.width &&
+                    shadow_info.height == legacy_info.height &&
+                    shadow_info.kind == legacy_info.kind,
+                false,
+                {reinterpret_cast<uint64_t>(shadow_info.resource),
+                    shadow_info.width, shadow_info.height,
+                    static_cast<uint64_t>(shadow_info.kind)},
+                {reinterpret_cast<uint64_t>(legacy_info.resource),
+                    legacy_info.width, legacy_info.height,
+                    static_cast<uint64_t>(legacy_info.kind)}};
+        });
+    return select_verified_descriptor_load(
+        shadow_hit, shadow_info, legacy_hit, legacy_info, info_out);
 }
 
 struct RootDescriptorRangeInfo {
@@ -4936,7 +5999,77 @@ std::unordered_map<SIZE_T, ResourceDescriptorInfo> g_resource_descriptors{};
 std::unordered_map<SIZE_T, ID3D12Resource*> g_rtv_descriptors{};
 std::unordered_map<SIZE_T, ID3D12Resource*> g_dsv_descriptors{};
 std::unordered_map<ID3D12RootSignature*, RootSignatureInfo> g_root_signature_infos{};
-std::unordered_map<ID3D12PipelineState*, PipelineInfo> g_pipeline_infos{};
+// [PERF:AIM-PROBE-PIPELINES 1/3] The V1035 aim detector asks, for every 6x1
+// non-indexed draw, whether the bound PSO records the AimProbe VS/PS pair.
+// Asking g_pipeline_infos took g_reverse_mutex on the draw path (render
+// thread and both recording lanes). Every record into the map now passes
+// through PipelineInfoMap::Record, which keeps the PSOs recorded with that
+// pair in a small lock-free set: a PSO address recorded again with another
+// pair leaves it, exactly as its map entry changes. Records are made under
+// g_reverse_mutex, so the set has one writer at a time. More AimProbe PSOs
+// than slots send the detector back to the locked map lookup.
+constexpr size_t kAimProbePipelineSlotCount = 4;
+std::array<std::atomic<ID3D12PipelineState*>, kAimProbePipelineSlotCount>
+    g_aim_probe_pipelines{};
+std::atomic<bool> g_aim_probe_pipelines_overflow{};
+
+void record_aim_probe_pipeline(
+    ID3D12PipelineState* pipeline, const PipelineInfo& info) {
+    if (pipeline == nullptr) {
+        return;
+    }
+    const bool aim_probe =
+        shader_fingerprints::matches(
+            ShaderFingerprint::AimProbeVs, info.vs_hash) &&
+        shader_fingerprints::matches(
+            ShaderFingerprint::AimProbePs, info.ps_hash);
+    std::atomic<ID3D12PipelineState*>* free_slot{};
+    for (auto& slot : g_aim_probe_pipelines) {
+        ID3D12PipelineState* const current =
+            slot.load(std::memory_order_relaxed);
+        if (current == pipeline) {
+            if (!aim_probe) {
+                slot.store(nullptr, std::memory_order_release);
+            }
+            return;
+        }
+        if (current == nullptr && free_slot == nullptr) {
+            free_slot = &slot;
+        }
+    }
+    if (!aim_probe) {
+        return;
+    }
+    if (free_slot != nullptr) {
+        free_slot->store(pipeline, std::memory_order_release);
+    } else if (!g_aim_probe_pipelines_overflow.exchange(
+                   true, std::memory_order_acq_rel)) {
+        log_line("Aim probe PSO set full (%zu); the aim detector uses the "
+            "locked pipeline lookup",
+            kAimProbePipelineSlotCount);
+    }
+}
+
+struct PipelineInfoMap {
+    // The target of g_pipeline_infos[pipeline] = info.
+    struct Record {
+        ID3D12PipelineState* pipeline;
+        PipelineInfo& info;
+        Record& operator=(const PipelineInfo& value) {
+            info = value;
+            record_aim_probe_pipeline(pipeline, value);
+            return *this;
+        }
+    };
+    std::unordered_map<ID3D12PipelineState*, PipelineInfo> map{};
+
+    Record operator[](ID3D12PipelineState* pipeline) {
+        return Record{pipeline, map[pipeline]};
+    }
+    auto find(ID3D12PipelineState* pipeline) { return map.find(pipeline); }
+    auto end() { return map.end(); }
+};
+PipelineInfoMap g_pipeline_infos{};
 constexpr size_t kEffectPipelineInfoSlotCount = 1u << 16;
 constexpr size_t kEffectPipelineInfoProbeCount = 32;
 constexpr uintptr_t kEffectPipelineInfoClaimed = ~uintptr_t{};
@@ -10086,6 +11219,20 @@ void log_vrs_line(const char* fmt, ...) {
     va_end(args);
 }
 
+// [PERF:DESCRIPTOR-SHADOW-STORE 6/14] The descriptor store's startup and
+// warning lines: in the census log during a measurement run (diagnostics
+// off), otherwise through log_line; never twice.
+void log_descriptor_store_line(const char* fmt, ...) {
+    va_list args{};
+    va_start(args, fmt);
+    if (g_config.vrs_log_file) {
+        append_log_file_line_v(fmt, args);
+    } else if (g_config.logging_enabled) {
+        write_log_line_v(fmt, args);
+    }
+    va_end(args);
+}
+
 bool is_reshade_immediate_command_list(
     ID3D12GraphicsCommandList* command_list) {
     if (command_list == nullptr || g_reshade_secondary_module == nullptr) {
@@ -14887,6 +16034,7 @@ uint64_t g_vrs_census_previous_rate_sets{};
 
 void log_vrs_census_locked(uint64_t present);
 void log_job_wait_profile_locked(uint64_t window_presents, int64_t qpc_frequency);
+void log_descriptor_shadow_census_locked();
 
 // One line per kVrsCensusPresentInterval Presents, written by the first bind
 // after the boundary; the counters are window deltas.
@@ -14975,6 +16123,7 @@ void log_vrs_census_locked(uint64_t present) {
     g_vrs_census_previous_binds = binds;
     g_vrs_census_previous_rate_sets = rate_sets;
     log_job_wait_profile_locked(window_presents, frequency.QuadPart);
+    log_descriptor_shadow_census_locked();
 }
 
 void apply_vrs_pipeline_rate(
@@ -15339,6 +16488,121 @@ void log_job_wait_profile_locked(uint64_t window_presents, int64_t qpc_frequency
     }
 }
 
+// [PERF:DESCRIPTOR-SHADOW-STORE 7/14] Called from the census under
+// g_vrs_census_busy. The store in use every window (legacy too, so an A/B
+// log shows it); the shadow store's size and guard counters; with
+// verification, per-kind comparison counts as +window/total and each new
+// example once.
+void log_descriptor_shadow_census_locked() {
+    if (!descriptor_shadow_store_maintained()) {
+        log_vrs_line("PERF descriptor store=legacy verify=0");
+        return;
+    }
+    const uint64_t pages =
+        g_descriptor_shadow_pages.load(std::memory_order_relaxed);
+    log_vrs_line(
+        "PERF descriptor store=%s verify=%d pages=%llu shadow_mib=%.1f "
+        "directory_overflows=%llu alloc_failures=%llu owner_collisions=%llu "
+        "increment_mismatches=%llu long_waits=%llu",
+        descriptor_shadow_store_selected() ? "shadow" : "legacy",
+        g_config.perf_descriptor_shadow_verify ? 1 : 0,
+        static_cast<unsigned long long>(pages),
+        static_cast<double>(pages * sizeof(DescriptorShadowPage)) /
+            (1024.0 * 1024.0),
+        static_cast<unsigned long long>(
+            g_descriptor_shadow_directory_overflows.load(
+                std::memory_order_relaxed)),
+        static_cast<unsigned long long>(
+            g_descriptor_shadow_alloc_failures.load(
+                std::memory_order_relaxed)),
+        static_cast<unsigned long long>(
+            g_descriptor_shadow_owner_collisions.load(
+                std::memory_order_relaxed)),
+        static_cast<unsigned long long>(
+            g_descriptor_shadow_increment_mismatches.load(
+                std::memory_order_relaxed)),
+        static_cast<unsigned long long>(
+            g_descriptor_shadow_long_waits.load(std::memory_order_relaxed)));
+    if (!g_config.perf_descriptor_shadow_verify) {
+        return;
+    }
+    static constexpr const char* kKindNames[] = {
+        "cbv", "resource_fast", "witcher_sense"};
+    static constexpr const char* kListNames[] = {
+        "differ", "shadow_only", "legacy_only"};
+    // Previous totals; the census is serialized, so plain statics suffice.
+    // The last column is copy_source_lost.
+    static std::array<std::array<uint64_t,
+        kDescriptorShadowVerifyResultCount + 1>,
+        kDescriptorShadowVerifyKindCount> previous{};
+    for (size_t kind = 0; kind < kDescriptorShadowVerifyKindCount; ++kind) {
+        std::array<unsigned long long,
+            kDescriptorShadowVerifyResultCount + 1> total{};
+        std::array<unsigned long long,
+            kDescriptorShadowVerifyResultCount + 1> window{};
+        for (size_t column = 0; column < total.size(); ++column) {
+            const uint64_t value = column < kDescriptorShadowVerifyResultCount
+                ? g_descriptor_shadow_verify_counts[kind][column].load(
+                    std::memory_order_relaxed)
+                : g_descriptor_shadow_verify_copy_source_lost[kind].load(
+                    std::memory_order_relaxed);
+            total[column] = static_cast<unsigned long long>(value);
+            window[column] =
+                static_cast<unsigned long long>(value - previous[kind][column]);
+            previous[kind][column] = value;
+        }
+        const auto column = [](DescriptorShadowVerifyResult result) {
+            return static_cast<size_t>(result);
+        };
+        const size_t lost = kDescriptorShadowVerifyResultCount;
+        log_vrs_line(
+            "PERF descriptor verify kind=%s match=+%llu/%llu "
+            "empty=+%llu/%llu legacy_only_stale=+%llu/%llu "
+            "legacy_only=+%llu/%llu shadow_only=+%llu/%llu "
+            "differ=+%llu/%llu transient=+%llu/%llu "
+            "copy_source_lost=+%llu/%llu",
+            kKindNames[kind],
+            window[column(DescriptorShadowVerifyResult::Match)],
+            total[column(DescriptorShadowVerifyResult::Match)],
+            window[column(DescriptorShadowVerifyResult::Empty)],
+            total[column(DescriptorShadowVerifyResult::Empty)],
+            window[column(DescriptorShadowVerifyResult::LegacyOnlyStale)],
+            total[column(DescriptorShadowVerifyResult::LegacyOnlyStale)],
+            window[column(DescriptorShadowVerifyResult::LegacyOnly)],
+            total[column(DescriptorShadowVerifyResult::LegacyOnly)],
+            window[column(DescriptorShadowVerifyResult::ShadowOnly)],
+            total[column(DescriptorShadowVerifyResult::ShadowOnly)],
+            window[column(DescriptorShadowVerifyResult::Differ)],
+            total[column(DescriptorShadowVerifyResult::Differ)],
+            window[column(DescriptorShadowVerifyResult::Transient)],
+            total[column(DescriptorShadowVerifyResult::Transient)],
+            window[lost], total[lost]);
+    }
+    for (size_t list = 0; list < kDescriptorShadowVerifyExampleLists; ++list) {
+        for (auto& example : g_descriptor_shadow_verify_examples[list]) {
+            if (example.logged ||
+                !example.ready.load(std::memory_order_acquire)) {
+                continue;
+            }
+            example.logged = true;
+            log_vrs_line(
+                "PERF descriptor verify example result=%s kind=%s "
+                "handle=0x%zX shadow=0x%llX,%llu,%llu,%llu "
+                "legacy=0x%llX,%llu,%llu,%llu",
+                kListNames[list],
+                kKindNames[static_cast<size_t>(example.kind)],
+                example.cpu_handle,
+                static_cast<unsigned long long>(example.shadow[0]),
+                static_cast<unsigned long long>(example.shadow[1]),
+                static_cast<unsigned long long>(example.shadow[2]),
+                static_cast<unsigned long long>(example.shadow[3]),
+                static_cast<unsigned long long>(example.legacy[0]),
+                static_cast<unsigned long long>(example.legacy[1]),
+                static_cast<unsigned long long>(example.legacy[2]),
+                static_cast<unsigned long long>(example.legacy[3]));
+        }
+    }
+}
 
 // Runs once with the game's device, before the renderer detours are
 // installed, so it decides which detours install_reverse_hooks and
@@ -15906,6 +17170,38 @@ void load_config() {
         if (g_config.perf_skip_descriptor_tracking) {
             log_vrs_line("PERF skip_descriptor_tracking=1: descriptor-copy metadata off");
         }
+        // [PERF:DESCRIPTOR-SHADOW-STORE 8/14] Release switch: read whatever
+        // the [debug] switches say. Verification follows the other [perf]
+        // switches and needs the VRS census log.
+        {
+            const auto descriptor_store = read_ini_string(
+                "engine", "descriptor_metadata_store", "shadow");
+            g_config.descriptor_metadata_store = descriptor_store == "legacy"
+                ? DescriptorMetadataStore::Legacy
+                : DescriptorMetadataStore::Shadow;
+            if (descriptor_store != "shadow" && descriptor_store != "legacy") {
+                log_descriptor_store_line(
+                    "Descriptor metadata store %s is unknown; using shadow",
+                    descriptor_store.c_str());
+            }
+        }
+        g_config.perf_descriptor_shadow_verify = g_config.vrs_log_file &&
+            read_ini_bool("perf", "descriptor_shadow_verify", false);
+        if (g_config.perf_descriptor_shadow_verify) {
+            log_vrs_line(
+                "PERF descriptor_shadow_verify=1: shadow and legacy descriptor "
+                "stores both kept, every load compared (store=%s)",
+                descriptor_shadow_store_selected() ? "shadow" : "legacy");
+        }
+        // [PERF:PAIR-BARRIER-SPIN 2/3] Release switch, read whatever the
+        // [debug] switches say.
+        g_config.pair_barrier_spin_pauses = static_cast<uint32_t>(std::clamp(
+            read_ini_int("engine", "pair_barrier_spin_pauses", 4096),
+            0, 1 << 20));
+        log_vrs_line("PERF pair_barrier_spin_pauses=%u%s",
+            g_config.pair_barrier_spin_pauses,
+            g_config.pair_barrier_spin_pauses == 0
+                ? " (QPC-timed 200 us spin)" : "");
 
         const auto temporal_backend = read_ini_string(
             "engine", "temporal_backend", "auto");
@@ -15983,6 +17279,8 @@ void load_config() {
             !g_config.logging_enabled &&
             !g_config.cinema_camera_diagnostics &&
             !g_config.streamline_trace;
+        // [PERF:DESCRIPTOR-COPY-ROUTE 2/4] Every route input is final here.
+        refresh_descriptor_copy_route_mask();
         if (taau_drop_diagnostics_active()) {
             log_taau_trace_line(
                 "TAAU drop trace enabled mode=%d backend=%s general_logging=%d runtime_diagnostics=%d",
@@ -21018,45 +22316,63 @@ bool resolve_descriptor_table_resource(
         descriptor_out, cpu_handle_out);
 }
 
+// [PERF:DESCRIPTOR-SHADOW-STORE 9/14] The g_resource_descriptors propagation
+// (TAAU and RT; the caller holds g_reverse_mutex) is shared unchanged by both
+// stores. Only the retained-HUD resource mirror it refreshes differs.
+bool propagate_legacy_resource_descriptor(
+    SIZE_T dest_cpu, SIZE_T src_cpu, bool shadow_resource_mirror) {
+    auto resource_it = g_resource_descriptors.find(src_cpu);
+    if (resource_it == g_resource_descriptors.end()) {
+        return false;
+    }
+    g_resource_descriptors[dest_cpu] = resource_it->second;
+    if (shadow_resource_mirror) {
+        store_resource_descriptor_fast_shadow(
+            dest_cpu, resource_it->second.resource,
+            resource_it->second.format);
+    } else {
+        store_resource_descriptor_fast_legacy(
+            dest_cpu, resource_it->second.resource,
+            resource_it->second.format);
+    }
+    const uint32_t propagated_bit =
+        resource_it->second.format == DXGI_FORMAT_R16G16B16A16_FLOAT ? 1u : 2u;
+    const uint32_t previous_mask =
+        g_taau_descriptor_propagated_mask.fetch_or(propagated_bit);
+    if ((previous_mask & propagated_bit) == 0) {
+        log_line("TAAU bootstrap propagated type=%s src=0x%zX dest=0x%zX",
+            propagated_bit == 1 ? "motion" : "depth", src_cpu, dest_cpu);
+    }
+    return true;
+}
+
+// Legacy-store copy, used only by the per-descriptor loop of the copy hooks.
 void copy_cbv_descriptor_metadata(
     SIZE_T dest_cpu,
     SIZE_T src_cpu,
     UINT increment,
     bool copy_legacy_resource_metadata) {
     CbvDescriptorInfo source_cbv{};
-    const bool cbv_copied = load_cbv_descriptor(src_cpu, source_cbv);
+    const bool cbv_copied = load_cbv_descriptor_legacy(src_cpu, source_cbv);
     if (cbv_copied) {
-        store_cbv_descriptor(dest_cpu, source_cbv);
+        store_cbv_descriptor_legacy(dest_cpu, source_cbv);
     }
     bool copied = cbv_copied;
     ID3D12Resource* fast_resource{};
     DXGI_FORMAT fast_format{DXGI_FORMAT_UNKNOWN};
-    if (load_resource_descriptor_fast(
+    if (load_resource_descriptor_fast_legacy(
             src_cpu, fast_resource, fast_format)) {
-        store_resource_descriptor_fast(dest_cpu, fast_resource, fast_format);
+        store_resource_descriptor_fast_legacy(
+            dest_cpu, fast_resource, fast_format);
         copied = true;
     }
     // [PERF:NOAA-DESCRIPTOR-COPY V1441 1/3] Smoke, foliage and focus consume
     // the lock-free CBV cache; retained HUD consumes the lock-free resource
     // mirror. The legacy map is populated only by TAAU, RT or diagnostics, so
     // do not probe it (under g_reverse_mutex) in a clean No-AA run.
-    if (copy_legacy_resource_metadata) {
-        auto resource_it = g_resource_descriptors.find(src_cpu);
-        if (resource_it != g_resource_descriptors.end()) {
-            g_resource_descriptors[dest_cpu] = resource_it->second;
-            store_resource_descriptor_fast(
-                dest_cpu, resource_it->second.resource,
-                resource_it->second.format);
-            const uint32_t propagated_bit =
-                resource_it->second.format == DXGI_FORMAT_R16G16B16A16_FLOAT ? 1u : 2u;
-            const uint32_t previous_mask =
-                g_taau_descriptor_propagated_mask.fetch_or(propagated_bit);
-            if ((previous_mask & propagated_bit) == 0) {
-                log_line("TAAU bootstrap propagated type=%s src=0x%zX dest=0x%zX",
-                    propagated_bit == 1 ? "motion" : "depth", src_cpu, dest_cpu);
-            }
-            copied = true;
-        }
+    if (copy_legacy_resource_metadata &&
+        propagate_legacy_resource_descriptor(dest_cpu, src_cpu, false)) {
+        copied = true;
     }
     if (!copied) {
         return;
@@ -21072,6 +22388,321 @@ void copy_cbv_descriptor_metadata(
             source_cbv.size_in_bytes,
             increment);
     }
+}
+
+// [PERF:DESCRIPTOR-SHADOW-STORE 10/14] Range-wise shadow copy. A run stays
+// inside one source and one destination page and copies its entries in
+// handle order with seqlock writes: no hashing, lock or syscall per
+// descriptor. Destination := source for every kind, "empty" included. The
+// legacy store left the destination's CBV and retained-HUD resource as they
+// were when the source had none, so an older descriptor's buffer survived
+// there; consumers now see no metadata, which every one of them already
+// handles. Witcher Senses targets were always copied this way.
+std::atomic<uint32_t> g_descriptor_shadow_copy_log_count{};
+
+UINT descriptor_shadow_run_limit(SIZE_T cpu_handle) {
+    const auto& layout = g_descriptor_shadow_layout;
+    const size_t index =
+        static_cast<size_t>(cpu_handle >> layout.granule_shift) &
+        (kDescriptorShadowPageEntries - 1);
+    const size_t remaining = kDescriptorShadowPageEntries - index;
+    if (layout.stride_is_one) {
+        return static_cast<UINT>(remaining);
+    }
+    return static_cast<UINT>(
+        (remaining + layout.entry_stride - 1) / layout.entry_stride);
+}
+
+// The header decides most copied entries. Sequence and header share the
+// entry's first cache line; the value fields can straddle into the next. Both
+// readers below take one seqlock snapshot and wait out a concurrent writer
+// like read_descriptor_shadow_entry, but load the value fields only when the
+// header leaves the answer open.
+//
+// Copy destination: whether the entry must be rewritten to hold record
+// (header included); current_header returns the header it holds. An empty
+// copy onto an entry that already reads as empty changes nothing whatever
+// the owner bits say, so it stamps no owner, takes no lock and dirties no
+// line. Rebuilt tables mostly repeat their previous contents; an equal entry
+// keeps its cache line clean too.
+bool descriptor_shadow_copy_changes_entry(
+    const DescriptorShadowEntry& entry,
+    const DescriptorShadowRecord& record,
+    uint32_t& current_header) {
+    uint32_t spins = 0;
+    for (;;) {
+        const uint32_t begin = entry.sequence.load(std::memory_order_acquire);
+        if ((begin & 1u) == 0) {
+            const uint32_t header =
+                entry.header.load(std::memory_order_relaxed);
+            bool changed = ((record.header | header) &
+                kDescriptorShadowContentMask) != 0;
+            if (changed && header == record.header) {
+                DescriptorShadowRecord current{};
+                load_descriptor_shadow_fields(entry, current);
+                changed = current != record;
+            }
+            std::atomic_thread_fence(std::memory_order_acquire);
+            if (entry.sequence.load(std::memory_order_relaxed) == begin) {
+                current_header = header;
+                return changed;
+            }
+        }
+        descriptor_shadow_backoff(spins);
+    }
+}
+
+// A copy source another owner holds reads as empty. One without metadata
+// kinds is empty too: every store sets a kind with its fields, and the copy
+// and the Witcher Senses invalidation clear them together, so its value
+// fields are not loaded. Its header stays for the copied-empty markers of
+// verification.
+void read_descriptor_shadow_copy_source(
+    const DescriptorShadowEntry& entry,
+    uint32_t owner,
+    DescriptorShadowRecord& record) {
+    uint32_t spins = 0;
+    for (;;) {
+        const uint32_t begin = entry.sequence.load(std::memory_order_acquire);
+        if ((begin & 1u) == 0) {
+            const uint32_t header =
+                entry.header.load(std::memory_order_relaxed);
+            const bool owned = (header & kDescriptorShadowOwnerMask) == owner;
+            if (owned && (header & kDescriptorShadowMetadataMask) != 0) {
+                load_descriptor_shadow_fields(entry, record);
+            } else {
+                record = DescriptorShadowRecord{};
+                record.header = owned ? header : 0u;
+            }
+            std::atomic_thread_fence(std::memory_order_acquire);
+            if (entry.sequence.load(std::memory_order_relaxed) == begin) {
+                return;
+            }
+        }
+        descriptor_shadow_backoff(spins);
+    }
+}
+
+// One copy_descriptor_shadow_ranges call: its switches, read once, and the
+// last source and destination pages, kept across runs (a gather writes one
+// contiguous destination range from many one-descriptor sources). A found
+// page is never freed; a miss is looked up again by the next run.
+struct DescriptorShadowCopyState {
+    UINT increment{};
+    bool copy_entries{};
+    bool copy_legacy_resource_metadata{};
+    bool verify{};
+    bool log_copies{};
+    uintptr_t src_page_key{};
+    DescriptorShadowPage* src_page{};
+    uintptr_t dest_page_key{};
+    DescriptorShadowPage* dest_page{};
+};
+
+void copy_descriptor_shadow_run(
+    DescriptorShadowCopyState& state,
+    SIZE_T dest_cpu,
+    SIZE_T src_cpu,
+    UINT count) {
+    const auto& layout = g_descriptor_shadow_layout;
+    const UINT increment = state.increment;
+    const bool copy_legacy_resource_metadata =
+        state.copy_legacy_resource_metadata;
+    DescriptorShadowLocation src{};
+    DescriptorShadowLocation dest{};
+    DescriptorShadowPage* src_page{};
+    DescriptorShadowPage* dest_page{};
+    if (state.copy_entries) {
+        src = locate_descriptor_shadow_entry(src_cpu);
+        dest = locate_descriptor_shadow_entry(dest_cpu);
+        // An untracked source page only empties destination entries, and an
+        // absent destination page already is empty.
+        if (src_cpu != 0) {
+            if (state.src_page == nullptr ||
+                state.src_page_key != src.page_key) {
+                state.src_page =
+                    find_descriptor_shadow_page(src.page_key, false);
+                state.src_page_key = src.page_key;
+            }
+            src_page = state.src_page;
+        }
+        if (dest_cpu != 0) {
+            if (state.dest_page == nullptr ||
+                state.dest_page_key != dest.page_key) {
+                state.dest_page = find_descriptor_shadow_page(
+                    dest.page_key, src_page != nullptr);
+                state.dest_page_key = dest.page_key;
+            }
+            dest_page = state.dest_page;
+        }
+    }
+    for (UINT offset = 0; offset < count; ++offset) {
+        const size_t step = static_cast<size_t>(offset) * layout.entry_stride;
+        const SIZE_T dest_handle =
+            dest_cpu + static_cast<SIZE_T>(offset) * increment;
+        const SIZE_T src_handle =
+            src_cpu + static_cast<SIZE_T>(offset) * increment;
+        DescriptorShadowRecord record{};
+        if (src_page != nullptr) {
+            read_descriptor_shadow_copy_source(
+                src_page->entries[src.index + step], src.owner, record);
+        }
+        if (dest_page != nullptr) {
+            const uint32_t kinds =
+                record.header & kDescriptorShadowMetadataMask;
+            const uint32_t copied_empty = state.verify
+                ? descriptor_shadow_verify_copied_empty(record, src_handle)
+                : 0u;
+            record.header = dest.owner | kinds | copied_empty;
+            auto& entry = dest_page->entries[dest.index + step];
+            uint32_t current_header{};
+            if (descriptor_shadow_copy_changes_entry(
+                    entry, record, current_header)) {
+                if ((current_header & kDescriptorShadowOwned) != 0 &&
+                    (current_header & kDescriptorShadowOwnerMask) !=
+                        dest.owner) {
+                    g_descriptor_shadow_owner_collisions.fetch_add(
+                        1, std::memory_order_relaxed);
+                }
+                const uint32_t locked = lock_descriptor_shadow_entry(entry);
+                store_descriptor_shadow_fields(entry, record);
+                unlock_descriptor_shadow_entry(entry, locked);
+            }
+        }
+        if (state.log_copies &&
+            (record.header & kDescriptorShadowHasCbv) != 0 &&
+            take_bounded_log_slot(g_descriptor_shadow_copy_log_count, 40)) {
+            log_line("Reverse CBV descriptor copy src=0x%zX dest=0x%zX gpuva=0x%llX size=%u inc=%u",
+                src_handle,
+                dest_handle,
+                static_cast<unsigned long long>(record.cbv_gpu_va),
+                record.cbv_size_in_bytes,
+                increment);
+        }
+        if (copy_legacy_resource_metadata) {
+            propagate_legacy_resource_descriptor(
+                dest_handle, src_handle, true);
+        }
+    }
+}
+
+// route = descriptor_copy_route_mask() of the calling hook.
+void copy_descriptor_shadow_ranges(
+    UINT num_dest_descriptor_ranges,
+    const D3D12_CPU_DESCRIPTOR_HANDLE* dest_descriptor_range_starts,
+    const UINT* dest_descriptor_range_sizes,
+    UINT num_src_descriptor_ranges,
+    const D3D12_CPU_DESCRIPTOR_HANDLE* src_descriptor_range_starts,
+    const UINT* src_descriptor_range_sizes,
+    UINT increment,
+    uint32_t route) {
+    const auto& layout = g_descriptor_shadow_layout;
+    const bool ready = layout.ready.load(std::memory_order_acquire);
+    DescriptorShadowCopyState state{};
+    state.increment = increment;
+    state.copy_entries = ready && increment == layout.increment;
+    state.copy_legacy_resource_metadata =
+        (route & kDescriptorCopyRouteLegacyResource) != 0;
+    state.verify = (route & kDescriptorCopyRouteVerify) != 0;
+    state.log_copies = (route & kDescriptorCopyRouteLogCopies) != 0;
+    if (!state.copy_entries) {
+        if (ready) {
+            g_descriptor_shadow_increment_mismatches.fetch_add(
+                1, std::memory_order_relaxed);
+        }
+        if (!state.copy_legacy_resource_metadata) {
+            return;
+        }
+    }
+    UINT dest_range = 0;
+    UINT src_range = 0;
+    UINT dest_index = 0;
+    UINT src_index = 0;
+    // Same range walk as the legacy loop, advanced a run at a time.
+    while (dest_range < num_dest_descriptor_ranges &&
+           src_range < num_src_descriptor_ranges) {
+        const auto dest_size = dest_descriptor_range_sizes != nullptr
+            ? dest_descriptor_range_sizes[dest_range] : 1u;
+        const auto src_size = src_descriptor_range_sizes != nullptr
+            ? src_descriptor_range_sizes[src_range] : 1u;
+        if (dest_size == 0 || src_size == 0) {
+            break;
+        }
+        const auto dest_cpu = dest_descriptor_range_starts[dest_range].ptr +
+            static_cast<SIZE_T>(dest_index) * increment;
+        const auto src_cpu = src_descriptor_range_starts[src_range].ptr +
+            static_cast<SIZE_T>(src_index) * increment;
+        UINT run = std::min(dest_size - dest_index, src_size - src_index);
+        if (state.copy_entries) {
+            // Nested: the initializer-list form calls the STL's vectorized
+            // minmax dispatcher.
+            run = std::min(std::min(run, descriptor_shadow_run_limit(dest_cpu)),
+                descriptor_shadow_run_limit(src_cpu));
+        }
+        copy_descriptor_shadow_run(state, dest_cpu, src_cpu, run);
+        dest_index += run;
+        src_index += run;
+        if (dest_index >= dest_size) {
+            ++dest_range;
+            dest_index = 0;
+        }
+        if (src_index >= src_size) {
+            ++src_range;
+            src_index = 0;
+        }
+    }
+}
+
+// [PERF:DESCRIPTOR-SHADOW-STORE 11/14] Fix the granule from the device's
+// CBV_SRV_UAV increment before any descriptor detour exists. An increment
+// that is not a multiple of 8, or above 4096, has no compact layout; the run
+// then keeps the legacy store, so no store is ever half populated.
+void initialize_descriptor_shadow_store(UINT increment) {
+    auto& layout = g_descriptor_shadow_layout;
+    if (layout.ready.load(std::memory_order_relaxed)) {
+        return;
+    }
+    if (!descriptor_shadow_store_maintained()) {
+        static std::atomic<bool> legacy_logged{};
+        if (!legacy_logged.exchange(true, std::memory_order_relaxed)) {
+            log_descriptor_store_line(
+                "Descriptor metadata store=legacy increment=%u verify=0",
+                increment);
+        }
+        return;
+    }
+    if (increment == 0 ||
+        increment % (1u << kDescriptorShadowMinGranuleShift) != 0 ||
+        increment > kDescriptorShadowMaxIncrement) {
+        g_config.descriptor_metadata_store = DescriptorMetadataStore::Legacy;
+        g_config.perf_descriptor_shadow_verify = false;
+        // [PERF:DESCRIPTOR-COPY-ROUTE 3/4] No copy hook exists yet.
+        refresh_descriptor_copy_route_mask();
+        log_descriptor_store_line(
+            "Descriptor metadata store: increment %u has no shadow layout; "
+            "using legacy",
+            increment);
+        return;
+    }
+    uint32_t granule_shift = 0;
+    while (granule_shift < kDescriptorShadowMaxGranuleShift &&
+           (increment & (1u << granule_shift)) == 0) {
+        ++granule_shift;
+    }
+    layout.increment = increment;
+    layout.granule_shift = granule_shift;
+    layout.page_shift = granule_shift + kDescriptorShadowPageEntryBits;
+    layout.entry_stride = increment >> granule_shift;
+    layout.stride_is_one = layout.entry_stride == 1;
+    layout.owner_tag_mask = (SIZE_T{1} << granule_shift) - 1;
+    layout.ready.store(true, std::memory_order_release);
+    log_descriptor_store_line(
+        "Descriptor metadata store=%s increment=%u granule=%u stride=%u "
+        "page_bytes=%zu verify=%d",
+        descriptor_shadow_store_selected() ? "shadow" : "legacy", increment,
+        1u << granule_shift, layout.entry_stride,
+        sizeof(DescriptorShadowPage),
+        g_config.perf_descriptor_shadow_verify ? 1 : 0);
 }
 
 // Called only by the device descriptor-copy hooks, never from Draw/Dispatch.
@@ -21112,6 +22743,9 @@ void install_reverse_hooks() {
         g_d3d12_device == nullptr) {
         return;
     }
+    // [PERF:DESCRIPTOR-SHADOW-STORE 12/14]
+    initialize_descriptor_shadow_store(cached_descriptor_increment(
+        g_d3d12_device, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV));
 
     const bool metadata_hooks = taau_metadata_hooks_needed() ||
         focus_projection_metadata_hooks_needed() ||
@@ -24150,9 +25784,20 @@ void STDMETHODCALLTYPE hook_copy_descriptors(
         src_descriptor_range_sizes,
         descriptor_heaps_type);
 
+    // [PERF:CPU-MEASUREMENT 5/5]
+    if (g_config.perf_skip_descriptor_tracking) {
+        return;
+    }
+    // [PERF:DESCRIPTOR-COPY-ROUTE 4/4] One load answers the configured
+    // routes; descriptor_metadata_hooks_needed() runs in full only when its
+    // configured terms are all false.
+    const uint32_t route = descriptor_copy_route_mask();
     const bool witcher_sense_metadata =
-        witcher_sense_history_suppression_route_configured();
-    if ((!descriptor_metadata_hooks_needed() && !witcher_sense_metadata) ||
+        (route & kDescriptorCopyRouteWitcherSense) != 0;
+    const bool metadata_hooks =
+        (route & kDescriptorCopyRouteMetadataConfigured) != 0 ||
+        descriptor_metadata_hooks_needed();
+    if ((!metadata_hooks && !witcher_sense_metadata) ||
         descriptor_heaps_type !=
             D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV ||
         dest_descriptor_range_starts == nullptr || src_descriptor_range_starts == nullptr) {
@@ -24166,23 +25811,30 @@ void STDMETHODCALLTYPE hook_copy_descriptors(
     UINT src_range = 0;
     UINT dest_index = 0;
     UINT src_index = 0;
-    // [PERF:WITCHER-SENSE-BOUNDED-DESCRIPTORS V1499 3/5] Witcher Senses owns
-    // only its bounded target cache here. It no longer enables the generic
-    // CBV mirror, legacy resource propagation, or global reverse mutex.
-    const bool cbv_metadata = taau_metadata_hooks_needed() ||
-        real_smoke_world_up_binding_route_active() ||
-        foliage_bound_basis_route_active() ||
-        focus_projection_metadata_hooks_needed() ||
-        rt_symmetric_dlss_per_eye_ao_history_active();
-    const bool legacy_resource_metadata = taau_metadata_hooks_needed() ||
-        rt_symmetric_dlss_per_eye_ao_history_active();
-    const bool fast_resource_metadata =
-        descriptor_metadata_hooks_needed() && !cbv_metadata;
+    const bool cbv_metadata = (route & kDescriptorCopyRouteCbv) != 0;
+    const bool legacy_resource_metadata =
+        (route & kDescriptorCopyRouteLegacyResource) != 0;
+    const bool fast_resource_metadata = metadata_hooks && !cbv_metadata;
     std::unique_lock<std::mutex> lock{g_reverse_mutex, std::defer_lock};
     if (descriptor_heaps_type ==
             D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV &&
         legacy_resource_metadata) {
         lock.lock();
+    }
+
+    // [PERF:DESCRIPTOR-SHADOW-STORE 13/14] The shadow store copies every
+    // metadata kind run by run. The loop below is the legacy store (and the
+    // reference under verification). g_reverse_mutex stays held for TAAU/RT,
+    // whose readers recheck CBVs under it.
+    if ((route & kDescriptorCopyRouteShadowStore) != 0) {
+        copy_descriptor_shadow_ranges(
+            num_dest_descriptor_ranges, dest_descriptor_range_starts,
+            dest_descriptor_range_sizes, num_src_descriptor_ranges,
+            src_descriptor_range_starts, src_descriptor_range_sizes,
+            increment, route);
+        if ((route & kDescriptorCopyRouteLegacyStore) == 0) {
+            return;
+        }
     }
 
     while (dest_range < num_dest_descriptor_ranges && src_range < num_src_descriptor_ranges) {
@@ -24204,8 +25856,10 @@ void STDMETHODCALLTYPE hook_copy_descriptors(
         } else if (fast_resource_metadata) {
             ID3D12Resource* resource{};
             DXGI_FORMAT format{DXGI_FORMAT_UNKNOWN};
-            if (load_resource_descriptor_fast(src_cpu, resource, format)) {
-                store_resource_descriptor_fast(dest_cpu, resource, format);
+            if (load_resource_descriptor_fast_legacy(
+                    src_cpu, resource, format)) {
+                store_resource_descriptor_fast_legacy(
+                    dest_cpu, resource, format);
             }
         }
 
@@ -24235,9 +25889,16 @@ void STDMETHODCALLTYPE hook_copy_descriptors_simple(
         src_descriptor_range_start,
         descriptor_heaps_type);
 
+    if (g_config.perf_skip_descriptor_tracking) {
+        return;
+    }
+    const uint32_t route = descriptor_copy_route_mask();
     const bool witcher_sense_metadata =
-        witcher_sense_history_suppression_route_configured();
-    if ((!descriptor_metadata_hooks_needed() && !witcher_sense_metadata) ||
+        (route & kDescriptorCopyRouteWitcherSense) != 0;
+    const bool metadata_hooks =
+        (route & kDescriptorCopyRouteMetadataConfigured) != 0 ||
+        descriptor_metadata_hooks_needed();
+    if ((!metadata_hooks && !witcher_sense_metadata) ||
         descriptor_heaps_type !=
             D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV ||
         dest_descriptor_range_start.ptr == 0 || src_descriptor_range_start.ptr == 0) {
@@ -24247,20 +25908,25 @@ void STDMETHODCALLTYPE hook_copy_descriptors_simple(
     // [PERF:DESCRIPTOR-INCREMENT-CACHE 3/3]
     const auto increment =
         cached_descriptor_increment(device, descriptor_heaps_type);
-    const bool cbv_metadata = taau_metadata_hooks_needed() ||
-        real_smoke_world_up_binding_route_active() ||
-        foliage_bound_basis_route_active() ||
-        focus_projection_metadata_hooks_needed() ||
-        rt_symmetric_dlss_per_eye_ao_history_active();
-    const bool legacy_resource_metadata = taau_metadata_hooks_needed() ||
-        rt_symmetric_dlss_per_eye_ao_history_active();
-    const bool fast_resource_metadata =
-        descriptor_metadata_hooks_needed() && !cbv_metadata;
+    const bool cbv_metadata = (route & kDescriptorCopyRouteCbv) != 0;
+    const bool legacy_resource_metadata =
+        (route & kDescriptorCopyRouteLegacyResource) != 0;
+    const bool fast_resource_metadata = metadata_hooks && !cbv_metadata;
     std::unique_lock<std::mutex> lock{g_reverse_mutex, std::defer_lock};
     if (descriptor_heaps_type ==
             D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV &&
         legacy_resource_metadata) {
         lock.lock();
+    }
+    // [PERF:DESCRIPTOR-SHADOW-STORE 14/14]
+    if ((route & kDescriptorCopyRouteShadowStore) != 0) {
+        copy_descriptor_shadow_ranges(
+            1, &dest_descriptor_range_start, &num_descriptors,
+            1, &src_descriptor_range_start, &num_descriptors,
+            increment, route);
+        if ((route & kDescriptorCopyRouteLegacyStore) == 0) {
+            return;
+        }
     }
     for (UINT index = 0; index < num_descriptors; ++index) {
         const auto dest_cpu = dest_descriptor_range_start.ptr + static_cast<SIZE_T>(index) * increment;
@@ -24275,8 +25941,10 @@ void STDMETHODCALLTYPE hook_copy_descriptors_simple(
         } else if (fast_resource_metadata) {
             ID3D12Resource* resource{};
             DXGI_FORMAT format{DXGI_FORMAT_UNKNOWN};
-            if (load_resource_descriptor_fast(src_cpu, resource, format)) {
-                store_resource_descriptor_fast(dest_cpu, resource, format);
+            if (load_resource_descriptor_fast_legacy(
+                    src_cpu, resource, format)) {
+                store_resource_descriptor_fast_legacy(
+                    dest_cpu, resource, format);
             }
         }
     }
@@ -25423,16 +27091,55 @@ void STDMETHODCALLTYPE hook_set_compute_root_signature(
     g_set_compute_root_signature(command_list, root_signature);
 }
 
+// [PERF:AIM-PROBE-PIPELINES 2/3]
+bool aim_probe_pipeline(ID3D12PipelineState* pipeline) {
+    if (g_aim_probe_pipelines_overflow.load(std::memory_order_acquire)) {
+        return pipeline_matches_probe(lookup_pipeline_info(pipeline),
+            ShaderFingerprint::AimProbeVs, ShaderFingerprint::AimProbePs);
+    }
+    for (const auto& slot : g_aim_probe_pipelines) {
+        if (slot.load(std::memory_order_acquire) == pipeline) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Diagnostics only ([debug] first_person_aim_diagnostics): the set has to
+// answer exactly as the locked map lookup it replaced.
+void check_aim_probe_pipeline(
+    ID3D12PipelineState* pipeline, bool aim_probe, uint64_t present) {
+    const bool expected = pipeline_matches_probe(
+        lookup_pipeline_info(pipeline),
+        ShaderFingerprint::AimProbeVs, ShaderFingerprint::AimProbePs);
+    static std::atomic<uint32_t> mismatch_logs{};
+    static std::atomic<uint32_t> hit_logs{};
+    if (expected != aim_probe) {
+        if (mismatch_logs.fetch_add(1, std::memory_order_relaxed) < 16) {
+            log_first_person_aim_diagnostic(
+                "FPAIM probe set mismatch present=%llu pso=%p set=%d lookup=%d",
+                static_cast<unsigned long long>(present), pipeline,
+                aim_probe ? 1 : 0, expected ? 1 : 0);
+        }
+    } else if (aim_probe &&
+        hit_logs.fetch_add(1, std::memory_order_relaxed) < 4) {
+        log_first_person_aim_diagnostic(
+            "FPAIM probe set hit present=%llu pso=%p lookup=1",
+            static_cast<unsigned long long>(present), pipeline);
+    }
+}
+
+// [PERF:AIM-PROBE-PIPELINES 3/3] indexed comes from the caller instead of a
+// strstr over the draw source. No source ever contained "Indexed": the
+// lowercase "draw-indexed-cbv" route counts as non-indexed on purpose (see
+// hook_draw_indexed_instanced), so both callers pass false.
 void sample_aim_pso_probe(
     ID3D12GraphicsCommandList* command_list,
-    const char* source,
+    bool indexed,
     UINT element_count,
     UINT instance_count) {
-    const bool indexed =
-        source != nullptr && strstr(source, "Indexed") != nullptr;
     const bool functional_candidate =
-        source != nullptr && !indexed &&
-        element_count == 6 && instance_count == 1;
+        !indexed && element_count == 6 && instance_count == 1;
     if (!functional_candidate && !g_aim_pso_probe_active.load()) {
         return;
     }
@@ -25440,10 +27147,12 @@ void sample_aim_pso_probe(
     const uint64_t present = g_present_count.load();
     auto* pipeline = load_command_list_pipeline(command_list);
     if (functional_candidate && pipeline != nullptr) {
-        const auto pipeline_info = lookup_pipeline_info(pipeline);
-        if (pipeline_matches_probe(pipeline_info,
-                ShaderFingerprint::AimProbeVs, ShaderFingerprint::AimProbePs)) {
+        const bool aim_probe = aim_probe_pipeline(pipeline);
+        if (aim_probe) {
             g_aim_crosshair_last_present.store(present);
+        }
+        if (g_config.first_person_aim_diagnostics) {
+            check_aim_probe_pipeline(pipeline, aim_probe, present);
         }
     }
     if (!g_aim_pso_probe_active.load()) {
@@ -25488,7 +27197,7 @@ void sample_draw_cbvs(
     const char* source,
     UINT element_count,
     UINT instance_count) {
-    sample_aim_pso_probe(command_list, source, element_count, instance_count);
+    sample_aim_pso_probe(command_list, false, element_count, instance_count);
     if (!reverse_enabled() || !g_config.reverse_cbv_probe) {
         return;
     }
@@ -26148,7 +27857,7 @@ void STDMETHODCALLTYPE hook_draw_indexed_instanced(
     if (clean_mode3_fast_path) {
         if (index_count_per_instance == 6 && instance_count == 1) {
             sample_aim_pso_probe(
-                command_list, "draw-indexed-cbv",
+                command_list, false,
                 index_count_per_instance, instance_count);
         }
         if (focus_fire_selected != nullptr) {
@@ -34562,22 +36271,35 @@ bool wait_for_engine_pair_completion(uint64_t pair_id, uint64_t timeout_ms) {
     // (a hitch), and holding a full logical core at boost clock for the rest
     // of the up-to-64ms timeout is what was pinning AMD X3D parts against
     // their PPT/TDC limits every frame.
-    static const long long kQpcFrequency = [] {
-        LARGE_INTEGER frequency{};
-        QueryPerformanceFrequency(&frequency);
-        return frequency.QuadPart;
-    }();
-    const long long spin_budget_ticks = std::max(1LL, kQpcFrequency / 5000); // ~200us
-    LARGE_INTEGER spin_start{};
-    QueryPerformanceCounter(&spin_start);
+    // [PERF:PAIR-BARRIER-SPIN 3/3] The window is a pause budget instead of a
+    // QueryPerformanceCounter deadline: QPC is a syscall under Proton, and
+    // the timed loop made one per pause. The default 4096 pauses last roughly
+    // 60-130 us on current desktop cores at 4-5 GHz.
     bool signaled = false;
-    while (!(signaled = check_pair_signals())) {
-        LARGE_INTEGER now{};
-        QueryPerformanceCounter(&now);
-        if (now.QuadPart - spin_start.QuadPart >= spin_budget_ticks) {
-            break;
+    const uint32_t spin_pauses = g_config.pair_barrier_spin_pauses;
+    if (spin_pauses != 0) {
+        uint32_t pauses = 0;
+        while (!(signaled = check_pair_signals()) && pauses < spin_pauses) {
+            ++pauses;
+            YieldProcessor();
         }
-        YieldProcessor();
+    } else {
+        static const long long kQpcFrequency = [] {
+            LARGE_INTEGER frequency{};
+            QueryPerformanceFrequency(&frequency);
+            return frequency.QuadPart;
+        }();
+        const long long spin_budget_ticks = std::max(1LL, kQpcFrequency / 5000); // ~200us
+        LARGE_INTEGER spin_start{};
+        QueryPerformanceCounter(&spin_start);
+        while (!(signaled = check_pair_signals())) {
+            LARGE_INTEGER now{};
+            QueryPerformanceCounter(&now);
+            if (now.QuadPart - spin_start.QuadPart >= spin_budget_ticks) {
+                break;
+            }
+            YieldProcessor();
+        }
     }
 
     // [FIX:PRODUCER-BARRIER-WAKE 3/8] Past the spin budget, park on the
