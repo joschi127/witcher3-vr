@@ -502,3 +502,41 @@ Layout changes that block a direct port:
 - Workaround: on 5.01 a square `render_width/height` drops 8 rows (2880x2872, 0.3 % aspect
   error) for the game viewport and the OpenXR swapchain. Verified with the null HMD: no crash,
   full sky; headset check open.
+
+## 2026-10-23: taken over from kaarele/witcher3-remastered-vr
+
+The following sections come from the port status log of
+[kaarele/witcher3-remastered-vr](https://github.com/kaarele/witcher3-remastered-vr) (MIT, state
+`e729bd9`), taken over feature by feature as decided on 2026-10-22. Measurements in his sections
+were made on Linux/Proton with NVIDIA unless stated otherwise; our own results follow each section.
+
+### Fixed foveated rendering, Phase 0: VRS measurement build (`[vrs] mode=3`)
+- Purpose: measure the most variable rate shading can save before building per-eye foveated
+  rate maps. Mode 3 shades the scene passes at one uniform coarse rate everywhere (centre
+  included), so it is for measurement only. Default `mode=0` installs no detour and changes
+  nothing; modes 1/2 are reserved and currently mean off.
+- Classes come from each graphics PSO's render-target signature at creation (scene depth
+  D32_FLOAT_S8X24, one sample): `gbuffer` = 4 RTs RGBA8, RGBA8, RGBA8, RGBA16F velocity;
+  `decal` = 1 or 3 RGBA8 RTs; `scene_hdr` = RT0 RGBA16F (forward/transparent, sky, ocean, light
+  volumes). Everything else (shadows, UI on D24S8, post passes without depth, HUD composite, the
+  mod's own PSOs) stays at 1x1. `RSSetShadingRate` is called at SetPipelineState only when a
+  list's rate changes; Reset/ClearState/Close return the record to 1x1 and the list is classified
+  again on its next bind. Bundles, compute lists, the XR list and ReShade's list are never
+  touched. The mod's own terrain motion replay draw runs at
+  1x1; its smoke/focus-fire PSO substitutes replace one engine draw and keep that draw's rate.
+- Startup logs `VRS caps` (OPTIONS6: tier, tile size, additional rates); tier below 1 turns it
+  off, and 2x4/4x2/4x4 fall back to 2x2 without additional-rate support. Every 600 Presents a
+  `VRS census` line gives Presents/s and per-class bind counts for the window, the list states,
+  and `unknown_pso_binds` (binds of PSOs that neither creation detour saw; it should stay 0, or
+  the measured ceiling is too low). The first bind of each classified PSO logs one `VRS pso` line
+  (64 at most), and the first 8 unknown binds log their PSO.
+- Measurement INI: `[debug] runtime_diagnostics=0` (`logging_enabled` does not matter, so the
+  launcher's or a test run's diagnostics-off state works); `[vrs] mode=3`, `uniform_rate=2x2`,
+  `classes=gbuffer,decal,scene_hdr`, `log=1`. The VRS lines are the only ones written to
+  `witcher3vr.log` in that state.
+- Baseline: the same INI with `uniform_rate=1x1`. It runs the same detours and census but never
+  calls `RSSetShadingRate`, because every list record starts at 1x1. A `mode=0` run writes no
+  census, so it can only be timed from outside the mod.
+- This fork (AMD GPU, Windows, SteamVR null driver): taken over unchanged and off by default.
+  `scripts/smoke-test.ps1 -IniSet` can now set keys of sections that are missing from the INI,
+  such as `vrs.mode=3`.

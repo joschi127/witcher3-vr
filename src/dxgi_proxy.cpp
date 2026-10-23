@@ -763,6 +763,22 @@ struct Config {
     // general Diagnostic checkbox cannot silently disable a requested TAAU
     // run. It never enables readbacks or broad renderer logging.
     bool taau_drop_diagnostics{false};
+    // [FEATURE:VRS-MEASUREMENT 1/8] [vrs] Phase-0 shading-rate ceiling test.
+    // mode 3 shades the selected scene PSO classes at one uniform coarse
+    // rate; mode 0 installs nothing. vrs_log_file is the narrow exception to
+    // the paired logging switches (see log_vrs_line).
+    int vrs_mode{0};
+    D3D12_SHADING_RATE vrs_uniform_rate{D3D12_SHADING_RATE_2X2};
+    uint32_t vrs_class_mask{};
+    bool vrs_log_file{false};
+    // [PERF:CPU-MEASUREMENT 1/5] [perf] measurement-only switches; they need
+    // the VRS census log ([vrs] mode=3 log=1), which marks gameplay and
+    // reports presents/s. skip_descriptor_tracking drops the descriptor-copy
+    // metadata (smoke, foliage, focus, HUD and Witcher Senses lose their
+    // CBV/target lookups) to measure its CPU cost; job_wait_profile times the
+    // render thread's REDengine job waits per call site.
+    bool perf_skip_descriptor_tracking{false};
+    bool perf_job_wait_profile{false};
 };
 
 Config g_config{};
@@ -10008,10 +10024,7 @@ bool reverse_enabled();
 // of records paid a periodic cost that the capture then blamed on the
 // renderer. Hold the handle open and flush per line instead: the bytes still
 // reach the OS on every line, so a crashed process keeps its log tail.
-void write_log_line_v(const char* fmt, va_list args) {
-    if (!g_config.runtime_diagnostics) {
-        return;
-    }
+void append_log_file_line_v(const char* fmt, va_list args) {
     std::scoped_lock lock{g_log_mutex};
 
     static FILE* file{};
@@ -10041,6 +10054,13 @@ void write_log_line_v(const char* fmt, va_list args) {
     fflush(file);
 }
 
+void write_log_line_v(const char* fmt, va_list args) {
+    if (!g_config.runtime_diagnostics) {
+        return;
+    }
+    append_log_file_line_v(fmt, args);
+}
+
 void log_line(const char* fmt, ...) {
     if (!g_config.logging_enabled || !g_config.runtime_diagnostics) {
         return;
@@ -10048,6 +10068,21 @@ void log_line(const char* fmt, ...) {
     va_list args{};
     va_start(args, fmt);
     write_log_line_v(fmt, args);
+    va_end(args);
+}
+
+// [FEATURE:VRS-MEASUREMENT 2/8] A VRS measurement has to run with
+// runtime_diagnostics=0, which closes witcher3vr.log for everything else.
+// These few lines (capabilities, a census every 600 Presents, one line per
+// classified PSO) still reach it when [vrs] mode=3 and log=1, whatever the
+// [debug] switches say; no other writer is opened by this exception.
+void log_vrs_line(const char* fmt, ...) {
+    if (!g_config.vrs_log_file) {
+        return;
+    }
+    va_list args{};
+    va_start(args, fmt);
+    append_log_file_line_v(fmt, args);
     va_end(args);
 }
 
@@ -14400,6 +14435,981 @@ void avoid_square_render_size() {
     }
 }
 
+// [FEATURE:VRS-MEASUREMENT 3/8] Phase-0 ceiling test for fixed foveated
+// rendering. [vrs] mode=3 shades the engine's scene passes at one uniform
+// coarse rate (RSSetShadingRate, no rate image, so Tier 1 is enough) to
+// measure the most VRS can save before the foveated rate map is built. A
+// PSO's class comes from its render-target signature at creation, and
+// SetPipelineState sets the class's rate, calling RSSetShadingRate only when
+// the list's rate changes. Both tables use fixed-size open addressing with
+// keys that are never removed, and the recording threads read them without a
+// lock. With mode=0 none of the detours below is installed.
+enum class VrsPipelineClass : uint8_t {
+    Excluded,
+    GBuffer,
+    Decal,
+    SceneHdr,
+    Count
+};
+constexpr size_t kVrsPipelineClassCount =
+    static_cast<size_t>(VrsPipelineClass::Count);
+constexpr int kVrsModeOff = 0;
+constexpr int kVrsModeUniform = 3;
+constexpr uint64_t kVrsCensusPresentInterval = 600;
+constexpr uint32_t kVrsPipelineBindLogLimit = 64;
+
+uint64_t hash_shader_bytecode(const D3D12_SHADER_BYTECODE& bytecode);
+
+const char* vrs_class_name(VrsPipelineClass pipeline_class) {
+    switch (pipeline_class) {
+    case VrsPipelineClass::GBuffer:
+        return "gbuffer";
+    case VrsPipelineClass::Decal:
+        return "decal";
+    case VrsPipelineClass::SceneHdr:
+        return "scene_hdr";
+    default:
+        return "excluded";
+    }
+}
+
+uint32_t vrs_class_bit(VrsPipelineClass pipeline_class) {
+    return 1u << static_cast<uint32_t>(pipeline_class);
+}
+
+struct VrsRateName {
+    const char* name;
+    D3D12_SHADING_RATE rate;
+};
+constexpr VrsRateName kVrsRateNames[]{
+    {"1x1", D3D12_SHADING_RATE_1X1},
+    {"1x2", D3D12_SHADING_RATE_1X2},
+    {"2x1", D3D12_SHADING_RATE_2X1},
+    {"2x2", D3D12_SHADING_RATE_2X2},
+    {"2x4", D3D12_SHADING_RATE_2X4},
+    {"4x2", D3D12_SHADING_RATE_4X2},
+    {"4x4", D3D12_SHADING_RATE_4X4},
+};
+
+const char* vrs_rate_name(D3D12_SHADING_RATE rate) {
+    for (const auto& entry : kVrsRateNames) {
+        if (entry.rate == rate) {
+            return entry.name;
+        }
+    }
+    return "unknown";
+}
+
+bool parse_vrs_rate(const std::string& value, D3D12_SHADING_RATE& rate) {
+    for (const auto& entry : kVrsRateNames) {
+        if (value == entry.name) {
+            rate = entry.rate;
+            return true;
+        }
+    }
+    return false;
+}
+
+// 2x4, 4x2 and 4x4 need AdditionalShadingRatesSupported.
+bool vrs_rate_is_additional(D3D12_SHADING_RATE rate) {
+    return rate == D3D12_SHADING_RATE_2X4 ||
+        rate == D3D12_SHADING_RATE_4X2 ||
+        rate == D3D12_SHADING_RATE_4X4;
+}
+
+// Comma-separated subset of gbuffer, decal and scene_hdr (read_ini_string
+// has already lowered it). Unknown tokens are returned for the log.
+uint32_t parse_vrs_classes(const std::string& value, std::string& unknown) {
+    uint32_t mask{};
+    size_t begin{};
+    while (begin <= value.size()) {
+        size_t end = value.find(',', begin);
+        if (end == std::string::npos) {
+            end = value.size();
+        }
+        std::string token = value.substr(begin, end - begin);
+        token.erase(std::remove_if(token.begin(), token.end(),
+            [](unsigned char ch) { return ch <= ' '; }), token.end());
+        if (token == "gbuffer") {
+            mask |= vrs_class_bit(VrsPipelineClass::GBuffer);
+        } else if (token == "decal") {
+            mask |= vrs_class_bit(VrsPipelineClass::Decal);
+        } else if (token == "scene_hdr") {
+            mask |= vrs_class_bit(VrsPipelineClass::SceneHdr);
+        } else if (!token.empty()) {
+            unknown += unknown.empty() ? "" : ",";
+            unknown += token;
+        }
+        begin = end + 1;
+    }
+    return mask;
+}
+
+std::string vrs_class_list(uint32_t mask) {
+    std::string list;
+    for (size_t index = 1; index < kVrsPipelineClassCount; ++index) {
+        const auto pipeline_class = static_cast<VrsPipelineClass>(index);
+        if ((mask & vrs_class_bit(pipeline_class)) == 0) {
+            continue;
+        }
+        if (!list.empty()) {
+            list += ',';
+        }
+        list += vrs_class_name(pipeline_class);
+    }
+    return list.empty() ? std::string{"none"} : list;
+}
+
+bool vrs_rgba8_format(DXGI_FORMAT format) {
+    return format == DXGI_FORMAT_R8G8B8A8_UNORM ||
+        format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+}
+
+// Signatures from the 5.01 shader census and the G-buffer contract in
+// native_temporal_terrain_pipeline_matches. Every class needs the scene
+// D32_FLOAT_S8X24 depth target and one sample. Shadows (D16), UI (D24S8),
+// passes without depth and the mod's own PSOs stay excluded.
+VrsPipelineClass classify_vrs_pipeline(
+    const D3D12_GRAPHICS_PIPELINE_STATE_DESC& desc) {
+    const UINT count = desc.NumRenderTargets;
+    if (desc.DSVFormat != DXGI_FORMAT_D32_FLOAT_S8X24_UINT ||
+        desc.SampleDesc.Count != 1 || count == 0 ||
+        count > D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT) {
+        return VrsPipelineClass::Excluded;
+    }
+    const DXGI_FORMAT* formats = desc.RTVFormats;
+    if (count == 4 && vrs_rgba8_format(formats[0]) &&
+        vrs_rgba8_format(formats[1]) && vrs_rgba8_format(formats[2]) &&
+        formats[3] == DXGI_FORMAT_R16G16B16A16_FLOAT) {
+        return VrsPipelineClass::GBuffer;
+    }
+    if ((count == 1 || count == 3) &&
+        std::all_of(formats, formats + count, vrs_rgba8_format)) {
+        return VrsPipelineClass::Decal;
+    }
+    if (formats[0] == DXGI_FORMAT_R16G16B16A16_FLOAT) {
+        return VrsPipelineClass::SceneHdr;
+    }
+    return VrsPipelineClass::Excluded;
+}
+
+std::atomic<bool> g_vrs_measurement_active{};
+// Which VRS detours were installed (bit per kVrsDetour*), for the log.
+constexpr uint32_t kVrsDetourCreatePipeline = 1u << 0;
+constexpr uint32_t kVrsDetourReset = 1u << 1;
+constexpr uint32_t kVrsDetourSetPipeline = 1u << 2;
+constexpr uint32_t kVrsDetourClearState = 1u << 3;
+constexpr uint32_t kVrsDetourClose = 1u << 4;
+constexpr uint32_t kVrsDetourCreateComputePipeline = 1u << 5;
+std::atomic<uint32_t> g_vrs_detour_mask{};
+
+size_t vrs_slot_index(const void* key, unsigned bits) {
+    const uint64_t value =
+        static_cast<uint64_t>(reinterpret_cast<uintptr_t>(key)) >> 4;
+    return static_cast<size_t>(
+        (value * 0x9E3779B97F4A7C15ull) >> (64u - bits));
+}
+
+// Every graphics PSO created through the detour, including excluded ones, so
+// a reused address never keeps a stale class.
+constexpr unsigned kVrsPipelineSlotBits = 13;
+constexpr size_t kVrsPipelineSlotCount = size_t{1} << kVrsPipelineSlotBits;
+constexpr size_t kVrsPipelineProbeCount = 64;
+constexpr uintptr_t kVrsPipelineClaimed = ~uintptr_t{};
+struct VrsPipelineSlot {
+    std::atomic<uintptr_t> key{};
+    std::atomic<uint8_t> pipeline_class{};
+    std::atomic<bool> bind_logged{};
+    // Render-target count | DSV format << 8 | sample count << 16.
+    std::atomic<uint32_t> layout{};
+    // RTVFormats[0..7], eight bits each.
+    std::atomic<uint64_t> rtv_formats{};
+    std::atomic<uint64_t> vs_hash{};
+    std::atomic<uint64_t> ps_hash{};
+};
+std::array<VrsPipelineSlot, kVrsPipelineSlotCount> g_vrs_pipeline_slots{};
+std::atomic<uint32_t> g_vrs_pipeline_table_misses{};
+std::atomic<uint32_t> g_vrs_pipeline_bind_logs{};
+constexpr uint32_t kVrsUnknownPipelineLogLimit = 8;
+std::atomic<uint32_t> g_vrs_unknown_pipeline_logs{};
+
+void store_vrs_pipeline_slot(
+    ID3D12PipelineState* pipeline, VrsPipelineClass pipeline_class,
+    uint32_t layout, uint64_t rtv_formats, uint64_t vs_hash,
+    uint64_t ps_hash) {
+    const auto key_value = reinterpret_cast<uintptr_t>(pipeline);
+    const size_t base = vrs_slot_index(pipeline, kVrsPipelineSlotBits);
+    for (size_t probe = 0; probe < kVrsPipelineProbeCount; ++probe) {
+        auto& slot = g_vrs_pipeline_slots[
+            (base + probe) & (kVrsPipelineSlotCount - 1)];
+        auto key = slot.key.load(std::memory_order_acquire);
+        bool claimed{};
+        if (key == 0) {
+            claimed = slot.key.compare_exchange_strong(
+                key, kVrsPipelineClaimed, std::memory_order_acq_rel);
+        }
+        if (!claimed && key != key_value) {
+            continue;
+        }
+        slot.pipeline_class.store(
+            static_cast<uint8_t>(pipeline_class), std::memory_order_relaxed);
+        slot.layout.store(layout, std::memory_order_relaxed);
+        slot.rtv_formats.store(rtv_formats, std::memory_order_relaxed);
+        slot.vs_hash.store(vs_hash, std::memory_order_relaxed);
+        slot.ps_hash.store(ps_hash, std::memory_order_relaxed);
+        slot.bind_logged.store(false, std::memory_order_relaxed);
+        if (claimed) {
+            slot.key.store(key_value, std::memory_order_release);
+        }
+        return;
+    }
+    g_vrs_pipeline_table_misses.fetch_add(1, std::memory_order_relaxed);
+}
+
+void note_vrs_graphics_pipeline(
+    ID3D12PipelineState* pipeline,
+    const D3D12_GRAPHICS_PIPELINE_STATE_DESC& desc) {
+    const auto pipeline_class = classify_vrs_pipeline(desc);
+    const bool classified = pipeline_class != VrsPipelineClass::Excluded;
+    uint64_t rtv_formats{};
+    for (UINT index = 0; index < D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT;
+         ++index) {
+        rtv_formats |= (static_cast<uint64_t>(desc.RTVFormats[index]) &
+            0xFFu) << (index * 8);
+    }
+    const uint32_t layout = (desc.NumRenderTargets & 0xFFu) |
+        ((static_cast<uint32_t>(desc.DSVFormat) & 0xFFu) << 8) |
+        ((desc.SampleDesc.Count & 0xFFu) << 16);
+    store_vrs_pipeline_slot(pipeline, pipeline_class, layout, rtv_formats,
+        classified ? hash_shader_bytecode(desc.VS) : 0,
+        classified ? hash_shader_bytecode(desc.PS) : 0);
+}
+
+// Compute PSOs are bound with SetPipelineState too. They are recorded as
+// excluded so that unknown_pso_binds counts only PSOs whose creation path
+// no detour saw.
+void note_vrs_compute_pipeline(ID3D12PipelineState* pipeline) {
+    store_vrs_pipeline_slot(pipeline, VrsPipelineClass::Excluded, 0, 0, 0, 0);
+}
+
+VrsPipelineSlot* find_vrs_pipeline_slot(const ID3D12PipelineState* pipeline) {
+    const auto key_value = reinterpret_cast<uintptr_t>(pipeline);
+    const size_t base = vrs_slot_index(pipeline, kVrsPipelineSlotBits);
+    for (size_t probe = 0; probe < kVrsPipelineProbeCount; ++probe) {
+        auto& slot = g_vrs_pipeline_slots[
+            (base + probe) & (kVrsPipelineSlotCount - 1)];
+        const auto key = slot.key.load(std::memory_order_acquire);
+        if (key == key_value) {
+            return &slot;
+        }
+        if (key == 0) {
+            return nullptr;
+        }
+    }
+    return nullptr;
+}
+
+// Class of a bound PSO. A PSO that no creation detour saw is excluded and
+// clears |tracked|; the first kVrsUnknownPipelineLogLimit such binds are
+// logged. The first bind of each classified PSO writes one census line,
+// capped at kVrsPipelineBindLogLimit.
+VrsPipelineClass vrs_pipeline_class_for_bind(
+    ID3D12PipelineState* pipeline_state, bool& tracked) {
+    auto* slot = pipeline_state != nullptr
+        ? find_vrs_pipeline_slot(pipeline_state) : nullptr;
+    tracked = slot != nullptr || pipeline_state == nullptr;
+    if (slot == nullptr) {
+        if (!tracked && g_config.vrs_log_file &&
+            g_vrs_unknown_pipeline_logs.load(std::memory_order_relaxed) <
+                kVrsUnknownPipelineLogLimit &&
+            g_vrs_unknown_pipeline_logs.fetch_add(
+                1, std::memory_order_relaxed) < kVrsUnknownPipelineLogLimit) {
+            log_vrs_line(
+                "VRS bound pso=%p was not seen at creation present=%llu",
+                pipeline_state,
+                static_cast<unsigned long long>(
+                    g_present_count.load(std::memory_order_relaxed)));
+        }
+        return VrsPipelineClass::Excluded;
+    }
+    const auto pipeline_class = static_cast<VrsPipelineClass>(
+        slot->pipeline_class.load(std::memory_order_relaxed));
+    if (pipeline_class != VrsPipelineClass::Excluded &&
+        g_config.vrs_log_file &&
+        !slot->bind_logged.load(std::memory_order_relaxed) &&
+        !slot->bind_logged.exchange(true, std::memory_order_relaxed) &&
+        g_vrs_pipeline_bind_logs.fetch_add(1, std::memory_order_relaxed) <
+            kVrsPipelineBindLogLimit) {
+        const uint32_t layout = slot->layout.load(std::memory_order_relaxed);
+        const uint64_t formats =
+            slot->rtv_formats.load(std::memory_order_relaxed);
+        const UINT count = std::min<UINT>(
+            layout & 0xFFu, D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT);
+        char rtv_list[64]{};
+        size_t offset{};
+        for (UINT index = 0; index < count; ++index) {
+            const int written = snprintf(
+                rtv_list + offset, sizeof(rtv_list) - offset, "%s%u",
+                index == 0 ? "" : ",",
+                static_cast<unsigned>((formats >> (index * 8)) & 0xFFu));
+            if (written <= 0) {
+                break;
+            }
+            offset = std::min(
+                offset + static_cast<size_t>(written), sizeof(rtv_list) - 1);
+        }
+        log_vrs_line(
+            "VRS pso class=%s pso=%p rts=%u rtv=%s dsv=%u samples=%u "
+            "vs=%016llX ps=%016llX present=%llu",
+            vrs_class_name(pipeline_class), pipeline_state, count, rtv_list,
+            static_cast<unsigned>((layout >> 8) & 0xFFu),
+            static_cast<unsigned>((layout >> 16) & 0xFFu),
+            static_cast<unsigned long long>(
+                slot->vs_hash.load(std::memory_order_relaxed)),
+            static_cast<unsigned long long>(
+                slot->ps_hash.load(std::memory_order_relaxed)),
+            static_cast<unsigned long long>(
+                g_present_count.load(std::memory_order_relaxed)));
+    }
+    return pipeline_class;
+}
+
+enum class VrsListState : uint8_t {
+    Unknown,
+    Enabled,
+    NoList5,
+    NotDirect,
+    ModOwned,
+    ReShade,
+    Count
+};
+
+// One cache line per command list. Only the thread recording a list writes
+// its slot, so the counters are plain load/store pairs, not shared RMWs.
+constexpr unsigned kVrsCommandListSlotBits = 12;
+constexpr size_t kVrsCommandListSlotCount =
+    size_t{1} << kVrsCommandListSlotBits;
+constexpr size_t kVrsCommandListProbeCount = 32;
+struct alignas(64) VrsCommandListSlot {
+    std::atomic<uintptr_t> key{};
+    // The last classification, kept for the census; |classified| says
+    // whether it belongs to the current recording.
+    std::atomic<VrsListState> state{};
+    std::atomic<bool> classified{};
+    // Last rate set on the list; Reset, ClearState and Close return it to
+    // 1x1.
+    std::atomic<D3D12_SHADING_RATE> rate{};
+    std::array<std::atomic<uint64_t>, kVrsPipelineClassCount> binds{};
+    std::atomic<uint64_t> rate_sets{};
+    std::atomic<uint64_t> unknown_pso_binds{};
+};
+std::array<VrsCommandListSlot, kVrsCommandListSlotCount>
+    g_vrs_command_list_slots{};
+std::atomic<uint64_t> g_vrs_untracked_calls{};
+
+// A new slot is zero: state Unknown, rate 1x1. Its key is claimed directly
+// because no other thread records the same list at the same time.
+VrsCommandListSlot* vrs_command_list_slot(
+    ID3D12GraphicsCommandList* command_list, bool insert) {
+    const auto key_value = reinterpret_cast<uintptr_t>(command_list);
+    const size_t base = vrs_slot_index(command_list, kVrsCommandListSlotBits);
+    for (size_t probe = 0; probe < kVrsCommandListProbeCount; ++probe) {
+        auto& slot = g_vrs_command_list_slots[
+            (base + probe) & (kVrsCommandListSlotCount - 1)];
+        uintptr_t key = slot.key.load(std::memory_order_acquire);
+        if (key == 0 && insert &&
+            slot.key.compare_exchange_strong(
+                key, key_value, std::memory_order_acq_rel)) {
+            return &slot;
+        }
+        if (key == key_value) {
+            return &slot;
+        }
+        if (key == 0) {
+            return nullptr;
+        }
+    }
+    if (insert) {
+        g_vrs_untracked_calls.fetch_add(1, std::memory_order_relaxed);
+    }
+    return nullptr;
+}
+
+// Runs once per recording (Reset, ClearState and Close clear |classified|),
+// which also keeps ReShade's mutex-guarded list check off the per-bind path.
+VrsListState classify_vrs_command_list(
+    ID3D12GraphicsCommandList* command_list) {
+    // The XR list records only the mod's own copies and draws.
+    if (command_list == g_xr_command_list) {
+        return VrsListState::ModOwned;
+    }
+    if (is_reshade_immediate_command_list(command_list)) {
+        return VrsListState::ReShade;
+    }
+    if (command_list->GetType() != D3D12_COMMAND_LIST_TYPE_DIRECT) {
+        return VrsListState::NotDirect;
+    }
+    // Rates are set through the list's own pointer, so List5 has to be the
+    // same object; no interface pointer is kept beyond this check.
+    ID3D12GraphicsCommandList5* list5{};
+    if (FAILED(command_list->QueryInterface(IID_PPV_ARGS(&list5))) ||
+        list5 == nullptr) {
+        return VrsListState::NoList5;
+    }
+    const bool same_object =
+        static_cast<void*>(list5) == static_cast<void*>(command_list);
+    list5->Release();
+    return same_object ? VrsListState::Enabled : VrsListState::NoList5;
+}
+
+void set_vrs_list_rate(
+    ID3D12GraphicsCommandList* command_list, VrsCommandListSlot& slot,
+    D3D12_SHADING_RATE rate) {
+    if (slot.rate.load(std::memory_order_relaxed) == rate) {
+        return;
+    }
+    static_cast<ID3D12GraphicsCommandList5*>(command_list)->RSSetShadingRate(
+        rate, nullptr);
+    slot.rate.store(rate, std::memory_order_relaxed);
+    slot.rate_sets.store(
+        slot.rate_sets.load(std::memory_order_relaxed) + 1,
+        std::memory_order_relaxed);
+}
+
+// The busy flag hands the window state from one census writer to the next;
+// a bind that finds it taken returns at once instead of waiting.
+std::atomic<bool> g_vrs_census_busy{};
+std::atomic<uint64_t> g_vrs_census_next_present{};
+uint64_t g_vrs_census_window_present{};
+int64_t g_vrs_census_window_qpc{};
+std::array<uint64_t, kVrsPipelineClassCount> g_vrs_census_previous_binds{};
+uint64_t g_vrs_census_previous_rate_sets{};
+
+void log_vrs_census_locked(uint64_t present);
+void log_job_wait_profile_locked(uint64_t window_presents, int64_t qpc_frequency);
+
+// One line per kVrsCensusPresentInterval Presents, written by the first bind
+// after the boundary; the counters are window deltas.
+void maybe_log_vrs_census() {
+    if (!g_config.vrs_log_file) {
+        return;
+    }
+    const uint64_t present = g_present_count.load(std::memory_order_relaxed);
+    if (present <
+            g_vrs_census_next_present.load(std::memory_order_relaxed) ||
+        g_vrs_census_busy.exchange(true, std::memory_order_acquire)) {
+        return;
+    }
+    if (present >= g_vrs_census_next_present.load(std::memory_order_relaxed)) {
+        log_vrs_census_locked(present);
+        g_vrs_census_next_present.store(
+            present + kVrsCensusPresentInterval, std::memory_order_relaxed);
+    }
+    g_vrs_census_busy.store(false, std::memory_order_release);
+}
+
+void log_vrs_census_locked(uint64_t present) {
+    std::array<uint64_t, kVrsPipelineClassCount> binds{};
+    std::array<uint32_t, static_cast<size_t>(VrsListState::Count)> lists{};
+    uint64_t rate_sets{};
+    uint64_t unknown_pso_binds{};
+    for (const auto& slot : g_vrs_command_list_slots) {
+        if (slot.key.load(std::memory_order_acquire) == 0) {
+            continue;
+        }
+        for (size_t index = 0; index < binds.size(); ++index) {
+            binds[index] += slot.binds[index].load(std::memory_order_relaxed);
+        }
+        rate_sets += slot.rate_sets.load(std::memory_order_relaxed);
+        unknown_pso_binds +=
+            slot.unknown_pso_binds.load(std::memory_order_relaxed);
+        const auto state = static_cast<size_t>(
+            slot.state.load(std::memory_order_relaxed));
+        if (state < lists.size()) {
+            ++lists[state];
+        }
+    }
+    LARGE_INTEGER now{};
+    LARGE_INTEGER frequency{};
+    QueryPerformanceCounter(&now);
+    QueryPerformanceFrequency(&frequency);
+    const double seconds = frequency.QuadPart > 0
+        ? static_cast<double>(now.QuadPart - g_vrs_census_window_qpc) /
+            static_cast<double>(frequency.QuadPart)
+        : 0.0;
+    const uint64_t window_presents = present - g_vrs_census_window_present;
+    const auto delta = [&](size_t index) {
+        return static_cast<unsigned long long>(
+            binds[index] - g_vrs_census_previous_binds[index]);
+    };
+    log_vrs_line(
+        "VRS census present=%llu window_presents=%llu seconds=%.2f "
+        "presents_per_second=%.2f binds excluded=%llu gbuffer=%llu "
+        "decal=%llu scene_hdr=%llu rate_sets=%llu lists enabled=%u "
+        "disabled_no_list5=%u not_direct=%u mod_owned=%u reshade=%u "
+        "unclassified=%u untracked_calls=%llu pso_table_misses=%u "
+        "unknown_pso_binds=%llu mode=%d rate=%s classes=%s",
+        static_cast<unsigned long long>(present),
+        static_cast<unsigned long long>(window_presents), seconds,
+        seconds > 0.0 ? static_cast<double>(window_presents) / seconds : 0.0,
+        delta(static_cast<size_t>(VrsPipelineClass::Excluded)),
+        delta(static_cast<size_t>(VrsPipelineClass::GBuffer)),
+        delta(static_cast<size_t>(VrsPipelineClass::Decal)),
+        delta(static_cast<size_t>(VrsPipelineClass::SceneHdr)),
+        static_cast<unsigned long long>(
+            rate_sets - g_vrs_census_previous_rate_sets),
+        lists[static_cast<size_t>(VrsListState::Enabled)],
+        lists[static_cast<size_t>(VrsListState::NoList5)],
+        lists[static_cast<size_t>(VrsListState::NotDirect)],
+        lists[static_cast<size_t>(VrsListState::ModOwned)],
+        lists[static_cast<size_t>(VrsListState::ReShade)],
+        lists[static_cast<size_t>(VrsListState::Unknown)],
+        static_cast<unsigned long long>(
+            g_vrs_untracked_calls.load(std::memory_order_relaxed)),
+        g_vrs_pipeline_table_misses.load(std::memory_order_relaxed),
+        static_cast<unsigned long long>(unknown_pso_binds),
+        g_config.vrs_mode, vrs_rate_name(g_config.vrs_uniform_rate),
+        vrs_class_list(g_config.vrs_class_mask).c_str());
+    g_vrs_census_window_present = present;
+    g_vrs_census_window_qpc = now.QuadPart;
+    g_vrs_census_previous_binds = binds;
+    g_vrs_census_previous_rate_sets = rate_sets;
+    log_job_wait_profile_locked(window_presents, frequency.QuadPart);
+}
+
+void apply_vrs_pipeline_rate(
+    ID3D12GraphicsCommandList* command_list,
+    ID3D12PipelineState* pipeline_state) {
+    // Any bind can write the census, so a run in which no list is enabled
+    // still reports why.
+    maybe_log_vrs_census();
+    auto* slot = command_list != nullptr
+        ? vrs_command_list_slot(command_list, true) : nullptr;
+    if (slot == nullptr) {
+        return;
+    }
+    auto state = slot->state.load(std::memory_order_relaxed);
+    if (!slot->classified.load(std::memory_order_relaxed)) {
+        state = classify_vrs_command_list(command_list);
+        slot->state.store(state, std::memory_order_relaxed);
+        slot->classified.store(true, std::memory_order_relaxed);
+    }
+    if (state != VrsListState::Enabled) {
+        return;
+    }
+    bool tracked{};
+    const auto pipeline_class =
+        vrs_pipeline_class_for_bind(pipeline_state, tracked);
+    auto& binds = slot->binds[static_cast<size_t>(pipeline_class)];
+    binds.store(
+        binds.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+    if (!tracked) {
+        slot->unknown_pso_binds.store(
+            slot->unknown_pso_binds.load(std::memory_order_relaxed) + 1,
+            std::memory_order_relaxed);
+    }
+    set_vrs_list_rate(command_list, *slot,
+        (g_config.vrs_class_mask & vrs_class_bit(pipeline_class)) != 0
+            ? g_config.vrs_uniform_rate
+            : D3D12_SHADING_RATE_1X1);
+}
+
+// Reset and ClearState return a list to 1x1 with passthrough combiners and
+// bind the optional PSO without a SetPipelineState call. Close clears the
+// record too: CreateCommandList returns a list that is already recording,
+// with no Reset, and it can reuse a released list's address with another
+// type. Lists are closed before they are submitted or reused, so the next
+// recording at an address is classified again and starts at 1x1.
+void reset_vrs_list_rate(
+    ID3D12GraphicsCommandList* command_list,
+    ID3D12PipelineState* pipeline_state) {
+    if (command_list == nullptr) {
+        return;
+    }
+    if (auto* slot = vrs_command_list_slot(command_list, false)) {
+        slot->rate.store(D3D12_SHADING_RATE_1X1, std::memory_order_relaxed);
+        slot->classified.store(false, std::memory_order_relaxed);
+    }
+    if (pipeline_state != nullptr) {
+        apply_vrs_pipeline_rate(command_list, pipeline_state);
+    }
+}
+
+// The mod binds its own PSOs through the original SetPipelineState, so its
+// draws inside an engine command list would inherit the engine's coarse
+// rate. Run them at 1x1 and give the engine its rate back afterwards.
+struct VrsModDrawScope {
+    ID3D12GraphicsCommandList* command_list{};
+    VrsCommandListSlot* slot{};
+    D3D12_SHADING_RATE previous{D3D12_SHADING_RATE_1X1};
+
+    explicit VrsModDrawScope(ID3D12GraphicsCommandList* list) {
+        if (!g_vrs_measurement_active.load(std::memory_order_relaxed) ||
+            list == nullptr) {
+            return;
+        }
+        auto* found = vrs_command_list_slot(list, false);
+        if (found == nullptr ||
+            !found->classified.load(std::memory_order_relaxed) ||
+            found->state.load(std::memory_order_relaxed) !=
+                VrsListState::Enabled) {
+            return;
+        }
+        previous = found->rate.load(std::memory_order_relaxed);
+        if (previous == D3D12_SHADING_RATE_1X1) {
+            return;
+        }
+        command_list = list;
+        slot = found;
+        set_vrs_list_rate(command_list, *slot, D3D12_SHADING_RATE_1X1);
+    }
+
+    ~VrsModDrawScope() {
+        if (slot != nullptr) {
+            set_vrs_list_rate(command_list, *slot, previous);
+        }
+    }
+
+    VrsModDrawScope(const VrsModDrawScope&) = delete;
+    VrsModDrawScope& operator=(const VrsModDrawScope&) = delete;
+};
+
+using ClearStateFn = void(STDMETHODCALLTYPE*)(
+    ID3D12GraphicsCommandList*, ID3D12PipelineState*);
+ClearStateFn g_clear_state{};
+using CloseCommandListFn = HRESULT(STDMETHODCALLTYPE*)(
+    ID3D12GraphicsCommandList*);
+CloseCommandListFn g_close_command_list{};
+
+// The VRS detours wrap the normal ones and exist only while the measurement
+// is on (see install_reverse_hooks and install_command_list_hooks).
+HRESULT STDMETHODCALLTYPE hook_create_graphics_pipeline_state_vrs(
+    ID3D12Device* device,
+    const D3D12_GRAPHICS_PIPELINE_STATE_DESC* desc,
+    REFIID riid,
+    void** pipeline_state) {
+    const HRESULT hr = hook_create_graphics_pipeline_state(
+        device, desc, riid, pipeline_state);
+    if (SUCCEEDED(hr) && desc != nullptr && pipeline_state != nullptr &&
+        *pipeline_state != nullptr) {
+        note_vrs_graphics_pipeline(
+            static_cast<ID3D12PipelineState*>(*pipeline_state), *desc);
+    }
+    return hr;
+}
+
+HRESULT STDMETHODCALLTYPE hook_create_compute_pipeline_state_vrs(
+    ID3D12Device* device,
+    const D3D12_COMPUTE_PIPELINE_STATE_DESC* desc,
+    REFIID riid,
+    void** pipeline_state) {
+    const HRESULT hr = hook_create_compute_pipeline_state(
+        device, desc, riid, pipeline_state);
+    if (SUCCEEDED(hr) && pipeline_state != nullptr &&
+        *pipeline_state != nullptr) {
+        note_vrs_compute_pipeline(
+            static_cast<ID3D12PipelineState*>(*pipeline_state));
+    }
+    return hr;
+}
+
+HRESULT STDMETHODCALLTYPE hook_reset_command_list_vrs(
+    ID3D12GraphicsCommandList* command_list,
+    ID3D12CommandAllocator* allocator,
+    ID3D12PipelineState* initial_state) {
+    const HRESULT result =
+        hook_reset_command_list(command_list, allocator, initial_state);
+    if (SUCCEEDED(result)) {
+        reset_vrs_list_rate(command_list, initial_state);
+    }
+    return result;
+}
+
+void STDMETHODCALLTYPE hook_set_pipeline_state_vrs(
+    ID3D12GraphicsCommandList* command_list,
+    ID3D12PipelineState* pipeline_state) {
+    hook_set_pipeline_state(command_list, pipeline_state);
+    // The engine's PSO decides the class; the bridge's HUD substitutes
+    // replace only excluded HUD-composite PSOs.
+    apply_vrs_pipeline_rate(command_list, pipeline_state);
+}
+
+void STDMETHODCALLTYPE hook_clear_state_vrs(
+    ID3D12GraphicsCommandList* command_list,
+    ID3D12PipelineState* pipeline_state) {
+    g_clear_state(command_list, pipeline_state);
+    reset_vrs_list_rate(command_list, pipeline_state);
+}
+
+HRESULT STDMETHODCALLTYPE hook_close_command_list_vrs(
+    ID3D12GraphicsCommandList* command_list) {
+    // A failed Close also ends the recording; the list needs a Reset.
+    const HRESULT result = g_close_command_list(command_list);
+    reset_vrs_list_rate(command_list, nullptr);
+    return result;
+}
+
+// [PERF:CPU-MEASUREMENT 2/5] REDengine's job wait on 5.01 (0x141D53740):
+// spins with pause backoff, then SwitchToThread, then sleeps 1 ms, until the
+// job counter at (*handle)+0x10 reaches zero. The render thread spends a
+// large share of its time here; timing it per return address shows which
+// render stage waits on which jobs.
+using EngineJobWaitFn = void(__fastcall*)(void*);
+EngineJobWaitFn g_engine_job_wait{};
+constexpr uintptr_t kRemaster501JobWaitRva = 0x1D53740;
+constexpr std::array<uint8_t, 10> kRemaster501JobWaitPrologue{
+    0x48, 0x89, 0x5C, 0x24, 0x08, 0x57, 0x48, 0x83, 0xEC, 0x30};
+
+struct JobWaitSite {
+    std::atomic<uintptr_t> return_address{};
+    std::atomic<uint64_t> calls{};
+    std::atomic<uint64_t> ticks{};
+    std::atomic<uint32_t> thread_id{};
+    uint8_t kind{};
+    uint64_t previous_calls{};
+    uint64_t previous_ticks{};
+};
+
+// The same table also times REDengine's staged-object wait 0x141BF9770
+// (spins with pause until [obj+0x40] passes the requested stage, running the
+// next stage itself when it wins [obj+0x100]) and the command-buffer state
+// poll 0x141C69AE0 ("EXEC"/"REST"); the kind tells them apart in the log.
+enum class EngineWaitKind : uint8_t { Job = 0, Stage = 1, CommandPoll = 2 };
+constexpr const char* kEngineWaitKindNames[] = {"job", "stage", "cmdpoll"};
+
+using EngineStageWaitFn = void(__fastcall*)(void*, int32_t);
+using EngineCommandPollFn = uint8_t(__fastcall*)(void*, void*);
+EngineStageWaitFn g_engine_stage_wait{};
+EngineCommandPollFn g_engine_command_poll{};
+constexpr uintptr_t kRemaster501StageWaitRva = 0x1BF9770;
+constexpr std::array<uint8_t, 10> kRemaster501StageWaitPrologue{
+    0x48, 0x89, 0x5C, 0x24, 0x10, 0x57, 0x48, 0x83, 0xEC, 0x30};
+constexpr uintptr_t kRemaster501CommandPollRva = 0x1C69AE0;
+constexpr std::array<uint8_t, 16> kRemaster501CommandPollPrologue{
+    0x48, 0x89, 0x5C, 0x24, 0x18, 0x55, 0x56, 0x57, 0x41, 0x56, 0x41, 0x57,
+    0x48, 0x83, 0xEC, 0x20};
+
+std::array<JobWaitSite, 64> g_job_wait_sites{};
+std::atomic<uint64_t> g_job_wait_site_overflow{};
+
+void record_engine_wait_site(uintptr_t return_address, EngineWaitKind kind,
+    int64_t ticks) {
+    for (auto& site : g_job_wait_sites) {
+        auto key = site.return_address.load(std::memory_order_acquire);
+        if (key == 0) {
+            uintptr_t expected{};
+            if (site.return_address.compare_exchange_strong(
+                    expected, return_address, std::memory_order_acq_rel)) {
+                site.kind = static_cast<uint8_t>(kind);
+                key = return_address;
+            } else {
+                key = expected;
+            }
+        }
+        if (key == return_address) {
+            site.calls.fetch_add(1, std::memory_order_relaxed);
+            site.ticks.fetch_add(static_cast<uint64_t>(ticks),
+                std::memory_order_relaxed);
+            site.thread_id.store(GetCurrentThreadId(), std::memory_order_relaxed);
+            return;
+        }
+    }
+    g_job_wait_site_overflow.fetch_add(1, std::memory_order_relaxed);
+}
+
+void __fastcall hook_engine_job_wait(void* handle) {
+    const auto return_address = reinterpret_cast<uintptr_t>(_ReturnAddress());
+    LARGE_INTEGER begin{};
+    LARGE_INTEGER end{};
+    QueryPerformanceCounter(&begin);
+    g_engine_job_wait(handle);
+    QueryPerformanceCounter(&end);
+    record_engine_wait_site(return_address, EngineWaitKind::Job,
+        end.QuadPart - begin.QuadPart);
+}
+
+void __fastcall hook_engine_stage_wait(void* object, int32_t stage) {
+    const auto return_address = reinterpret_cast<uintptr_t>(_ReturnAddress());
+    LARGE_INTEGER begin{};
+    LARGE_INTEGER end{};
+    QueryPerformanceCounter(&begin);
+    g_engine_stage_wait(object, stage);
+    QueryPerformanceCounter(&end);
+    record_engine_wait_site(return_address, EngineWaitKind::Stage,
+        end.QuadPart - begin.QuadPart);
+}
+
+uint8_t __fastcall hook_engine_command_poll(void* object, void* state) {
+    const auto return_address = reinterpret_cast<uintptr_t>(_ReturnAddress());
+    LARGE_INTEGER begin{};
+    LARGE_INTEGER end{};
+    QueryPerformanceCounter(&begin);
+    const uint8_t result = g_engine_command_poll(object, state);
+    QueryPerformanceCounter(&end);
+    record_engine_wait_site(return_address, EngineWaitKind::CommandPoll,
+        end.QuadPart - begin.QuadPart);
+    return result;
+}
+
+bool install_engine_wait_hook(uint8_t* module, uintptr_t rva,
+    const uint8_t* prologue, size_t prologue_size, void* detour, void** original,
+    const char* name) {
+    auto* target = module + rva;
+    if (std::memcmp(target, prologue, prologue_size) != 0) {
+        log_vrs_line("PERF %s wait profile off: prologue mismatch", name);
+        return false;
+    }
+    if (MH_CreateHook(target, detour, original) == MH_OK &&
+        MH_EnableHook(target) == MH_OK) {
+        log_vrs_line("PERF %s wait profile on target=%p", name, target);
+        return true;
+    }
+    *original = nullptr;
+    log_vrs_line("PERF %s wait profile hook failed target=%p", name, target);
+    return false;
+}
+
+void install_job_wait_profile_hook() {
+    if (!g_config.perf_job_wait_profile || g_engine_job_wait != nullptr) {
+        return;
+    }
+    auto* module = reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr));
+    if (running_game_build() != w3vr::game_build::Build::Remaster501 ||
+        module == nullptr) {
+        g_config.perf_job_wait_profile = false;
+        log_vrs_line("PERF job wait profile off: build mismatch");
+        return;
+    }
+    if (!install_engine_wait_hook(module, kRemaster501JobWaitRva,
+            kRemaster501JobWaitPrologue.data(), kRemaster501JobWaitPrologue.size(),
+            reinterpret_cast<void*>(&hook_engine_job_wait),
+            reinterpret_cast<void**>(&g_engine_job_wait), "job")) {
+        g_config.perf_job_wait_profile = false;
+        return;
+    }
+    install_engine_wait_hook(module, kRemaster501StageWaitRva,
+        kRemaster501StageWaitPrologue.data(), kRemaster501StageWaitPrologue.size(),
+        reinterpret_cast<void*>(&hook_engine_stage_wait),
+        reinterpret_cast<void**>(&g_engine_stage_wait), "stage");
+    install_engine_wait_hook(module, kRemaster501CommandPollRva,
+        kRemaster501CommandPollPrologue.data(),
+        kRemaster501CommandPollPrologue.size(),
+        reinterpret_cast<void*>(&hook_engine_command_poll),
+        reinterpret_cast<void**>(&g_engine_command_poll), "cmdpoll");
+}
+
+// Called from the census under g_vrs_census_busy. Sites are printed as
+// preferred-base VAs (0x14xxxxxxx) so they match the RE notes.
+void log_job_wait_profile_locked(uint64_t window_presents, int64_t qpc_frequency) {
+    if (!g_config.perf_job_wait_profile || qpc_frequency <= 0 ||
+        window_presents == 0) {
+        return;
+    }
+    const auto module = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+    for (auto& site : g_job_wait_sites) {
+        const auto return_address =
+            site.return_address.load(std::memory_order_acquire);
+        if (return_address == 0) {
+            break;
+        }
+        const uint64_t calls = site.calls.load(std::memory_order_relaxed);
+        const uint64_t ticks = site.ticks.load(std::memory_order_relaxed);
+        const uint64_t window_calls = calls - site.previous_calls;
+        const double window_ms = 1000.0 *
+            static_cast<double>(ticks - site.previous_ticks) /
+            static_cast<double>(qpc_frequency);
+        site.previous_calls = calls;
+        site.previous_ticks = ticks;
+        if (window_calls == 0) {
+            continue;
+        }
+        log_vrs_line(
+            "PERF job wait kind=%s site=0x%llX tid=%u calls_per_present=%.2f "
+            "ms_per_present=%.3f window_ms=%.1f",
+            kEngineWaitKindNames[site.kind < 3 ? site.kind : 0],
+            static_cast<unsigned long long>(return_address - module + 0x140000000ull),
+            site.thread_id.load(std::memory_order_relaxed),
+            static_cast<double>(window_calls) / static_cast<double>(window_presents),
+            window_ms / static_cast<double>(window_presents), window_ms);
+    }
+    const auto overflow = g_job_wait_site_overflow.load(std::memory_order_relaxed);
+    if (overflow != 0) {
+        log_vrs_line("PERF job wait site table overflow calls=%llu",
+            static_cast<unsigned long long>(overflow));
+    }
+}
+
+
+// Runs once with the game's device, before the renderer detours are
+// installed, so it decides which detours install_reverse_hooks and
+// install_command_list_hooks create.
+void initialize_vrs_measurement(ID3D12Device* device) {
+    static std::once_flag once;
+    std::call_once(once, [device]() {
+        if (g_config.vrs_mode != kVrsModeUniform) {
+            return;
+        }
+        // [PERF:CPU-MEASUREMENT 3/5]
+        install_job_wait_profile_hook();
+        if (device == nullptr || !renderer_hook_installation_needed()) {
+            g_config.vrs_mode = kVrsModeOff;
+            log_vrs_line(
+                "VRS off: renderer detours are not installed (device=%p "
+                "openxr_enabled=%d mode=%d)",
+                device, g_config.openxr_enabled ? 1 : 0,
+                g_config.openxr_mode);
+            return;
+        }
+        D3D12_FEATURE_DATA_D3D12_OPTIONS6 options6{};
+        const HRESULT hr = device->CheckFeatureSupport(
+            D3D12_FEATURE_D3D12_OPTIONS6, &options6, sizeof(options6));
+        log_vrs_line(
+            "VRS caps hr=0x%08X tier=%d tile=%u additional_rates=%d "
+            "per_primitive_viewport_indexing=%d background_processing=%d "
+            "build=%s",
+            static_cast<unsigned>(hr),
+            static_cast<int>(options6.VariableShadingRateTier),
+            options6.ShadingRateImageTileSize,
+            options6.AdditionalShadingRatesSupported ? 1 : 0,
+            options6.PerPrimitiveShadingRateSupportedWithViewportIndexing
+                ? 1 : 0,
+            options6.BackgroundProcessingSupported ? 1 : 0,
+            w3vr::game_build::name(running_game_build()));
+        if (FAILED(hr) || options6.VariableShadingRateTier <
+                D3D12_VARIABLE_SHADING_RATE_TIER_1) {
+            g_config.vrs_mode = kVrsModeOff;
+            log_vrs_line("VRS off: VariableShadingRateTier %d is below 1",
+                FAILED(hr) ? 0 :
+                    static_cast<int>(options6.VariableShadingRateTier));
+            return;
+        }
+        if (vrs_rate_is_additional(g_config.vrs_uniform_rate) &&
+            !options6.AdditionalShadingRatesSupported) {
+            log_vrs_line(
+                "VRS uniform_rate=%s needs AdditionalShadingRatesSupported; "
+                "clamped to 2x2",
+                vrs_rate_name(g_config.vrs_uniform_rate));
+            g_config.vrs_uniform_rate = D3D12_SHADING_RATE_2X2;
+        }
+        LARGE_INTEGER now{};
+        QueryPerformanceCounter(&now);
+        const uint64_t present =
+            g_present_count.load(std::memory_order_relaxed);
+        g_vrs_census_window_present = present;
+        g_vrs_census_window_qpc = now.QuadPart;
+        g_vrs_census_next_present.store(
+            present + kVrsCensusPresentInterval, std::memory_order_relaxed);
+        g_vrs_measurement_active.store(true, std::memory_order_release);
+        log_vrs_line(
+            "VRS measurement on mode=%d rate=%s classes=%s "
+            "census_interval=%llu runtime_diagnostics=%d",
+            g_config.vrs_mode, vrs_rate_name(g_config.vrs_uniform_rate),
+            vrs_class_list(g_config.vrs_class_mask).c_str(),
+            static_cast<unsigned long long>(kVrsCensusPresentInterval),
+            g_config.runtime_diagnostics ? 1 : 0);
+    });
+}
+
 void load_config() {
     std::call_once(g_config_once, []() {
         g_config.renderdoc_capture_enabled = read_ini_bool(
@@ -14851,6 +15861,50 @@ void load_config() {
             g_config.first_person_aim_diagnostics = false;
             g_config.cinema_camera_diagnostics = false;
             g_config.taau_drop_diagnostics = false;
+        }
+
+        // [FEATURE:VRS-MEASUREMENT 4/8] A measurement runs with
+        // runtime_diagnostics=0, which also clears logging_enabled above, so
+        // its log follows [vrs] log alone. Every configurator writes the two
+        // [debug] switches together, and none of them writes [vrs]: the
+        // "diagnostics off" state they produce is the measurement state.
+        // Modes 1 and 2 are reserved for the foveated rate maps.
+        const int vrs_mode = read_ini_int("vrs", "mode", kVrsModeOff);
+        g_config.vrs_log_file = vrs_mode != kVrsModeOff &&
+            read_ini_bool("vrs", "log", true);
+        g_config.vrs_mode =
+            vrs_mode == kVrsModeUniform ? kVrsModeUniform : kVrsModeOff;
+        if (vrs_mode == 1 || vrs_mode == 2) {
+            log_vrs_line("VRS mode=%d is not in this build; VRS off", vrs_mode);
+        } else if (vrs_mode != kVrsModeOff && vrs_mode != kVrsModeUniform) {
+            log_vrs_line("VRS mode=%d is unknown; VRS off", vrs_mode);
+        }
+        if (g_config.vrs_mode == kVrsModeUniform) {
+            const auto vrs_rate = read_ini_string("vrs", "uniform_rate", "2x2");
+            if (!parse_vrs_rate(vrs_rate, g_config.vrs_uniform_rate)) {
+                g_config.vrs_uniform_rate = D3D12_SHADING_RATE_2X2;
+                log_vrs_line(
+                    "VRS uniform_rate=%s is not 1x1, 1x2, 2x1, 2x2, 2x4, 4x2 "
+                    "or 4x4; using 2x2",
+                    vrs_rate.c_str());
+            }
+            std::string unknown_classes;
+            g_config.vrs_class_mask = parse_vrs_classes(
+                read_ini_string("vrs", "classes", "gbuffer,decal,scene_hdr"),
+                unknown_classes);
+            if (!unknown_classes.empty()) {
+                log_vrs_line("VRS classes: ignored %s", unknown_classes.c_str());
+            }
+        } else {
+            g_config.vrs_log_file = false;
+        }
+        // [PERF:CPU-MEASUREMENT 4/5]
+        g_config.perf_skip_descriptor_tracking = g_config.vrs_log_file &&
+            read_ini_bool("perf", "skip_descriptor_tracking", false);
+        g_config.perf_job_wait_profile = g_config.vrs_log_file &&
+            read_ini_bool("perf", "job_wait_profile", false);
+        if (g_config.perf_skip_descriptor_tracking) {
+            log_vrs_line("PERF skip_descriptor_tracking=1: descriptor-copy metadata off");
         }
 
         const auto temporal_backend = read_ini_string(
@@ -15968,6 +17022,8 @@ void replay_native_temporal_terrain_indexed_motion(
         log_native_temporal_terrain_binding_failure(original, alias_stage);
         return;
     }
+    // [FEATURE:VRS-MEASUREMENT 8/8] The replay is the mod's own draw.
+    VrsModDrawScope vrs_mod_draw{command_list};
     g_set_pipeline_state(command_list, replay);
     g_draw_indexed_instanced(
         command_list, index_count_per_instance, instance_count,
@@ -15998,6 +17054,7 @@ void replay_native_temporal_terrain_nonindexed_motion(
         log_native_temporal_terrain_binding_failure(original, alias_stage);
         return;
     }
+    VrsModDrawScope vrs_mod_draw{command_list};
     g_set_pipeline_state(command_list, replay);
     g_draw_instanced(
         command_list, vertex_count_per_instance, instance_count,
@@ -20162,22 +21219,41 @@ void install_reverse_hooks() {
         }
     }
 
+    // [FEATURE:VRS-MEASUREMENT 5/8] The VRS detours run the normal ones,
+    // then record the new PSO; they exist only while VRS is on, which also
+    // hooks CreateComputePipelineState when nothing else needs it.
+    const bool vrs_detour =
+        g_vrs_measurement_active.load(std::memory_order_acquire);
     if (g_create_graphics_pipeline_state == nullptr) {
         auto target = method<void*>(g_d3d12_device, 10);
-        if (MH_CreateHook(target, reinterpret_cast<void*>(&hook_create_graphics_pipeline_state), reinterpret_cast<void**>(&g_create_graphics_pipeline_state)) == MH_OK &&
+        void* const detour = vrs_detour
+            ? reinterpret_cast<void*>(&hook_create_graphics_pipeline_state_vrs)
+            : reinterpret_cast<void*>(&hook_create_graphics_pipeline_state);
+        if (MH_CreateHook(target, detour, reinterpret_cast<void**>(&g_create_graphics_pipeline_state)) == MH_OK &&
             MH_EnableHook(target) == MH_OK) {
             log_line("Reverse hooked ID3D12Device::CreateGraphicsPipelineState at %p", target);
+            if (vrs_detour) {
+                g_vrs_detour_mask.fetch_or(
+                    kVrsDetourCreatePipeline, std::memory_order_relaxed);
+            }
         }
     }
 
     // DLSS keeps compute-PSO identification so V308's startup serialization
     // retires at the same post-DLSS signatures instead of remaining armed.
-    if (temporal_compute_hooks_needed() &&
+    if ((temporal_compute_hooks_needed() || vrs_detour) &&
         g_create_compute_pipeline_state == nullptr) {
         auto target = method<void*>(g_d3d12_device, 11);
-        if (MH_CreateHook(target, reinterpret_cast<void*>(&hook_create_compute_pipeline_state), reinterpret_cast<void**>(&g_create_compute_pipeline_state)) == MH_OK &&
+        void* const detour = vrs_detour
+            ? reinterpret_cast<void*>(&hook_create_compute_pipeline_state_vrs)
+            : reinterpret_cast<void*>(&hook_create_compute_pipeline_state);
+        if (MH_CreateHook(target, detour, reinterpret_cast<void**>(&g_create_compute_pipeline_state)) == MH_OK &&
             MH_EnableHook(target) == MH_OK) {
             log_line("Reverse hooked ID3D12Device::CreateComputePipelineState at %p", target);
+            if (vrs_detour) {
+                g_vrs_detour_mask.fetch_or(
+                    kVrsDetourCreateComputePipeline, std::memory_order_relaxed);
+            }
         }
     }
 
@@ -20477,18 +21553,57 @@ void install_command_list_hooks() {
         (reverse_enabled() && g_config.reverse_cbv_probe);
     const bool compute_hooks = taau_compute_hooks_needed() ||
         rt_symmetric_dlss_per_eye_ao_history_active();
+    // [FEATURE:VRS-MEASUREMENT 6/8] Reset and SetPipelineState get the VRS
+    // detour, which wraps the normal one, and ClearState and Close are hooked
+    // at all, only while VRS is on.
+    const bool vrs_detours =
+        g_vrs_measurement_active.load(std::memory_order_acquire);
 
     if (g_reset_command_list == nullptr) {
         auto target = method<void*>(command_list, 10);
-        if (MH_CreateHook(target,
-                reinterpret_cast<void*>(&hook_reset_command_list),
+        void* const reset_detour = vrs_detours
+            ? reinterpret_cast<void*>(&hook_reset_command_list_vrs)
+            : reinterpret_cast<void*>(&hook_reset_command_list);
+        if (MH_CreateHook(target, reset_detour,
                 reinterpret_cast<void**>(&g_reset_command_list)) == MH_OK &&
             MH_EnableHook(target) == MH_OK) {
             log_line(
                 "Renderer hooked ID3D12GraphicsCommandList::Reset at %p",
                 target);
             register_embedded_command_list_slot<10>(target,
-                reinterpret_cast<void*>(&hook_reset_command_list), &g_reset_command_list, true);
+                reset_detour, &g_reset_command_list, true);
+            if (vrs_detours) {
+                g_vrs_detour_mask.fetch_or(
+                    kVrsDetourReset, std::memory_order_relaxed);
+            }
+        }
+    }
+
+    if (vrs_detours && g_clear_state == nullptr) {
+        auto target = method<void*>(command_list, 11);
+        if (MH_CreateHook(target,
+                reinterpret_cast<void*>(&hook_clear_state_vrs),
+                reinterpret_cast<void**>(&g_clear_state)) == MH_OK &&
+            MH_EnableHook(target) == MH_OK) {
+            register_embedded_command_list_slot<11>(target,
+                reinterpret_cast<void*>(&hook_clear_state_vrs),
+                &g_clear_state, true);
+            g_vrs_detour_mask.fetch_or(
+                kVrsDetourClearState, std::memory_order_relaxed);
+        }
+    }
+
+    if (vrs_detours && g_close_command_list == nullptr) {
+        auto target = method<void*>(command_list, 9);
+        if (MH_CreateHook(target,
+                reinterpret_cast<void*>(&hook_close_command_list_vrs),
+                reinterpret_cast<void**>(&g_close_command_list)) == MH_OK &&
+            MH_EnableHook(target) == MH_OK) {
+            register_embedded_command_list_slot<9>(target,
+                reinterpret_cast<void*>(&hook_close_command_list_vrs),
+                &g_close_command_list, true);
+            g_vrs_detour_mask.fetch_or(
+                kVrsDetourClose, std::memory_order_relaxed);
         }
     }
 
@@ -20626,11 +21741,18 @@ void install_command_list_hooks() {
 
     if (g_set_pipeline_state == nullptr) {
         auto target = method<void*>(command_list, 25);
-        if (MH_CreateHook(target, reinterpret_cast<void*>(&hook_set_pipeline_state), reinterpret_cast<void**>(&g_set_pipeline_state)) == MH_OK &&
+        void* const set_pipeline_detour = vrs_detours
+            ? reinterpret_cast<void*>(&hook_set_pipeline_state_vrs)
+            : reinterpret_cast<void*>(&hook_set_pipeline_state);
+        if (MH_CreateHook(target, set_pipeline_detour, reinterpret_cast<void**>(&g_set_pipeline_state)) == MH_OK &&
             MH_EnableHook(target) == MH_OK) {
             log_line("Reverse hooked ID3D12GraphicsCommandList::SetPipelineState at %p", target);
             register_embedded_command_list_slot<25>(target,
-                reinterpret_cast<void*>(&hook_set_pipeline_state), &g_set_pipeline_state, true);
+                set_pipeline_detour, &g_set_pipeline_state, true);
+            if (vrs_detours) {
+                g_vrs_detour_mask.fetch_or(
+                    kVrsDetourSetPipeline, std::memory_order_relaxed);
+            }
         }
     }
 
@@ -20653,6 +21775,22 @@ void install_command_list_hooks() {
             register_embedded_command_list_slot<29>(target,
                 reinterpret_cast<void*>(&hook_set_compute_root_signature), &g_set_compute_root_signature, false);
         }
+    }
+
+    if (vrs_detours) {
+        const uint32_t detours =
+            g_vrs_detour_mask.load(std::memory_order_relaxed);
+        log_vrs_line(
+            "VRS detours create_pso=%d create_compute_pso=%d "
+            "set_pipeline_state=%d reset=%d clear_state=%d close=%d "
+            "embedded=%d",
+            (detours & kVrsDetourCreatePipeline) != 0 ? 1 : 0,
+            (detours & kVrsDetourCreateComputePipeline) != 0 ? 1 : 0,
+            (detours & kVrsDetourSetPipeline) != 0 ? 1 : 0,
+            (detours & kVrsDetourReset) != 0 ? 1 : 0,
+            (detours & kVrsDetourClearState) != 0 ? 1 : 0,
+            (detours & kVrsDetourClose) != 0 ? 1 : 0,
+            embedded_command_list_table(command_list) != nullptr ? 1 : 0);
     }
 
     g_command_list_hooks_installed = true;
@@ -46843,6 +47981,8 @@ void capture_d3d12_objects(IUnknown* dxgi_device_parameter) {
         g_d3d12_device = device;
     }
     log_line("Captured D3D12 queue=%p device=%p", g_command_queue, g_d3d12_device);
+    // [FEATURE:VRS-MEASUREMENT 7/8] Decide before the detours are created.
+    initialize_vrs_measurement(g_d3d12_device);
     install_reverse_hooks();
     // Clean mono never enables the Mode-3 dual-render transition. Install the
     // shared barrier/lifetime observer at device capture so its one TAAU
