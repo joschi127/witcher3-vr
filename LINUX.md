@@ -22,7 +22,7 @@ version of these steps.
 
 - **Steam with Proton.** Proton Hotfix is tested. The tool finds native Steam, Flatpak Steam and
   the Steam Deck layout, and every Steam library. GOG installs in Heroic Games Launcher (native or
-  Flatpak) are found as well (untested in the game so far); for any other install, every command
+  Flatpak) are found as well, see [Heroic (GOG)](#heroic-gog); for any other install, every command
   takes `--game-dir DIR --prefix WINEPREFIX`.
 - **The Witcher 3 Remastered, patch 5.01, DirectX 12**, on Steam's default branch. The mod checks
   the game build at startup and does nothing on other builds.
@@ -43,7 +43,8 @@ version of these steps.
 
 - **Back up your saves.** They are in
   `steamapps/compatdata/292030/pfx/drive_c/users/steamuser/Documents/The Witcher 3/gamesaves`,
-  inside the Steam library that holds the game. `install` also makes a verified backup first (see
+  inside the Steam library that holds the game (Heroic: the same path below the game's Wine prefix,
+  which `status` prints). `install` also makes a verified backup first (see
   [backup-saves](#backup-saves)).
 - **Start the game once without the mod**, reach the main menu and quit. This creates the Proton
   prefix and the settings files the tool edits (`dx12user.settings` and `input.settings`).
@@ -68,6 +69,26 @@ python3 linux/w3vr-linux.py wivrn-shortcut        # optional
 ```
 
 `python3 linux/w3vr-linux.py <command> --help` lists the options of each command.
+
+### Heroic (GOG)
+
+Tested with Heroic 2.22 (Flatpak) and the GOG edition on patch 5.01, under GE-Proton 11 and
+Proton-CachyOS, without a headset (OpenXR through the null runtime from `tools/w3vr-nullxr`).
+The tool finds the install and its Wine prefix from Heroic's settings by itself.
+
+1. Install the game in Heroic and keep it on patch 5.01: turn off automatic updates for it. The mod
+   does nothing on other builds.
+2. Choose a Proton build: in Heroic's *Wine Manager*, the GE-Proton builds are on their own tab at
+   the top of the page; download *GE-Proton-latest*, then select it under *The Witcher 3 >
+   Settings > Wine*. Proton-CachyOS works as well.
+3. Turn off cloud saves for the game in Heroic while you test.
+4. Start the game once without the mod and quit from the main menu, then run `install` and
+   `configure` as above.
+5. Run `launch-options` and add what it lists in the game's Heroic settings: the environment
+   variables (at least `WINEDLLOVERRIDES` = `dxgi=n,b`) and the game argument `--launcher-skip`,
+   which makes the GOG build's REDprelauncher start the DirectX 12 game directly.
+
+To play without the mod, remove `WINEDLLOVERRIDES` again or run `uninstall`.
 
 ### status
 

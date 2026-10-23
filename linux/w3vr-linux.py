@@ -1052,6 +1052,11 @@ def print_heroic_launch_settings(g, runtime='auto'):
         current = g.get('launch_env', {}).get(key)
         print('  %-20s %s%s' % (key, value, '' if current is None else
                                 '   (set: %s)' % current if current == value else '   (now: %s)' % current))
+    args = g.get('launch_args', '') or ''
+    print()
+    print('Heroic > The Witcher 3 > Settings > Advanced > Game Arguments: --launcher-skip%s'
+          % ('   (set)' if '--launcher-skip' in args.split() else ''))
+    print('  (the GOG build starts REDprelauncher.exe; --launcher-skip starts the DirectX 12 game directly)')
     print()
     print('The mod needs only WINEDLLOVERRIDES. Without a headset, point [test] openxr_loader in witcher3vr.ini at the')
     print('null runtime instead of setting an OpenXR runtime here.')
