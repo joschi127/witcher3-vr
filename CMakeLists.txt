@@ -447,6 +447,14 @@ if(BUILD_TESTING)
     )
 
     add_test(
+        NAME linux_remaster_settings_contract
+        COMMAND "${CMAKE_COMMAND}"
+            "-DLAUNCHER_CONFIG=${CMAKE_CURRENT_SOURCE_DIR}/launcher/config.cpp"
+            "-DLINUX_TOOL=${CMAKE_CURRENT_SOURCE_DIR}/linux/w3vr-linux.py"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/linux_remaster_settings_contract.cmake"
+    )
+
+    add_test(
         NAME hud_editor_subtitle_preview_nudge_contract
         COMMAND "${CMAKE_COMMAND}"
             "-DHUD_EDITOR_SCRIPT=${CMAKE_CURRENT_SOURCE_DIR}/support/modWitcher3VRHUDEditor/content/scripts/local/witcher3vr_hud_editor/hud_editor.ws"

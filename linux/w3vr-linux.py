@@ -93,6 +93,42 @@ REMASTER_DEFAULTS = (
     ('engine', 'dlss_mip_bias_offset', '0.5'),
     ('engine', 'async_anim_tick_visible', '1'),
 )
+# dx12user.settings keys the Windows launcher writes on 5.x (kSettings in ConfigureRemasteredGameSettingsForVr,
+# launcher/config.cpp; tests/linux_remaster_settings_contract.cmake keeps both lists equal). AAMode and AllowDLSS
+# follow from the chosen mode instead. Ray/path tracing, frame generation, low-latency modes, HDR and the editor
+# preset detection are off; so are effects that look detached in VR (motion blur, blur, depth of field, lens
+# effects, vignette, chromatic aberration), screen-space reflections, HairWorks and the light shafts that veil
+# the whole image whenever the sun is in view.
+REMASTER_VR_SETTINGS = (
+    ('PostProcess', 'AllowShafts', 'false'),
+    ('Rendering/RT', 'EnableRT', 'false'),
+    ('Rendering/RT', 'RTAOEnabled', 'false'),
+    ('Rendering/RT', 'RTGIPreset', 'false'),
+    ('Rendering/RT', 'Shadows', '0'),
+    ('Rendering/RT', 'EnableRtRadiance', 'false'),
+    ('Rendering/RT', 'BalanceModeRT', 'false'),
+    ('Rendering/RT/PathTracer', 'PTEnable', 'false'),
+    ('PostProcess', 'EnableDLSSRR', 'false'),
+    ('Rendering', 'AllowDLSSRR', 'false'),
+    ('PostProcess', 'FSRFramegen', '0'),
+    ('PostProcess', 'XessFrameGeneration', 'false'),
+    ('PostProcess', 'DLSSGMode', '0'),
+    ('PostProcess', 'XeLowLatency', 'false'),
+    ('Viewport', 'AMDAntiLag', '0'),
+    ('Viewport', 'ReflexMode', '0'),
+    ('Viewport', 'VSync', 'false'),
+    ('Engine', 'LimitFPS', '0'),
+    ('Visuals', 'HdrEnabled', 'false'),
+    ('Rendering', 'ShouldDetectEditorGraphicsPreset', 'false'),
+    ('PostProcess', 'AllowMotionBlur', 'false'),
+    ('PostProcess', 'AllowBlur', 'false'),
+    ('PostProcess', 'AllowDOF', 'false'),
+    ('PostProcess', 'AllowLensEffects', 'false'),
+    ('PostProcess', 'AllowVignette', 'false'),
+    ('PostProcess', 'AllowChromaticAberration', 'false'),
+    ('Rendering', 'SSREnabled', 'false'),
+    ('Rendering', 'HairWorksLevel', '0'),
+)
 DLSS_QUALITY_NAMES = {0: 'DLAA', 1: 'Quality', 2: 'Balanced', 3: 'Performance', 4: 'Ultra Performance'}
 # Remastered 5.01: the game runs DLSS itself (Streamline 2; the mod gives each eye its own DLSS history) and has
 # no TAAU. "none" uses FXAA. "fsr" is the game's FSR (FSR 4 on RDNA4, the older FSR elsewhere, any GPU); in Stereo
@@ -943,6 +979,8 @@ def cmd_configure(args):
         doc.set('PostProcess', 'DLSSQuality', str(5 if quality == 0 else max(1, min(4, quality))))
         # Frame generation, Reflex and Ray Reconstruction off: the mod presents its own eye pairs. Sharpening
         # off: it adds shimmer after the stream's resampling.
+        for section, key, value in REMASTER_VR_SETTINGS:
+            doc.set(section, key, value)
         doc.set('Rendering', 'AllowDLSSG', 'false')
         doc.set('Rendering', 'AllowReflex', 'false')
         doc.set('Rendering', 'AllowDLSSRR', 'false')

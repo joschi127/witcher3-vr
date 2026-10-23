@@ -257,6 +257,7 @@ Deleting `bin/x64_dx12/dxgi.dll` alone also switches the mod off: Proton loads t
 | `[PostProcess] AAMode` | `6` = DLSS, `1` = FXAA on 5.01 (`0` = none, `3` = TAAU on 4.04) |
 | `[PostProcess] DLSSQuality` | 5.01: `1`-`4`, `5` = DLAA. 4.04: `1`-`4` (DLAA through `dlss_dlaa`) |
 | `[Rendering] AllowDLSS` | `true` with DLSS |
+| The Windows launcher's 5.x list (`REMASTER_VR_SETTINGS`, same as `kSettings` in `launcher/config.cpp`) | 5.01: ray and path tracing, ray reconstruction, frame generation, low-latency modes, VSync, FPS limit, HDR and editor preset detection off; light shafts, motion blur, blur, depth of field, lens effects, vignette, chromatic aberration, screen-space reflections and HairWorks off |
 | `[Rendering] AllowDLSSG`, `AllowReflex`, `AllowDLSSRR`; `[PostProcess] EnableDLSSRR` | `false` (5.01). The mod presents its own eye pairs. |
 | `[PostProcess] SharpenAmount`; `[Rendering/TAA] EnableCAS` | `0`, `false` (5.01). Sharpening adds shimmer after the stream's resampling. |
 | `[Gameplay] EnableAlternateExplorationCamera`, `EnableAlternateCombatCamera` | `1` (5.01): the *Close* cameras |
