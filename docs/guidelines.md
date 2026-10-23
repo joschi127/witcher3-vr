@@ -125,6 +125,25 @@ game folder. Add Defender exclusions for the build directory and the installed `
   gamepad disables it), and its `quit` action closes the game window. Times are ms since the
   first Present. Diagnostic census and inventory files from `[debug]` complement it.
 
+## Batching changes and test runs (optional)
+
+A session may develop several changes in one go, by hand or with an AI agent, and test them
+together afterwards: one automated run (build, CTest, smoke/null-HMD runs) and one headset session
+by the maintainer instead of one per change. Headset time is the scarcest resource, so this is
+often the faster way. It is a choice, not a rule; test single changes on their own when that is
+simpler.
+
+- Each change is still its own commit that builds, as in the git workflow below. Batching changes
+  how often you test, not how you commit.
+- Batch changes that touch different areas. When two changes could cause the same symptom (both
+  in the stereo pair path, both in the HUD composite), test them separately or plan a bisect.
+- Keep a short test list for the batch: what each change needs checked, so one session covers all
+  of them (5.01, and 4.04 where the change can affect it).
+- If the batched run fails, bisect by commit: every commit builds, so a DLL per commit narrows it
+  down headset-free first.
+- Record in `docs/remaster-port-status.md` which commits a run covered and which checks are still
+  open, the same as for single changes.
+
 ## Launcher behaviour worth knowing
 
 "Configure Settings for VR" (`ConfigureGameSettingsForVr`, `launcher/config.cpp`) replaces
@@ -236,10 +255,23 @@ same). The material they were derived from is not.
     mod forces it on 5.x too); `native_stereo` per runtime (symmetric FOVs: 0).
   - Keep the user's camera inversion keys, as the 4.04 button does.
 
+## Architecture decision records
+
+Decisions that shape the code or the project and are hard to reverse are recorded as ADRs in
+[docs/adr/](adr/README.md): one Markdown file per decision with context, decision and
+consequences. Write one when a choice affects architecture, game-version support, scope,
+compatibility or the workflow, when it keeps coming up again, or when the maintainer asks for
+one. Bug fixes, tuning values and test results do not need ADRs; they belong in the commit
+message and `docs/remaster-port-status.md`.
+
+These guidelines stay the short rule set and link to an ADR where the reasons matter. An accepted
+ADR is not rewritten later: a change of mind is a new ADR that supersedes the old one. Open
+questions are ADRs with status Proposed until the maintainer decides.
+
 ## Open decisions
 
-- One codebase for 4.04 and the Remaster (current approach, working since 2026-10-13) or a
-  separate Remaster-only fork. To be settled with upstream.
+- One codebase for 4.04 and the Remaster or a separate Remaster-only fork:
+  [ADR 0002](adr/0002-one-codebase-for-404-and-5x.md) (Proposed).
 
 ## Upstream relationship
 
