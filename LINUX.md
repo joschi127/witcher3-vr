@@ -21,7 +21,9 @@ version of these steps.
 ## Requirements
 
 - **Steam with Proton.** Proton Hotfix is tested. The tool finds native Steam, Flatpak Steam and
-  the Steam Deck layout, and every Steam library.
+  the Steam Deck layout, and every Steam library. GOG installs in Heroic Games Launcher (native or
+  Flatpak) are found as well (untested in the game so far); for any other install, every command
+  takes `--game-dir DIR --prefix WINEPREFIX`.
 - **The Witcher 3 Remastered, patch 5.01, DirectX 12**, on Steam's default branch. The mod checks
   the game build at startup and does nothing on other builds.
 - **An OpenXR runtime on the host.** WiVRn (Flatpak `io.github.wivrn.wivrn`) is tested. The tool
@@ -156,6 +158,13 @@ PRESSURE_VESSEL_IMPORT_OPENXR_1_RUNTIMES=1 PRESSURE_VESSEL_FILESYSTEMS_RW=/var/l
 - `WINEDLLOVERRIDES="dxgi=n,b"` and `PROTON_ENABLE_NVAPI=1` can be added. Proton Hotfix already
   sets both for this game on NVIDIA systems; on other Proton versions they make sure the mod's
   `dxgi.dll` loads and NVAPI is available for DLSS.
+
+For a Heroic (GOG) install there is no launch-option line. The command lists the environment
+variables to add under *Heroic > The Witcher 3 > Settings > Advanced > Environment Variables*
+instead (at least `WINEDLLOVERRIDES` = `dxgi=n,b`) and shows which of them are already set. The
+tool does not change Heroic's settings itself. Heroic reads the game's Wine prefix from its game
+settings; with Proton the tool uses its `pfx/` folder. Turn off cloud saves for the game in Heroic
+while testing.
 
 ### wivrn-shortcut
 

@@ -3,7 +3,8 @@
 
 It replaces Witcher3VRLauncher.exe on Linux. That launcher only stages dxgi.dll, writes witcher3vr.ini and
 dx12user.settings, registers the HUD editor and starts the game. This tool does the same file work, plus:
-  - finds Steam (native, Steam Deck, Flatpak) and every Steam library
+  - finds Steam (native, Steam Deck, Flatpak) and every Steam library, and GOG installs in Heroic Games Launcher
+    (native, Flatpak); any other install works with --game-dir DIR --prefix WINEPREFIX
   - checks that the game is a DX12 build the mod supports: Patch 4.04 (Steam beta "next-gen") or
     Remastered 5.01 (current Steam build); each gets its own tested preset
   - installs a release zip, after checking it against the release's SHA-256 file
@@ -274,8 +275,122 @@ def steam_roots():
     return roots
 
 
+def game_entry(store, game, prefix, **extra):
+    """The dict every command works with; the Steam-only keys stay empty for other stores."""
+    g = {
+        'store': store,
+        'game': game,
+        'x64': os.path.join(game, 'bin', 'x64_dx12'),
+        'prefix': prefix,
+        'docs': prefix_docs(prefix) if prefix else None,
+        'steam_root': None,
+        'buildid': '',
+        'betakey': '',
+        'state_flags': '',
+        'flatpak_steam': False,
+    }
+    g.update(extra)
+    return g
+
+
+def wine_prefix(path):
+    """The folder holding drive_c: Proton keeps the prefix in pfx/ below the path Heroic or Steam stores."""
+    path = os.path.expanduser(path)
+    return os.path.join(path, 'pfx') if os.path.isdir(os.path.join(path, 'pfx', 'drive_c')) else path
+
+
+def prefix_docs(prefix):
+    """Documents/The Witcher 3 in a prefix. Proton names the Windows user steamuser, plain Wine uses the login name."""
+    users = os.path.join(prefix, 'drive_c', 'users')
+    names = []
+    listed = sorted(os.listdir(users)) if os.path.isdir(users) else []
+    for name in ['steamuser', os.environ.get('USER', '')] + listed:
+        if name and name != 'Public' and name not in names:
+            names.append(name)
+    for name in names:
+        if os.path.isdir(os.path.join(users, name, 'Documents', 'The Witcher 3')):
+            return os.path.join(users, name, 'Documents', 'The Witcher 3')
+    existing = [n for n in names if os.path.isdir(os.path.join(users, n))]
+    return os.path.join(users, (existing or names)[0], 'Documents', 'The Witcher 3')
+
+
+def has_witcher_exe(game):
+    return any(os.path.exists(os.path.join(game, 'bin', d, 'witcher3.exe')) for d in ('x64_dx12', 'x64'))
+
+
+def read_json(path):
+    try:
+        with open(path, encoding='utf-8') as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def heroic_config_dirs():
+    candidates = [
+        os.path.expanduser('~/.var/app/com.heroicgameslauncher.hgl/config/heroic'),  # Flatpak
+        os.path.join(os.environ.get('XDG_CONFIG_HOME', os.path.expanduser('~/.config')), 'heroic'),
+    ]
+    return [c for c in candidates if os.path.isdir(c)]
+
+
+def find_heroic_games():
+    """GOG installs of The Witcher 3 in Heroic Games Launcher (Flatpak or native).
+
+    Heroic lists GOG installs in gog_store/installed.json and keeps each game's Wine prefix, Wine/Proton build and
+    environment variables in GamesConfig/<appName>.json."""
+    for config in heroic_config_dirs():
+        installed = read_json(os.path.join(config, 'gog_store', 'installed.json')) or {}
+        entries = installed.get('installed', []) if isinstance(installed, dict) else installed
+        for entry in entries:
+            game = entry.get('install_path') if isinstance(entry, dict) else None
+            if not game or not has_witcher_exe(game):
+                continue
+            app = entry.get('appName', '')
+            settings = (read_json(os.path.join(config, 'GamesConfig', '%s.json' % app)) or {}).get(app, {})
+            prefix = settings.get('winePrefix')
+            env = {o.get('key'): o.get('value') for o in settings.get('enviromentOptions', []) if isinstance(o, dict)}
+            yield game_entry('heroic', game, wine_prefix(prefix) if prefix else None,
+                             heroic_config=config, app_name=app,
+                             wine=(settings.get('wineVersion') or {}).get('name', ''),
+                             launch_env=env, launch_args=settings.get('launcherArgs', ''),
+                             flatpak_heroic='/.var/app/com.heroicgameslauncher.hgl/' in config)
+
+
+# Set from --game-dir / --prefix in main(): use this game folder and/or Wine prefix instead of the detected ones.
+GAME_OVERRIDE = {}
+
+
 def find_game():
-    """Return a dict describing the Witcher 3 install, or None."""
+    """Return a dict describing the Witcher 3 install, or None.
+
+    Searches Steam, then Heroic (GOG). --game-dir picks the install with that folder (or describes it from scratch,
+    which then also needs --prefix); --prefix replaces the Wine prefix of whatever was found."""
+    game, prefix = GAME_OVERRIDE.get('game'), GAME_OVERRIDE.get('prefix')
+    found = None
+    for g in find_steam_games():
+        if not game or os.path.realpath(g['game']) == os.path.realpath(game):
+            found = g
+            break
+    if not found:
+        for g in find_heroic_games():
+            if not game or os.path.realpath(g['game']) == os.path.realpath(game):
+                found = g
+                break
+    if not found and game:
+        if not prefix:
+            die('%s is not a Steam or Heroic install of the game; pass its Wine prefix with --prefix.' % game)
+        found = game_entry('manual', os.path.abspath(game), None)
+    if found and prefix:
+        found.update(prefix=wine_prefix(os.path.abspath(prefix)), docs=prefix_docs(wine_prefix(os.path.abspath(prefix))))
+    if found and not found['prefix']:
+        die('The Wine prefix of %s is unknown (no winePrefix in the Heroic game settings); pass it with --prefix.'
+            % found['game'])
+    return found
+
+
+def find_steam_games():
+    """Steam installs of The Witcher 3 (app 292030) in every Steam library."""
     for root in steam_roots():
         libraries = [root]
         vdf = os.path.join(root, 'steamapps', 'libraryfolders.vdf')
@@ -294,26 +409,27 @@ def find_game():
             def field(name):
                 m = re.search(r'"%s"\s+"([^"]*)"' % name, acf)
                 return m.group(1) if m else ''
-            return {
-                'steam_root': root,
-                'library': lib,
-                'manifest': manifest,
-                'game': game,
-                'x64': os.path.join(game, 'bin', 'x64_dx12'),
-                'prefix': prefix,
-                'docs': os.path.join(prefix, 'drive_c', 'users', 'steamuser', 'Documents', 'The Witcher 3'),
-                'buildid': field('buildid'),
-                'betakey': field('BetaKey'),
-                'state_flags': field('StateFlags'),
-                'flatpak_steam': '/.var/app/com.valvesoftware.Steam/' in root,
-            }
-    return None
+            yield game_entry(
+                'steam', game, prefix,
+                steam_root=root,
+                library=lib,
+                manifest=manifest,
+                docs=os.path.join(prefix, 'drive_c', 'users', 'steamuser', 'Documents', 'The Witcher 3'),
+                buildid=field('buildid'),
+                betakey=field('BetaKey'),
+                state_flags=field('StateFlags'),
+                flatpak_steam='/.var/app/com.valvesoftware.Steam/' in root,
+            )
+
+
+NOT_FOUND = ('The Witcher 3 was not found in any Steam library or Heroic (GOG) install. '
+             'Point the tool at it with --game-dir DIR --prefix WINEPREFIX.')
 
 
 def require_game():
     g = find_game()
     if not g:
-        die('The Witcher 3 (app %s) was not found in any Steam library.' % APP_ID)
+        die(NOT_FOUND)
     if not os.path.isdir(g['x64']):
         die('Game folder looks incomplete: %s is missing.' % g['x64'])
     return g
@@ -462,12 +578,24 @@ def nvidia_gpu():
 def cmd_status(args):
     g = find_game()
     if not g:
-        die('The Witcher 3 was not found in any Steam library.')
+        die(NOT_FOUND)
     exe = os.path.join(g['x64'], 'witcher3.exe')
     build_description = build_info(g)[1]
-    print('Steam root      %s%s' % (g['steam_root'], ' (Flatpak Steam)' if g['flatpak_steam'] else ''))
+    if g['store'] == 'steam':
+        print('Steam root      %s%s' % (g['steam_root'], ' (Flatpak Steam)' if g['flatpak_steam'] else ''))
+    elif g['store'] == 'heroic':
+        print('Heroic          %s%s, GOG app %s' % (g['heroic_config'], ' (Flatpak Heroic)' if g['flatpak_heroic'] else '',
+                                                   g['app_name']))
+    else:
+        print('Store           none (--game-dir)')
     print('Game folder     %s' % g['game'])
-    print('Branch          %s (buildid %s, StateFlags %s)' % (g['betakey'] or 'public', g['buildid'], g['state_flags']))
+    if g['store'] == 'steam':
+        print('Branch          %s (buildid %s, StateFlags %s)' % (g['betakey'] or 'public', g['buildid'], g['state_flags']))
+    print('Wine prefix     %s' % g['prefix'])
+    if g['store'] == 'heroic':
+        print('Wine/Proton     %s' % (g['wine'] or 'Heroic default'))
+        overrides = g['launch_env'].get('WINEDLLOVERRIDES')
+        print('Heroic env      WINEDLLOVERRIDES=%s' % (overrides if overrides else '(not set: see launch-options)'))
     print('DX12 exe        %s' % build_description)
     print('Prefix docs     %s%s' % (g['docs'], '' if os.path.isdir(g['docs']) else '  (missing: run the game once)'))
     dxgi = os.path.join(g['x64'], 'dxgi.dll')
@@ -905,7 +1033,39 @@ def launch_option_parts(runtime='auto'):
 LAUNCH_ARGS = ['--launcher-skip']
 
 
+def print_heroic_launch_settings(g, runtime='auto'):
+    """Heroic has no launch-option line: the same settings go into the game's settings dialog (not written here)."""
+    kind, detail = openxr_runtime()
+    steamvr = find_steamvr()
+    env = [('WINEDLLOVERRIDES', 'dxgi=n,b')]
+    if nvidia_gpu():
+        env.append(('PROTON_ENABLE_NVAPI', '1'))
+    if runtime == 'steamvr' or (runtime == 'auto' and kind is None and steamvr):
+        if not steamvr:
+            die('SteamVR is not installed in any Steam library (install it from Steam first)')
+        env.append(('XR_RUNTIME_JSON', steamvr))
+        detail = 'SteamVR (%s)' % steamvr
+    print('Runtime: %s' % detail)
+    print('Heroic > The Witcher 3 > Settings (gear icon) > Advanced > Environment Variables, add:')
+    print()
+    for key, value in env:
+        current = g.get('launch_env', {}).get(key)
+        print('  %-20s %s%s' % (key, value, '' if current is None else
+                                '   (set: %s)' % current if current == value else '   (now: %s)' % current))
+    print()
+    print('The mod needs only WINEDLLOVERRIDES. Without a headset, point [test] openxr_loader in witcher3vr.ini at the')
+    print('null runtime instead of setting an OpenXR runtime here.')
+    if g.get('flatpak_heroic') and kind:
+        print('Flatpak Heroic runs the game in its sandbox: it must be able to read the OpenXR runtime (%s)' % detail)
+        print('and reach its socket, e.g. flatpak override --user --filesystem=<runtime folder>:ro '
+              'com.heroicgameslauncher.hgl (not tested yet).')
+
+
 def cmd_launch_options(args):
+    g = find_game()
+    if g and g['store'] != 'steam':
+        print_heroic_launch_settings(g, getattr(args, 'runtime', 'auto'))
+        return
     parts, detail, runtime = launch_option_parts(getattr(args, 'runtime', 'auto'))
     print('Runtime: %s' % detail)
     print('Steam > The Witcher 3 > Properties > General > Launch Options:')
@@ -931,7 +1091,9 @@ def wivrn_config_path():
 
 def cmd_wivrn_shortcut(args):
     """Show the game in WiVRn's in-headset app launcher (desktop entry with Categories X-WiVRn-VR)."""
-    steam = 'flatpak run com.valvesoftware.Steam' if (find_game() or {}).get('flatpak_steam') else 'steam'
+    if (find_game() or {}).get('store') not in (None, 'steam'):
+        die('wivrn-shortcut starts the game through Steam; for Heroic, add a shortcut to Heroic instead.')
+    steam ='flatpak run com.valvesoftware.Steam' if (find_game() or {}).get('flatpak_steam') else 'steam'
     entry = ('[Desktop Entry]\nType=Application\nName=The Witcher 3 VR\n'
              'Comment=The Witcher 3 with the witcher3-vr mod (Proton + WiVRn)\n'
              'Exec=%s steam://rungameid/%s\nIcon=steam_icon_%s\nTerminal=false\nCategories=Game;X-WiVRn-VR;\n'
@@ -1241,6 +1403,10 @@ def wait_for_steam_closed(action):
 
 
 def apply_launch_options(g, state):
+    if g['store'] != 'steam':
+        print()
+        print_heroic_launch_settings(g)
+        return False
     env, detail, _runtime = launch_option_parts()
     print('OpenXR runtime: %s' % detail)
     vdf = localconfig_path(g)
@@ -1384,8 +1550,7 @@ def cmd_setup(args):
         die('no bin/x64_dx12/dxgi.dll in %s: run the installer from the extracted release folder' % payload)
     g = find_game()
     if not g:
-        die('The Witcher 3 was not found in your Steam libraries (native, Flatpak or Snap Steam). Install it in '
-            'Steam first.')
+        die(NOT_FOUND)
     print('Found the game: %s' % g['game'])
     if game_running():
         die('The Witcher 3 is running. Quit the game, then run the installer again.')
@@ -1464,7 +1629,8 @@ def cmd_setup(args):
     print()
     print('=' * 72)
     print('Done.' if settings_done and launch_done else 'Done, with the step(s) above to finish by hand.')
-    print('Play: start your VR runtime (WiVRn or SteamVR), connect the headset, then start The Witcher 3 in Steam.')
+    print('Play: start your VR runtime (WiVRn or SteamVR), connect the headset, then start The Witcher 3 in %s.'
+          % ('Heroic' if g['store'] == 'heroic' else 'Steam'))
     print('Remove the mod again any time with "Uninstall (Linux)".')
     print('=' * 72)
 
@@ -1472,7 +1638,7 @@ def cmd_setup(args):
 def cmd_remove(args):
     g = find_game()
     if not g:
-        die('The Witcher 3 was not found in your Steam libraries.')
+        die(NOT_FOUND)
     if game_running():
         die('The Witcher 3 is running. Quit the game, then run the uninstaller again.')
     state = load_state(g)
@@ -1487,9 +1653,20 @@ def cmd_remove(args):
         print('Save backups made by the installer stay in %s (delete them when you no longer need them).' % BACKUP_ROOT)
 
 
+class GameDirParser(argparse.ArgumentParser):
+    """Every command accepts --game-dir and --prefix, before or after the command name."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.add_argument('--game-dir', default=argparse.SUPPRESS,
+                          help='the game folder (the one with bin/x64_dx12), e.g. a Heroic or Lutris install')
+        self.add_argument('--prefix', default=argparse.SUPPRESS,
+                          help="the game's Wine prefix (a Proton prefix's pfx/ is found by itself)")
+
+
 def build_parser():
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    sub = p.add_subparsers(dest='cmd', required=True)
+    p = GameDirParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = p.add_subparsers(dest='cmd', required=True, parser_class=GameDirParser)
     sp = sub.add_parser('setup', help='one-step install from an extracted release folder (used by "Install (Linux)")')
     sp.add_argument('--payload', default=os.path.join(TOOL_DIR, '..', '..'),
                     help='the release payload folder (mirrors the game folder)')
@@ -1545,6 +1722,7 @@ def build_parser():
 
 def main():
     args = build_parser().parse_args()
+    GAME_OVERRIDE.update(game=getattr(args, 'game_dir', None), prefix=getattr(args, 'prefix', None))
     {'setup': cmd_setup, 'remove': cmd_remove, 'status': cmd_status, 'backup-saves': cmd_backup_saves, 'install': cmd_install, 'configure': cmd_configure,
      'launch-options': cmd_launch_options, 'wivrn-shortcut': cmd_wivrn_shortcut,
      'uninstall': cmd_uninstall}[args.cmd](args)
