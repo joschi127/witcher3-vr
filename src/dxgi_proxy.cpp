@@ -18,6 +18,8 @@
 #define XR_NO_PROTOTYPES
 #include <openxr/openxr.h>
 #include <openxr/openxr_platform.h>
+#include <ffx_api.h>
+#include <ffx_upscale.h>
 
 #include "aer_scheduler.h"
 #include "cbv_descriptor_cache_policy.h"
@@ -44,6 +46,7 @@
 #include "optiscaler_jitter_policy.h"
 #include "pipeline_flight_recorder.h"
 #include "prefix_hook.h"
+#include "call_site_hook.h"
 #include "hotkey_name.h"
 #include "camera_light_yaw.h"
 #include "route_flight_recorder.h"
@@ -646,6 +649,35 @@ struct Config {
     bool raytracing_enabled{true};
     int raytracing_history_buffers{kRtHistoryDefaultBufferCount};
     TemporalBackend temporal_backend{TemporalBackend::None};
+    // 5.01 only: [engine] temporal_backend=dlss runs the game's own DLSS SR
+    // (Streamline 2) with one Streamline viewport and history per eye; the mod
+    // keeps the No-AA presentation transport.
+    bool remaster_engine_dlss{};
+    bool remaster_dlss_per_eye_motion{true};
+    // 5.01 per-eye DLSS image controls. dlss_preset: Streamline DLSSPreset
+    // value forced for every quality mode (0 = the game's choice).
+    // dlss_mip_bias_offset: added to the engine's DLSS texture LOD bias.
+    uint32_t dlss_preset{};
+    float dlss_mip_bias_offset{};
+    // 5.01 diagnostic: [debug] dlss_eye_constants_log=1 logs the sl::Constants
+    // each eye's DLSS receives (camera motion, jitter, mvec scale, flags).
+    bool dlss_eye_constants_log{};
+    // 5.01 only: [engine] remaster_fsr_per_eye=1 gives the game's own FSR
+    // (Anti-aliasing = FSR in the game) a second ffxContext, so each eye of
+    // strict Stereo keeps its own FSR history. Independent of
+    // temporal_backend; the per-eye motion record follows
+    // remaster_dlss_per_eye_motion as it does for DLSS.
+    bool remaster_fsr_per_eye{};
+    // 5.01 strict Stereo: _pair_jitter gives both eye renders of a pair the
+    // same temporal jitter sample, advancing once per pair, so each eye's own
+    // DLSS history sees the whole Halton sequence; _pair_noise does the same
+    // for the GTAO and screen-space shadow noise index.
+    bool remaster_pair_jitter{};
+    bool remaster_pair_noise{};
+    // 5.01 strict Stereo: a render proxy's previous transform (motion vectors
+    // of moving objects) is valid for one engine render only; 1 re-validates
+    // it for the second eye of the pair (see [FIX:REMASTER-PAIR-PREVIOUS]).
+    bool remaster_pair_previous_transforms{};
     bool engine_native_projection_shift{false};
     int engine_native_projection_shift_px{8};
     float engine_native_stereo_offset{0.0f};
@@ -935,9 +967,39 @@ bool mode3_taau_native_full_motion_active() {
         g_config.temporal_backend == TemporalBackend::Taau;
 }
 
+// [FEATURE:REMASTER-ENGINE-DLSS 2/6] strict Stereo with the 5.01 engine DLSS.
+bool remaster_engine_dlss_per_eye_running();
+bool remaster_engine_dlss_stereo_active() {
+    return g_config.remaster_engine_dlss && g_config.openxr_enabled &&
+        g_config.openxr_mode == 3;
+}
+
+// [FEATURE:REMASTER-FSR-PER-EYE 4/7] strict Stereo with the 5.01 engine FSR
+// on one ffxContext per eye.
+bool remaster_engine_fsr_per_eye_running();
+bool remaster_engine_fsr_stereo_active() {
+    return g_config.remaster_fsr_per_eye && g_config.openxr_enabled &&
+        g_config.openxr_mode == 3;
+}
+
+// Eyes (bit 0 left, bit 1 right) whose per-eye DLSS history must restart
+// (kaarele sets it when a per-eye frustum is switched on or off).
+std::atomic<uint8_t> g_remaster_dlss_external_reset_mask{};
+// The same for the per-eye FSR contexts.
+std::atomic<uint8_t> g_remaster_fsr_external_reset_mask{};
+
+// The game's own upscaler (DLSS or FSR) currently keeps one history per eye.
+bool remaster_engine_upscaler_per_eye_running() {
+    return remaster_engine_dlss_per_eye_running() ||
+        remaster_engine_fsr_per_eye_running();
+}
+
 bool engine_native_per_eye_temporal_history_active() {
     return dlss_sequential_mode_active() ||
-        mode3_taau_native_full_motion_active();
+        mode3_taau_native_full_motion_active() ||
+        ((remaster_engine_dlss_stereo_active() ||
+                remaster_engine_fsr_stereo_active()) &&
+            g_config.remaster_dlss_per_eye_motion);
 }
 
 bool dlss_submitted_cache_route_active() {
@@ -15121,6 +15183,30 @@ std::string read_ini_string(
     return result;
 }
 
+// [FEATURE:REMASTER-DLSS-IMAGE 3/5] [engine] dlss_preset: empty, "game" or
+// "default" keeps the game's choice (0); a letter E-O (optionally "preset_k")
+// or its Streamline 2.14 number 5-15 forces that DLSS SR preset. A-D were
+// removed from DLSS and anything else falls back to the game's choice.
+uint32_t parse_dlss_preset(const std::string& value) {
+    if (value.empty() || value == "game" || value == "default" || value == "0") {
+        return 0;
+    }
+    std::string letter = value;
+    if (letter.rfind("preset_", 0) == 0) {
+        letter.erase(0, 7);
+    }
+    if (letter.size() == 1 && letter[0] >= 'e' && letter[0] <= 'o') {
+        return static_cast<uint32_t>(letter[0] - 'a' + 1);
+    }
+    const int number = atoi(value.c_str());
+    if (number >= 5 && number <= 15) {
+        return static_cast<uint32_t>(number);
+    }
+    log_line("dlss_preset=%s is not a DLSS preset (E-O or 5-15); using the game's choice",
+        value.c_str());
+    return 0;
+}
+
 TemporalBackend parse_temporal_backend(
     const std::string& value, bool legacy_dlss, bool legacy_taau) {
     if (value == "none" || value == "off" || value == "disabled") {
@@ -16062,6 +16148,7 @@ void log_job_wait_profile_locked(uint64_t window_presents, int64_t qpc_frequency
 void log_pair_barrier_census_locked(uint64_t window_presents, int64_t qpc_frequency);
 void log_pair_enqueue_census_locked(uint64_t window_presents);
 void log_descriptor_shadow_census_locked();
+void log_pair_temporal_census_locked(uint64_t window_presents);
 
 // One line per kVrsCensusPresentInterval Presents, written by the first bind
 // after the boundary; the counters are window deltas.
@@ -16154,6 +16241,7 @@ void log_vrs_census_locked(uint64_t present) {
     // [FIX:PAIR-ENQUEUE-AFTER-FENCE 4/11]
     log_pair_enqueue_census_locked(window_presents);
     log_descriptor_shadow_census_locked();
+    log_pair_temporal_census_locked(window_presents);
 }
 
 void apply_vrs_pipeline_rate(
@@ -17282,11 +17370,61 @@ void load_config() {
         // DLSS backend would wait for submissions that never come: the packed
         // eye pair is then never accepted and both eyes show the alternating
         // backbuffer (flicker). Run the No-AA route there.
+        g_config.remaster_engine_dlss = false;
         if (running_game_build() == w3vr::game_build::Build::Remaster501 &&
             g_config.temporal_backend != TemporalBackend::None) {
-            log_line("Temporal backend %s not available on 5.01; using none",
-                temporal_backend.c_str());
+            // [FEATURE:REMASTER-ENGINE-DLSS 1/6] DLSS stays the game's own:
+            // the transport is No-AA, and per-eye histories come from
+            // per-eye Streamline viewports (see install_remaster_engine_dlss_hooks).
+            g_config.remaster_engine_dlss =
+                g_config.temporal_backend == TemporalBackend::Dlss;
+            g_config.remaster_dlss_per_eye_motion = read_ini_bool(
+                "engine", "remaster_dlss_per_eye_motion", true);
+            // [FEATURE:REMASTER-DLSS-IMAGE 2/5] Optional preset and texture
+            // LOD bias controls for the per-eye DLSS (both default to the game's).
+            const std::string dlss_preset =
+                read_ini_string("engine", "dlss_preset", "");
+            g_config.dlss_preset = parse_dlss_preset(dlss_preset);
+            g_config.dlss_mip_bias_offset = std::clamp(
+                read_ini_float("engine", "dlss_mip_bias_offset", 0.0f), -2.0f, 3.0f);
+            g_config.dlss_eye_constants_log =
+                read_ini_bool("debug", "dlss_eye_constants_log", false);
+            log_line("Temporal backend %s on 5.01: transport=none engine_dlss=%d per_eye_motion=%d "
+                "dlss_preset=%s(%u) dlss_mip_bias_offset=%.3f",
+                temporal_backend.c_str(),
+                g_config.remaster_engine_dlss ? 1 : 0,
+                g_config.remaster_dlss_per_eye_motion ? 1 : 0,
+                dlss_preset.empty() ? "game" : dlss_preset.c_str(),
+                g_config.dlss_preset, g_config.dlss_mip_bias_offset);
             g_config.temporal_backend = TemporalBackend::None;
+        }
+        // [FEATURE:REMASTER-FSR-PER-EYE 3/7] Read on 5.01 whatever the
+        // temporal backend; FSR is the game's choice (AAMode 5).
+        g_config.remaster_fsr_per_eye = false;
+        if (running_game_build() == w3vr::game_build::Build::Remaster501) {
+            g_config.remaster_fsr_per_eye =
+                read_ini_bool("engine", "remaster_fsr_per_eye", false);
+            if (g_config.remaster_fsr_per_eye) {
+                g_config.remaster_dlss_per_eye_motion = read_ini_bool(
+                    "engine", "remaster_dlss_per_eye_motion", true);
+                log_line("FSR per-eye contexts requested on 5.01: per_eye_motion=%d",
+                    g_config.remaster_dlss_per_eye_motion ? 1 : 0);
+            }
+        }
+        // [FIX:REMASTER-PAIR-JITTER 2/6] [FIX:REMASTER-PAIR-NOISE 2/4]
+        g_config.remaster_pair_jitter = false;
+        g_config.remaster_pair_noise = false;
+        if (running_game_build() == w3vr::game_build::Build::Remaster501) {
+            g_config.remaster_pair_jitter =
+                read_ini_bool("engine", "remaster_pair_jitter", false);
+            g_config.remaster_pair_noise =
+                read_ini_bool("engine", "remaster_pair_noise", false);
+        }
+        // [FIX:REMASTER-PAIR-PREVIOUS 1/4]
+        g_config.remaster_pair_previous_transforms = false;
+        if (running_game_build() == w3vr::game_build::Build::Remaster501) {
+            g_config.remaster_pair_previous_transforms = read_ini_bool(
+                "engine", "remaster_pair_previous_transforms", false);
         }
 
         if (temporal_backend_is_dlss()) {
@@ -34176,8 +34314,13 @@ bool prepare_full_vr_fallback_dlss_temporal_history(
     uint64_t pair_id,
     bool& continued) {
     continued = false;
+    const bool remaster_per_eye = (remaster_engine_dlss_stereo_active() ||
+            remaster_engine_fsr_stereo_active()) &&
+        g_config.remaster_dlss_per_eye_motion &&
+        remaster_engine_upscaler_per_eye_running();
     if (view == nullptr || eye < 0 || eye > 1 || pair_id == 0 ||
-        pair_id == UINT64_MAX || !dlss_sequential_mode_active() ||
+        pair_id == UINT64_MAX ||
+        (!dlss_sequential_mode_active() && !remaster_per_eye) ||
         g_engine_temporal_camera_build == nullptr ||
         !g_engine_temporal_camera_build_time_valid.load(
             std::memory_order_acquire)) {
@@ -34219,7 +34362,9 @@ bool prepare_full_vr_fallback_dlss_temporal_history(
         const auto& previous_record = continued
             ? slot.record
             : current_record;
-        memcpy(reinterpret_cast<uint8_t*>(view) + 0x460,
+        memcpy(reinterpret_cast<uint8_t*>(view) +
+                engine_frame_offset(
+                    w3vr::engine_addresses::Value::TemporalCameraRecordOffset),
             previous_record.data(), previous_record.size());
         slot.record = current_record;
         slot.pair_id = pair_id;
@@ -41664,6 +41809,12 @@ bool prepare_engine_per_eye_native_temporal_history(
         return false;
     }
 
+    // 5.01 engine DLSS or FSR: only while the game's upscaler really runs
+    // per eye.
+    if (!dlss_sequential_mode_active() && !mode3_taau_full_motion &&
+        !remaster_engine_upscaler_per_eye_running()) {
+        return false;
+    }
     const int eye = g_engine_factory_eye;
     const uint64_t pair_id = g_engine_producer_pair_id;
     const bool time_valid =
@@ -41700,7 +41851,9 @@ bool prepare_engine_per_eye_native_temporal_history(
         const auto& previous_record = continued
             ? slot.record
             : current_record;
-        memcpy(reinterpret_cast<uint8_t*>(view) + 0x460,
+        memcpy(reinterpret_cast<uint8_t*>(view) +
+                engine_frame_offset(
+                    w3vr::engine_addresses::Value::TemporalCameraRecordOffset),
             previous_record.data(), previous_record.size());
         slot.record = current_record;
         slot.pair_id = pair_id;
@@ -44868,7 +45021,9 @@ void install_engine_world_vector_to_view_ratio_hook() {
 // corrected camera for both the existing DLSS route and Mode-3 TAAU. Logging
 // remains fully dependent on Diagnostic Logging.
 void install_engine_temporal_camera_builder_hook() {
-    if (!engine_build_supported()) {
+    const bool remaster = running_game_build() ==
+        w3vr::game_build::Build::Remaster501;
+    if (!engine_build_supported() && !remaster) {
         return;
     }
     if (!engine_native_per_eye_temporal_history_active() ||
@@ -44876,11 +45031,16 @@ void install_engine_temporal_camera_builder_hook() {
         return;
     }
 
+    // [FEATURE:REMASTER-ENGINE-DLSS 3/6] 5.01 resolves the builder through
+    // the signature-checked address table; 4.04 keeps its fixed RVA.
     constexpr uintptr_t kEngineTemporalCameraBuildRva = 0x015FE010;
     auto* module = reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr));
-    auto* target = module != nullptr
-        ? module + kEngineTemporalCameraBuildRva
-        : nullptr;
+    auto* target = remaster
+        ? engine_function_target(
+            w3vr::engine_addresses::Function::TemporalCameraBuild)
+        : (module != nullptr
+            ? module + kEngineTemporalCameraBuildRva
+            : nullptr);
     const bool installed = target != nullptr &&
         MH_CreateHook(target,
             reinterpret_cast<void*>(&hook_engine_temporal_camera_build),
@@ -44892,11 +45052,2001 @@ void install_engine_temporal_camera_builder_hook() {
             "V14003 REDengine temporal camera builder %s "
             "RVA=0x%llX target=%p backend=%s",
             installed ? "hooked" : "hook failed",
-            static_cast<unsigned long long>(
-                kEngineTemporalCameraBuildRva),
+            static_cast<unsigned long long>(target != nullptr && module != nullptr
+                ? static_cast<uintptr_t>(target - module) : 0),
             target,
-            mode3_taau_native_full_motion_active() ? "taau" : "dlss");
+            mode3_taau_native_full_motion_active() ? "taau"
+                : (remaster ? "remaster_dlss" : "dlss"));
     }
+}
+
+// [FEATURE:REMASTER-ENGINE-DLSS 4/6] Remastered 5.01 evaluates DLSS SR itself
+// through Streamline 2, on the single viewport id at DLSS state +0x180. Strict
+// Stereo renders both eye frames through that one state, so one history would
+// blend the eyes. For the duration of the three engine functions that use the
+// id (constants builder, input prepare, SR apply) each eye gets its own
+// Streamline viewport: the engine's id for the left eye, id + offset for the
+// right. Options, tags, constants and the evaluate then follow per eye.
+// The state also keeps per-frame guards (+0x120/+0x124/+0x128, compared with
+// frame_data +0xC44/+0xC40) that would skip the second eye of a pair as a
+// duplicate; each eye sees its own copy of them, so engine-intended repeats of
+// the same eye are still suppressed.
+using EngineDlssStateFunction =
+    uintptr_t(__fastcall*)(void*, void*, void*, uintptr_t, void*);
+EngineDlssStateFunction g_engine_dlss_constants_builder{};
+EngineDlssStateFunction g_engine_dlss_input_prepare{};
+EngineDlssStateFunction g_engine_dlss_sr_apply{};
+constexpr uint32_t kRemasterDlssRightEyeViewportOffset = 0x100;
+// Frames rendered during dual render without an eye tag (e.g. the fallback of
+// a dropped pair) use a scratch viewport, so they never enter an eye's history.
+constexpr uint32_t kRemasterDlssUntaggedViewportOffset = 0x200;
+constexpr size_t kRemasterDlssUntaggedSlot = 2;
+struct RemasterDlssEyeGuards {
+    uint32_t constants_frame{};
+    uint32_t apply_frame{};
+    uint32_t prepare_frame{};
+    uint32_t last_frame_index{};
+    bool valid{};
+};
+std::recursive_mutex g_remaster_dlss_mutex;
+void* g_remaster_dlss_state{};
+std::array<RemasterDlssEyeGuards, 3> g_remaster_dlss_eye_guards{};
+// One-shot resets requested by the first eye's constants of a pair; the other
+// eye gets the same reset for the same frame index.
+bool g_remaster_dlss_reset_pending{};
+uint32_t g_remaster_dlss_reset_frame{};
+size_t g_remaster_dlss_reset_source{};
+std::array<std::atomic<uint64_t>, 3> g_remaster_dlss_eye_calls{};
+std::atomic<uint64_t> g_remaster_dlss_untagged_calls{};
+std::atomic<uint64_t> g_remaster_dlss_forced_resets{};
+std::atomic<uint64_t> g_remaster_dlss_last_tagged_present{UINT64_MAX};
+std::atomic<uint32_t> g_remaster_dlss_log_count{};
+std::atomic<bool> g_remaster_dlss_rr_logged{};
+
+// The per-eye motion-vector camera record only belongs to frames whose DLSS
+// actually runs per eye (not FSR/XeSS/TAA chosen in game, not a DLSS that
+// failed to initialise).
+bool remaster_engine_dlss_per_eye_running() {
+    const uint64_t last =
+        g_remaster_dlss_last_tagged_present.load(std::memory_order_acquire);
+    const uint64_t now = g_present_count.load(std::memory_order_relaxed);
+    return last != UINT64_MAX && now >= last && now - last <= 8;
+}
+
+int remaster_dlss_eye_for_frame_data(void* frame_data) {
+    if (frame_data == nullptr ||
+        !g_engine_dual_render_active.load(std::memory_order_acquire)) {
+        return -1;
+    }
+    void* frame = static_cast<uint8_t*>(frame_data) -
+        engine_frame_offset(
+            w3vr::engine_addresses::Value::DlssFrameDataFromFrame);
+    int eye = -1;
+    g_engine_dual_frame_mutex.lock();
+    auto found = g_engine_dual_frame_eyes.find(frame);
+    if (found == g_engine_dual_frame_eyes.end()) {
+        found = g_engine_dual_frame_eyes.find(frame_data);
+    }
+    if (found != g_engine_dual_frame_eyes.end() && found->second.eye <= 1) {
+        eye = static_cast<int>(found->second.eye);
+    }
+    g_engine_dual_frame_mutex.unlock();
+    if (eye < 0 && (g_engine_render_eye == 0 || g_engine_render_eye == 1)) {
+        eye = g_engine_render_eye;
+    }
+    return eye;
+}
+
+// [DIAG:REMASTER-DLSS-EYE-CONSTANTS 1/2] [debug] dlss_eye_constants_log logs
+// the Streamline 2 sl::Constants each eye's DLSS receives, to compare the eyes:
+// after the 0x20-byte BaseStructure header come cameraViewToClip,
+// clipToCameraView, clipToLensClip, clipToPrevClip (+0xE0), prevClipToClip,
+// jitterOffset (+0x160), mvecScale (+0x168), cameraPinholeOffset, cameraPos
+// (+0x178) ... and the Boolean flags from +0x1BC (depthInverted,
+// cameraMotionIncluded, motionVectors3D, reset, orthographicProjection,
+// motionVectorsDilated, motionVectorsJittered). The engine calls slSetConstants
+// inside the per-eye wrapper below, so the thread's current slot names the eye.
+thread_local int t_remaster_dlss_slot = -1;
+using Sl2SetConstantsFn = int(__cdecl*)(const void*, const void*, const void*);
+Sl2SetConstantsFn g_sl2_set_constants_probe{};
+std::atomic<int> g_sl2_constants_probe_state{};
+std::array<std::atomic<uint64_t>, 3> g_sl2_constants_probe_calls{};
+
+int __cdecl hook_sl2_set_constants_probe(
+    const void* values, const void* frame, const void* viewport) {
+    const int slot = t_remaster_dlss_slot;
+    if (values != nullptr && slot >= 0 && slot <= 2) {
+        const uint64_t call = g_sl2_constants_probe_calls[
+            static_cast<size_t>(slot)].fetch_add(1, std::memory_order_relaxed);
+        if (call < 8 || call % 90 == 0) {
+            const auto* bytes = static_cast<const uint8_t*>(values);
+            float clip_to_prev[16]{};
+            float jitter[2]{};
+            float mvec_scale[2]{};
+            float camera[3]{};
+            memcpy(clip_to_prev, bytes + 0xE0, sizeof(clip_to_prev));
+            memcpy(jitter, bytes + 0x160, sizeof(jitter));
+            memcpy(mvec_scale, bytes + 0x168, sizeof(mvec_scale));
+            memcpy(camera, bytes + 0x178, sizeof(camera));
+            float deviation = 0.0f;
+            for (int i = 0; i < 16; ++i) {
+                const float d = clip_to_prev[i] - (i % 5 == 0 ? 1.0f : 0.0f);
+                deviation += d * d;
+            }
+            uint32_t viewport_value{};
+            if (viewport != nullptr) {
+                memcpy(&viewport_value,
+                    static_cast<const uint8_t*>(viewport) + 0x20,
+                    sizeof(viewport_value));
+            }
+            log_line("DLSS eye constants slot=%d call=%llu viewport=%u present=%llu "
+                "jitter=%.4f,%.4f mvec_scale=%.6f,%.6f camera=%.3f,%.3f,%.3f "
+                "clip_to_prev_dev=%.6f row3=%.5f,%.5f,%.5f,%.5f flags=%u%u%u%u%u%u%u",
+                slot, static_cast<unsigned long long>(call), viewport_value,
+                static_cast<unsigned long long>(
+                    g_present_count.load(std::memory_order_relaxed)),
+                jitter[0], jitter[1], mvec_scale[0], mvec_scale[1],
+                camera[0], camera[1], camera[2], sqrtf(deviation),
+                clip_to_prev[12], clip_to_prev[13], clip_to_prev[14],
+                clip_to_prev[15], bytes[0x1BC], bytes[0x1BD], bytes[0x1BE],
+                bytes[0x1BF], bytes[0x1C0], bytes[0x1C1], bytes[0x1C2]);
+        }
+    }
+    return g_sl2_set_constants_probe(values, frame, viewport);
+}
+
+void install_sl2_constants_probe() {
+    if (!g_config.dlss_eye_constants_log) {
+        return;
+    }
+    int expected = 0;
+    if (!g_sl2_constants_probe_state.compare_exchange_strong(expected, 2,
+            std::memory_order_acq_rel)) {
+        return;
+    }
+    auto* module = GetModuleHandleW(L"sl.interposer.dll");
+    void* target = module != nullptr
+        ? reinterpret_cast<void*>(GetProcAddress(module, "slSetConstants"))
+        : nullptr;
+    if (target == nullptr || g_sl_set_constants != nullptr) {
+        log_line("DLSS eye constants probe disabled: slSetConstants=%p "
+            "already_hooked=%d", target, g_sl_set_constants != nullptr ? 1 : 0);
+        g_sl2_constants_probe_state.store(-1, std::memory_order_release);
+        return;
+    }
+    if (MH_CreateHook(target, reinterpret_cast<void*>(&hook_sl2_set_constants_probe),
+            reinterpret_cast<void**>(&g_sl2_set_constants_probe)) == MH_OK &&
+        MH_EnableHook(target) == MH_OK) {
+        log_line("DLSS eye constants probe hooked slSetConstants=%p", target);
+        g_sl2_constants_probe_state.store(1, std::memory_order_release);
+    } else {
+        log_line("DLSS eye constants probe hook failed slSetConstants=%p", target);
+        g_sl2_constants_probe_state.store(-1, std::memory_order_release);
+    }
+}
+
+uintptr_t call_remaster_dlss_per_eye(
+    EngineDlssStateFunction original,
+    const char* name,
+    void* state,
+    void* frame_data,
+    void* third,
+    uintptr_t fourth,
+    void* fifth) {
+    namespace addresses = w3vr::engine_addresses;
+    if (state == nullptr || frame_data == nullptr ||
+        !remaster_engine_dlss_stereo_active() ||
+        !g_engine_dual_render_active.load(std::memory_order_acquire)) {
+        g_remaster_dlss_untagged_calls.fetch_add(1, std::memory_order_relaxed);
+        return original(state, frame_data, third, fourth, fifth);
+    }
+    auto* frame_bytes = static_cast<uint8_t*>(frame_data);
+    if (frame_bytes[engine_frame_offset(
+            addresses::Value::DlssFrameRayReconstructionFlag)] != 0) {
+        // Ray Reconstruction tags and evaluates through further functions on
+        // the engine's single viewport; keep the whole frame on it.
+        if (!g_remaster_dlss_rr_logged.exchange(true)) {
+            log_line("V20001 remaster DLSS: Ray Reconstruction is on; per-eye DLSS "
+                "histories are disabled while it is (turn it off in the game)");
+        }
+        g_remaster_dlss_untagged_calls.fetch_add(1, std::memory_order_relaxed);
+        return original(state, frame_data, third, fourth, fifth);
+    }
+    const int eye = remaster_dlss_eye_for_frame_data(frame_data);
+    const size_t slot = eye == 0 || eye == 1
+        ? static_cast<size_t>(eye)
+        : kRemasterDlssUntaggedSlot;
+    const bool constants_call = original == g_engine_dlss_constants_builder;
+    auto* bytes = static_cast<uint8_t*>(state);
+    const size_t viewport_offset =
+        engine_frame_offset(addresses::Value::DlssStateViewport);
+    const size_t constants_offset =
+        engine_frame_offset(addresses::Value::DlssStateConstantsFrame);
+    const size_t apply_offset =
+        engine_frame_offset(addresses::Value::DlssStateApplyFrame);
+    const size_t prepare_offset =
+        engine_frame_offset(addresses::Value::DlssStatePrepareFrame);
+    const size_t reset_offset =
+        engine_frame_offset(addresses::Value::DlssStateResetFlag);
+    auto read_u32 = [&](size_t offset) {
+        uint32_t value{};
+        memcpy(&value, bytes + offset, sizeof(value));
+        return value;
+    };
+    auto write_u32 = [&](size_t offset, uint32_t value) {
+        memcpy(bytes + offset, &value, sizeof(value));
+    };
+    uint32_t frame_index{};
+    uint32_t render_counter{};
+    memcpy(&frame_index, frame_bytes + 0xC44, sizeof(frame_index));
+    memcpy(&render_counter, frame_bytes + 0xC40, sizeof(render_counter));
+
+    // [DIAG:REMASTER-DLSS-EYE-CONSTANTS 2/2]
+    if (constants_call) {
+        install_sl2_constants_probe();
+    }
+    std::scoped_lock lock{g_remaster_dlss_mutex};
+    if (g_remaster_dlss_state != state) {
+        g_remaster_dlss_state = state;
+        g_remaster_dlss_eye_guards = {};
+        g_remaster_dlss_reset_pending = false;
+    }
+    auto& guards = g_remaster_dlss_eye_guards[slot];
+    if (!guards.valid) {
+        // Values that cannot match this frame, so the first call of an eye is
+        // never mistaken for a repeat of the other eye's frame.
+        guards.constants_frame = frame_index - 1;
+        guards.apply_frame = 0xFFFFFFFFu;
+        guards.prepare_frame = render_counter - 1;
+    }
+    bool force_reset = false;
+    if (constants_call && slot != kRemasterDlssUntaggedSlot) {
+        // A fresh or long-interrupted eye history (first use, menus,
+        // cutscenes) starts over. Short gaps keep it: untagged frames go to
+        // the scratch viewport, and the eyes of a pair may or may not share
+        // a frame index (+1 or +2 per pair).
+        force_reset = !guards.valid ||
+            frame_index - guards.last_frame_index > 4;
+        if (g_remaster_dlss_reset_pending &&
+            g_remaster_dlss_reset_frame == frame_index &&
+            g_remaster_dlss_reset_source != slot) {
+            force_reset = true;
+            g_remaster_dlss_reset_pending = false;
+        }
+        // The projection of this eye changed (per-eye frustum on/off).
+        if (slot == 0 || slot == 1) {
+            const uint8_t bit = static_cast<uint8_t>(1u << slot);
+            if ((g_remaster_dlss_external_reset_mask.fetch_and(
+                    static_cast<uint8_t>(~bit), std::memory_order_acq_rel) & bit) != 0) {
+                force_reset = true;
+            }
+        }
+    }
+    const uint32_t base_viewport = read_u32(viewport_offset);
+    const uint32_t engine_guards[3]{read_u32(constants_offset),
+        read_u32(apply_offset), read_u32(prepare_offset)};
+    write_u32(constants_offset, guards.constants_frame);
+    write_u32(apply_offset, guards.apply_frame);
+    write_u32(prepare_offset, guards.prepare_frame);
+    const uint32_t eye_viewport = base_viewport +
+        (slot == 1 ? kRemasterDlssRightEyeViewportOffset
+            : slot == kRemasterDlssUntaggedSlot
+            ? kRemasterDlssUntaggedViewportOffset : 0u);
+    write_u32(viewport_offset, eye_viewport);
+    // The builder's reset argument is a byte in r8.
+    void* const call_third = force_reset
+        ? reinterpret_cast<void*>(
+            (reinterpret_cast<uintptr_t>(third) & ~uintptr_t{0xFF}) | 1u)
+        : third;
+    const int previous_slot = t_remaster_dlss_slot;
+    t_remaster_dlss_slot = static_cast<int>(slot);
+    const uintptr_t result =
+        original(state, frame_data, call_third, fourth, fifth);
+    t_remaster_dlss_slot = previous_slot;
+    guards.constants_frame = read_u32(constants_offset);
+    guards.apply_frame = read_u32(apply_offset);
+    guards.prepare_frame = read_u32(prepare_offset);
+    guards.valid = true;
+    write_u32(viewport_offset, base_viewport);
+    bool reset_requested{};
+    if (constants_call && slot != kRemasterDlssUntaggedSlot) {
+        reset_requested = bytes[reset_offset] != 0;
+        const size_t other = slot == 0 ? 1 : 0;
+        const auto& other_guards = g_remaster_dlss_eye_guards[other];
+        const bool first_eye_of_pair = !other_guards.valid ||
+            other_guards.last_frame_index != frame_index;
+        if (reset_requested && first_eye_of_pair) {
+            g_remaster_dlss_reset_pending = true;
+            g_remaster_dlss_reset_frame = frame_index;
+            g_remaster_dlss_reset_source = slot;
+        }
+        guards.last_frame_index = frame_index;
+        if (force_reset) {
+            g_remaster_dlss_forced_resets.fetch_add(
+                1, std::memory_order_relaxed);
+        }
+    }
+    g_remaster_dlss_eye_calls[slot].fetch_add(1, std::memory_order_relaxed);
+    if (slot != kRemasterDlssUntaggedSlot) {
+        g_remaster_dlss_last_tagged_present.store(
+            g_present_count.load(std::memory_order_relaxed),
+            std::memory_order_release);
+    }
+    if (g_config.runtime_diagnostics &&
+        (g_remaster_dlss_log_count.fetch_add(1, std::memory_order_relaxed) < 96 ||
+            force_reset || slot == kRemasterDlssUntaggedSlot) &&
+        g_remaster_dlss_log_count.load(std::memory_order_relaxed) < 2000) {
+        log_line("V20001 remaster DLSS %s eye=%d slot=%zu tid=%lu present=%llu frame_data=%p "
+            "frame_index=%u counter=%u viewport=%u->%u guards_engine=%u,%u,%u "
+            "guards_eye=%u,%u,%u reset=%d/%d calls=%llu/%llu/%llu untagged=%llu",
+            name, eye, slot, GetCurrentThreadId(),
+            static_cast<unsigned long long>(g_present_count.load()),
+            frame_data, frame_index, render_counter, base_viewport,
+            eye_viewport, engine_guards[0], engine_guards[1],
+            engine_guards[2], guards.constants_frame, guards.apply_frame,
+            guards.prepare_frame, force_reset ? 1 : 0,
+            reset_requested ? 1 : 0,
+            static_cast<unsigned long long>(g_remaster_dlss_eye_calls[0].load()),
+            static_cast<unsigned long long>(g_remaster_dlss_eye_calls[1].load()),
+            static_cast<unsigned long long>(g_remaster_dlss_eye_calls[2].load()),
+            static_cast<unsigned long long>(
+                g_remaster_dlss_untagged_calls.load()));
+    }
+    return result;
+}
+
+// [FEATURE:REMASTER-DLSS-IMAGE 4/5] [engine] dlss_preset forces one DLSS SR
+// preset for both eyes. The 5.01 SR apply fills a Streamline 2.14
+// sl::DLSSOptions (struct version 3, all six preset fields eDefault) and
+// passes it to slDLSSSetOptions, which it fetches once through
+// slGetFeatureFunction (cache 0x145DC9FA0). The mod looks the function up the
+// same way on the first SR apply and wraps it: a copy of the options gets the
+// configured preset in every preset field (+0x3C..+0x50), so whichever
+// quality mode is active uses it. Options of any other layout pass through.
+using SlGetFeatureFunctionFn = int(__cdecl*)(uint32_t, const char*, void**);
+using SlDlssSetOptionsFn = int(__cdecl*)(const void*, const void*);
+SlDlssSetOptionsFn g_sl_dlss_set_options{};
+constexpr uint32_t kSlFeatureDlss = 0;
+constexpr size_t kSlStructTypeOffset = 0x08;
+constexpr size_t kSlStructVersionOffset = 0x18;
+constexpr size_t kSlViewportValueOffset = 0x20;
+constexpr size_t kSlDlssOptionsModeOffset = 0x20;
+constexpr size_t kSlDlssOptionsFirstPresetOffset = 0x3C;
+constexpr size_t kSlDlssOptionsPresetCount = 6;
+constexpr size_t kSlDlssOptionsVersion3Size = 0x58;
+// {6AC826E4-4C61-4101-A92D-638D421057B8} as stored (data1, data2, data3 little endian).
+constexpr uint8_t kSlDlssOptionsStructType[16] = {
+    0xE4, 0x26, 0xC8, 0x6A, 0x61, 0x4C, 0x01, 0x41,
+    0xA9, 0x2D, 0x63, 0x8D, 0x42, 0x10, 0x57, 0xB8};
+// 0 = not looked up yet, 1 = hooked, 2 = lookup in progress, -1 = gave up.
+std::atomic<int> g_dlss_preset_hook_state{};
+std::atomic<uint32_t> g_dlss_preset_lookup_failures{};
+std::atomic<uint32_t> g_dlss_preset_log_count{};
+constexpr uint32_t kDlssPresetLookupAttempts = 600;
+
+int __cdecl hook_sl_dlss_set_options(const void* viewport, const void* options) {
+    const uint32_t preset = g_config.dlss_preset;
+    if (preset == 0 || options == nullptr) {
+        return g_sl_dlss_set_options(viewport, options);
+    }
+    const auto* bytes = static_cast<const uint8_t*>(options);
+    uint64_t version{};
+    std::memcpy(&version, bytes + kSlStructVersionOffset, sizeof(version));
+    if (version != 3 || std::memcmp(bytes + kSlStructTypeOffset,
+            kSlDlssOptionsStructType, sizeof(kSlDlssOptionsStructType)) != 0) {
+        if (g_dlss_preset_log_count.fetch_add(1, std::memory_order_relaxed) < 4) {
+            log_line("DLSS preset override skipped: unexpected DLSSOptions version=%llu",
+                static_cast<unsigned long long>(version));
+        }
+        return g_sl_dlss_set_options(viewport, options);
+    }
+    alignas(8) uint8_t forced[kSlDlssOptionsVersion3Size];
+    std::memcpy(forced, bytes, sizeof(forced));
+    for (size_t i = 0; i < kSlDlssOptionsPresetCount; ++i) {
+        std::memcpy(forced + kSlDlssOptionsFirstPresetOffset + i * sizeof(uint32_t),
+            &preset, sizeof(preset));
+    }
+    if (g_dlss_preset_log_count.fetch_add(1, std::memory_order_relaxed) < 8) {
+        uint32_t mode{};
+        uint32_t viewport_id{};
+        uint32_t game_presets[kSlDlssOptionsPresetCount]{};
+        std::memcpy(&mode, bytes + kSlDlssOptionsModeOffset, sizeof(mode));
+        std::memcpy(game_presets, bytes + kSlDlssOptionsFirstPresetOffset,
+            sizeof(game_presets));
+        if (viewport != nullptr) {
+            std::memcpy(&viewport_id,
+                static_cast<const uint8_t*>(viewport) + kSlViewportValueOffset,
+                sizeof(viewport_id));
+        }
+        log_line("DLSS preset override viewport=%u mode=%u game_presets=%u,%u,%u,%u,%u,%u -> %u",
+            viewport_id, mode, game_presets[0], game_presets[1], game_presets[2],
+            game_presets[3], game_presets[4], game_presets[5], preset);
+    }
+    return g_sl_dlss_set_options(viewport, forced);
+}
+
+// Runs on the render thread at the start of an SR apply, i.e. after
+// Streamline and the DLSS feature are up and while the game is not inside
+// slDLSSSetOptions.
+void install_sl_dlss_preset_hook() {
+    if (g_config.dlss_preset == 0) {
+        return;
+    }
+    int expected = 0;
+    if (!g_dlss_preset_hook_state.compare_exchange_strong(expected, 2,
+            std::memory_order_acq_rel)) {
+        return;
+    }
+    auto* module = GetModuleHandleW(L"sl.interposer.dll");
+    auto lookup = module != nullptr ? reinterpret_cast<SlGetFeatureFunctionFn>(
+        GetProcAddress(module, "slGetFeatureFunction")) : nullptr;
+    void* target{};
+    const int result = lookup != nullptr ?
+        lookup(kSlFeatureDlss, "slDLSSSetOptions", &target) : -1;
+    if (result != 0 || target == nullptr) {
+        const uint32_t failures =
+            g_dlss_preset_lookup_failures.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (failures >= kDlssPresetLookupAttempts) {
+            log_line("DLSS preset override disabled: slDLSSSetOptions lookup failed "
+                "(result=%d, %u attempts)", result, failures);
+            g_dlss_preset_hook_state.store(-1, std::memory_order_release);
+        } else {
+            g_dlss_preset_hook_state.store(0, std::memory_order_release);
+        }
+        return;
+    }
+    if (MH_CreateHook(target, reinterpret_cast<void*>(&hook_sl_dlss_set_options),
+            reinterpret_cast<void**>(&g_sl_dlss_set_options)) == MH_OK &&
+        MH_EnableHook(target) == MH_OK) {
+        log_line("DLSS preset override hooked slDLSSSetOptions=%p preset=%u",
+            target, g_config.dlss_preset);
+        g_dlss_preset_hook_state.store(1, std::memory_order_release);
+    } else {
+        log_line("DLSS preset override hook failed slDLSSSetOptions=%p", target);
+        g_dlss_preset_hook_state.store(-1, std::memory_order_release);
+    }
+}
+
+// [FEATURE:REMASTER-DLSS-IMAGE 5/5] [engine] dlss_mip_bias_offset shifts the
+// 5.01 texture LOD bias (kDlssMipBias501Bytes) for both eyes while the
+// per-eye DLSS runs. Positive values sample blurrier mips (less sparkle and
+// moire on fine patterns), negative values sharper ones. NVIDIA's DLSS guide
+// (section 3.5) caps a backed-off bias at log2(render / output), so a positive
+// offset never lifts the bias above that, nor above the engine's own value
+// when that is already higher.
+using EngineDlssMipBias = void(__fastcall*)(void*, void*, float*);
+EngineDlssMipBias g_engine_dlss_mip_bias{};
+constexpr size_t kFrameDataMipBiasRenderHeightOffset = 0xBE0;
+constexpr size_t kFrameDataMipBiasOutputHeightOffset = 0xBE8;
+constexpr size_t kFrameDataMipBiasSkipOffset = 0xBEC;
+std::atomic<uint32_t> g_dlss_mip_bias_log_count{};
+
+void __fastcall hook_engine_dlss_mip_bias(void* frame_data, void* settings, float* bias) {
+    g_engine_dlss_mip_bias(frame_data, settings, bias);
+    if (frame_data == nullptr || bias == nullptr) {
+        return;
+    }
+    const auto* bytes = static_cast<const uint8_t*>(frame_data);
+    if (bytes[kFrameDataMipBiasSkipOffset] != 0) {
+        return;  // the engine left the caller's value untouched
+    }
+    uint32_t render_height{};
+    uint32_t output_height{};
+    std::memcpy(&render_height, bytes + kFrameDataMipBiasRenderHeightOffset,
+        sizeof(render_height));
+    std::memcpy(&output_height, bytes + kFrameDataMipBiasOutputHeightOffset,
+        sizeof(output_height));
+    if (render_height == 0 || output_height == 0 || render_height > output_height) {
+        return;
+    }
+    const float engine_bias = *bias;
+    const float offset = g_config.dlss_mip_bias_offset;
+    float adjusted = engine_bias + offset;
+    if (offset > 0.0f) {
+        const float ceiling = std::log2(
+            static_cast<float>(render_height) / static_cast<float>(output_height));
+        adjusted = std::min(adjusted, std::max(engine_bias, ceiling));
+    }
+    *bias = adjusted;
+    if (g_dlss_mip_bias_log_count.fetch_add(1, std::memory_order_relaxed) < 8) {
+        log_line("DLSS mip bias render_h=%u output_h=%u engine=%.3f offset=%.3f -> %.3f",
+            render_height, output_height, engine_bias, offset, adjusted);
+    }
+}
+
+void install_remaster_dlss_mip_bias_hook() {
+    if (!remaster_engine_dlss_stereo_active() ||
+        g_config.dlss_mip_bias_offset == 0.0f ||
+        running_game_build() != w3vr::game_build::Build::Remaster501 ||
+        g_engine_dlss_mip_bias != nullptr) {
+        return;
+    }
+    auto* target = engine_function_target(
+        w3vr::engine_addresses::Function::DlssMipBias);
+    if (target == nullptr) {
+        log_line("DLSS mip bias offset disabled: function unavailable");
+        return;
+    }
+    if (MH_CreateHook(target, reinterpret_cast<void*>(&hook_engine_dlss_mip_bias),
+            reinterpret_cast<void**>(&g_engine_dlss_mip_bias)) == MH_OK &&
+        MH_EnableHook(target) == MH_OK) {
+        log_line("DLSS mip bias offset hooked target=%p offset=%.3f",
+            target, g_config.dlss_mip_bias_offset);
+    } else {
+        log_line("DLSS mip bias offset hook failed target=%p", target);
+    }
+}
+
+uintptr_t __fastcall hook_remaster_dlss_constants_builder(
+    void* state, void* frame_data, void* reset, uintptr_t fourth, void* fifth) {
+    return call_remaster_dlss_per_eye(g_engine_dlss_constants_builder,
+        "constants", state, frame_data, reset, fourth, fifth);
+}
+
+uintptr_t __fastcall hook_remaster_dlss_input_prepare(
+    void* state, void* frame_data, void* params, uintptr_t fourth, void* fifth) {
+    return call_remaster_dlss_per_eye(g_engine_dlss_input_prepare,
+        "prepare", state, frame_data, params, fourth, fifth);
+}
+
+uintptr_t __fastcall hook_remaster_dlss_sr_apply(
+    void* state, void* frame_data, void* params, uintptr_t pass, void* fifth) {
+    install_sl_dlss_preset_hook();
+    return call_remaster_dlss_per_eye(g_engine_dlss_sr_apply,
+        "apply", state, frame_data, params, pass, fifth);
+}
+
+void install_remaster_engine_dlss_hooks() {
+    namespace addresses = w3vr::engine_addresses;
+    if (!remaster_engine_dlss_stereo_active() ||
+        running_game_build() != w3vr::game_build::Build::Remaster501 ||
+        g_engine_dlss_constants_builder != nullptr) {
+        return;
+    }
+    struct HookSpec {
+        addresses::Function function;
+        void* detour;
+        EngineDlssStateFunction* original;
+    };
+    const HookSpec specs[] = {
+        {addresses::Function::DlssConstantsBuilder,
+            reinterpret_cast<void*>(&hook_remaster_dlss_constants_builder),
+            &g_engine_dlss_constants_builder},
+        {addresses::Function::DlssInputPrepare,
+            reinterpret_cast<void*>(&hook_remaster_dlss_input_prepare),
+            &g_engine_dlss_input_prepare},
+        {addresses::Function::DlssSrApply,
+            reinterpret_cast<void*>(&hook_remaster_dlss_sr_apply),
+            &g_engine_dlss_sr_apply},
+    };
+    uint8_t* targets[3]{};
+    for (size_t i = 0; i < 3; ++i) {
+        targets[i] = engine_function_target(specs[i].function);
+        if (targets[i] == nullptr) {
+            log_line("V20001 remaster DLSS per-eye viewports disabled: %s unavailable",
+                addresses::entry(specs[i].function).name);
+            return;
+        }
+    }
+    for (size_t i = 0; i < 3; ++i) {
+        if (MH_CreateHook(targets[i], specs[i].detour,
+                reinterpret_cast<void**>(specs[i].original)) != MH_OK ||
+            MH_EnableHook(targets[i]) != MH_OK) {
+            log_line("V20001 remaster DLSS hook failed: %s",
+                addresses::entry(specs[i].function).name);
+            return;
+        }
+    }
+    log_line("V20001 remaster DLSS per-eye viewports hooked (right eye viewport +0x%X, "
+        "per-eye guards, per_eye_motion=%d)",
+        kRemasterDlssRightEyeViewportOffset,
+        g_config.remaster_dlss_per_eye_motion ? 1 : 0);
+}
+
+// [FEATURE:REMASTER-FSR-PER-EYE 5/7] With Anti-aliasing = FSR, 5.01
+// dispatches its single upscale ffxContext for every render, so strict Stereo
+// alternates one FSR history between the eyes (ghosting). With
+// remaster_fsr_per_eye the game's upscale context gets a twin, created with
+// the game's own description right after it (the exe's ffxCreateContext
+// import is redirected). For the duration of the engine's upscale dispatch the
+// right eye's frames find the twin in the state's context field; the game's
+// code builds and dispatches the description as usual, and the field is
+// restored. Configure and destroy calls on the game's context are mirrored to
+// the twin. Nothing depends on the FSR version the FidelityFX loader picks
+// (FSR 2/3.1 on most GPUs, FSR 4.x on RDNA4). Resets follow the DLSS rules: a
+// fresh or long-interrupted eye starts over, a reset the game requests for
+// the first eye of a pair is repeated for the second, and a projection change
+// restarts both. A dual-render frame without an eye tag runs on the game's
+// context with a reset and restarts both eyes afterwards, so it never mixes
+// into an eye's history.
+struct RemasterFsrTwin {
+    ffxContext game{};
+    ffxContext right{};
+};
+std::mutex g_remaster_fsr_twin_mutex;
+std::vector<RemasterFsrTwin> g_remaster_fsr_twins;
+std::atomic<bool> g_remaster_fsr_guards_stale{};
+PfnFfxCreateContext g_ffx_create_context{};
+PfnFfxDestroyContext g_ffx_destroy_context{};
+PfnFfxConfigure g_ffx_configure{};
+PfnFfxQuery g_ffx_query{};
+
+using EngineFsrUpscaleDispatchFunction =
+    uintptr_t(__fastcall*)(void*, void*, void*, uintptr_t, uintptr_t);
+EngineFsrUpscaleDispatchFunction g_engine_fsr_upscale_dispatch{};
+constexpr size_t kRemasterFsrUntaggedSlot = 2;
+struct RemasterFsrEyeGuards {
+    uint32_t last_frame_index{};
+    bool valid{};
+};
+std::mutex g_remaster_fsr_mutex;
+void* g_remaster_fsr_state{};
+std::array<RemasterFsrEyeGuards, 2> g_remaster_fsr_eye_guards{};
+bool g_remaster_fsr_reset_pending{};
+uint32_t g_remaster_fsr_reset_frame{};
+size_t g_remaster_fsr_reset_source{};
+std::array<std::atomic<uint64_t>, 3> g_remaster_fsr_eye_calls{};
+std::atomic<uint64_t> g_remaster_fsr_passthrough_calls{};
+std::atomic<uint64_t> g_remaster_fsr_forced_resets{};
+std::atomic<uint64_t> g_remaster_fsr_last_tagged_present{UINT64_MAX};
+std::atomic<uint32_t> g_remaster_fsr_log_count{};
+std::atomic<uint8_t> g_remaster_fsr_first_eye_logged{};
+
+bool remaster_engine_fsr_per_eye_running() {
+    const uint64_t last =
+        g_remaster_fsr_last_tagged_present.load(std::memory_order_acquire);
+    const uint64_t now = g_present_count.load(std::memory_order_relaxed);
+    return last != UINT64_MAX && now >= last && now - last <= 8;
+}
+
+ffxContext remaster_fsr_twin_for(ffxContext game) {
+    if (game == nullptr) {
+        return nullptr;
+    }
+    std::scoped_lock lock{g_remaster_fsr_twin_mutex};
+    for (const auto& twin : g_remaster_fsr_twins) {
+        if (twin.game == game) {
+            return twin.right;
+        }
+    }
+    return nullptr;
+}
+
+const char* remaster_fsr_provider_name(ffxContext context, uint64_t* id) {
+    if (g_ffx_query == nullptr || context == nullptr) {
+        return "unknown";
+    }
+    ffxQueryGetProviderVersion query{};
+    query.header.type = FFX_API_QUERY_DESC_TYPE_GET_PROVIDER_VERSION;
+    ffxContext copy = context;
+    if (g_ffx_query(&copy, &query.header) != FFX_API_RETURN_OK ||
+        query.versionName == nullptr) {
+        return "unknown";
+    }
+    if (id != nullptr) {
+        *id = query.versionId;
+    }
+    return query.versionName;
+}
+
+ffxReturnCode_t hook_ffx_create_context(
+    ffxContext* context,
+    ffxCreateContextDescHeader* desc,
+    const ffxAllocationCallbacks* allocation) {
+    const ffxReturnCode_t result =
+        g_ffx_create_context(context, desc, allocation);
+    if (result != FFX_API_RETURN_OK || context == nullptr ||
+        *context == nullptr || desc == nullptr ||
+        desc->type != FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE ||
+        !remaster_engine_fsr_stereo_active()) {
+        return result;
+    }
+    // The description (and its backend chain) is still the game's here.
+    ffxContext twin{};
+    const ffxReturnCode_t twin_result =
+        g_ffx_create_context(&twin, desc, allocation);
+    const auto* upscale =
+        reinterpret_cast<const ffxCreateContextDescUpscale*>(desc);
+    uint64_t game_id{};
+    uint64_t twin_id{};
+    const char* game_provider = remaster_fsr_provider_name(*context, &game_id);
+    const char* twin_provider = twin_result == FFX_API_RETURN_OK
+        ? remaster_fsr_provider_name(twin, &twin_id) : "none";
+    FfxApiEffectMemoryUsage twin_memory{};
+    if (twin_result == FFX_API_RETURN_OK && g_ffx_query != nullptr) {
+        ffxQueryDescUpscaleGetGPUMemoryUsage query{};
+        query.header.type = FFX_API_QUERY_DESC_TYPE_UPSCALE_GPU_MEMORY_USAGE;
+        query.gpuMemoryUsageUpscaler = &twin_memory;
+        ffxContext copy = twin;
+        if (g_ffx_query(&copy, &query.header) != FFX_API_RETURN_OK) {
+            twin_memory = {};
+        }
+    }
+    if (twin_result == FFX_API_RETURN_OK && twin != nullptr) {
+        std::scoped_lock lock{g_remaster_fsr_twin_mutex};
+        g_remaster_fsr_twins.push_back({*context, twin});
+    }
+    g_remaster_fsr_guards_stale.store(true, std::memory_order_release);
+    log_line("FSR per-eye: game upscale context %p %s (id 0x%llX) render<=%ux%u "
+        "upscale<=%ux%u flags=0x%X; right-eye twin %p result=%u %s (id 0x%llX) "
+        "vram=%.1f MB",
+        *context, game_provider, static_cast<unsigned long long>(game_id),
+        upscale->maxRenderSize.width, upscale->maxRenderSize.height,
+        upscale->maxUpscaleSize.width, upscale->maxUpscaleSize.height,
+        upscale->flags, twin, twin_result, twin_provider,
+        static_cast<unsigned long long>(twin_id),
+        static_cast<double>(twin_memory.totalUsageInBytes) / (1024.0 * 1024.0));
+    return result;
+}
+
+ffxReturnCode_t hook_ffx_destroy_context(
+    ffxContext* context, const ffxAllocationCallbacks* allocation) {
+    ffxContext twin{};
+    if (context != nullptr && *context != nullptr) {
+        std::scoped_lock lock{g_remaster_fsr_twin_mutex};
+        for (auto it = g_remaster_fsr_twins.begin();
+             it != g_remaster_fsr_twins.end(); ++it) {
+            if (it->game == *context) {
+                twin = it->right;
+                g_remaster_fsr_twins.erase(it);
+                break;
+            }
+        }
+    }
+    const ffxContext game = context != nullptr ? *context : nullptr;
+    const ffxReturnCode_t result = g_ffx_destroy_context(context, allocation);
+    if (twin != nullptr) {
+        const ffxReturnCode_t twin_result =
+            g_ffx_destroy_context(&twin, allocation);
+        g_remaster_fsr_guards_stale.store(true, std::memory_order_release);
+        log_line("FSR per-eye: game context %p destroyed (result=%u), twin "
+            "destroyed (result=%u)", game, result, twin_result);
+    }
+    return result;
+}
+
+ffxReturnCode_t hook_ffx_configure(
+    ffxContext* context, const ffxConfigureDescHeader* desc) {
+    const ffxReturnCode_t result = g_ffx_configure(context, desc);
+    const ffxContext twin =
+        context != nullptr ? remaster_fsr_twin_for(*context) : nullptr;
+    if (twin != nullptr) {
+        ffxContext copy = twin;
+        g_ffx_configure(&copy, desc);
+    }
+    return result;
+}
+
+// Per-dispatch eye bookkeeping shared by the FidelityFX loader path and the
+// built-in FSR 2 path. Both run with g_remaster_fsr_mutex held; |reset_byte|
+// is the byte the respective dispatch takes its history reset from.
+struct RemasterFsrDispatch {
+    int eye{};
+    size_t slot{};
+    uint32_t frame_index{};
+    uint8_t game_reset{};
+    bool force_reset{};
+};
+
+RemasterFsrDispatch remaster_fsr_begin_dispatch_locked(
+    void* state, void* frame_data, uint8_t* reset_byte) {
+    RemasterFsrDispatch d{};
+    d.eye = remaster_dlss_eye_for_frame_data(frame_data);
+    d.slot = d.eye == 0 || d.eye == 1
+        ? static_cast<size_t>(d.eye)
+        : kRemasterFsrUntaggedSlot;
+    memcpy(&d.frame_index, static_cast<uint8_t*>(frame_data) + 0xC44,
+        sizeof(d.frame_index));
+    if (g_remaster_fsr_state != state ||
+        g_remaster_fsr_guards_stale.exchange(false, std::memory_order_acq_rel)) {
+        g_remaster_fsr_state = state;
+        g_remaster_fsr_eye_guards = {};
+        g_remaster_fsr_reset_pending = false;
+    }
+    d.game_reset = *reset_byte;
+    d.force_reset = d.slot == kRemasterFsrUntaggedSlot;
+    if (d.slot != kRemasterFsrUntaggedSlot) {
+        const auto& guards = g_remaster_fsr_eye_guards[d.slot];
+        // A fresh or long-interrupted eye history (first use, menus,
+        // cutscenes) starts over; the eyes of a pair may or may not share a
+        // frame index (+1 or +2 per pair).
+        d.force_reset = !guards.valid ||
+            d.frame_index - guards.last_frame_index > 4;
+        // The game's reset was consumed by the other eye of this pair
+        // (same frame index, or the next one).
+        if (g_remaster_fsr_reset_pending &&
+            d.frame_index - g_remaster_fsr_reset_frame <= 1 &&
+            g_remaster_fsr_reset_source != d.slot) {
+            d.force_reset = true;
+            g_remaster_fsr_reset_pending = false;
+        }
+        const uint8_t bit = static_cast<uint8_t>(1u << d.slot);
+        if ((g_remaster_fsr_external_reset_mask.fetch_and(
+                static_cast<uint8_t>(~bit), std::memory_order_acq_rel) & bit) != 0) {
+            d.force_reset = true;
+        }
+    }
+    if (d.force_reset) {
+        *reset_byte = 1;
+    }
+    return d;
+}
+
+void remaster_fsr_end_dispatch_locked(const RemasterFsrDispatch& d,
+    uint8_t* reset_byte, const char* path, const void* left,
+    const void* right) {
+    // The dispatch clears the byte itself unless frame generation owns it;
+    // never leave a reset of ours behind for the game's next dispatch.
+    if (d.force_reset && d.game_reset == 0) {
+        *reset_byte = 0;
+    }
+    if (d.slot != kRemasterFsrUntaggedSlot) {
+        auto& guards = g_remaster_fsr_eye_guards[d.slot];
+        const auto& other_guards =
+            g_remaster_fsr_eye_guards[d.slot == 0 ? 1 : 0];
+        const bool first_eye_of_pair = !other_guards.valid ||
+            other_guards.last_frame_index != d.frame_index;
+        if (d.game_reset != 0 && first_eye_of_pair) {
+            g_remaster_fsr_reset_pending = true;
+            g_remaster_fsr_reset_frame = d.frame_index;
+            g_remaster_fsr_reset_source = d.slot;
+        }
+        guards.last_frame_index = d.frame_index;
+        guards.valid = true;
+        g_remaster_fsr_last_tagged_present.store(
+            g_present_count.load(std::memory_order_relaxed),
+            std::memory_order_release);
+        const uint8_t eye_bit = static_cast<uint8_t>(1u << d.slot);
+        if ((g_remaster_fsr_first_eye_logged.fetch_or(
+                eye_bit, std::memory_order_relaxed) & eye_bit) == 0) {
+            log_line("FSR per-eye: first %s-eye dispatch on %s %s %p",
+                d.slot == 0 ? "left" : "right", path,
+                d.slot == 0 ? "game" : "twin", d.slot == 0 ? left : right);
+        }
+    } else {
+        // It ran on the game's (left) history: restart both eye histories.
+        g_remaster_fsr_external_reset_mask.fetch_or(
+            0x3u, std::memory_order_release);
+    }
+    if (d.force_reset) {
+        g_remaster_fsr_forced_resets.fetch_add(1, std::memory_order_relaxed);
+    }
+    g_remaster_fsr_eye_calls[d.slot].fetch_add(1, std::memory_order_relaxed);
+    if (g_config.runtime_diagnostics &&
+        (g_remaster_fsr_log_count.fetch_add(1, std::memory_order_relaxed) < 96 ||
+            d.force_reset) &&
+        g_remaster_fsr_log_count.load(std::memory_order_relaxed) < 2000) {
+        log_line("FSR per-eye dispatch path=%s eye=%d slot=%zu tid=%lu "
+            "present=%llu frame_index=%u reset=%d/%d calls=%llu/%llu/%llu "
+            "passthrough=%llu forced=%llu",
+            path, d.eye, d.slot, GetCurrentThreadId(),
+            static_cast<unsigned long long>(g_present_count.load()),
+            d.frame_index, d.force_reset ? 1 : 0, d.game_reset != 0 ? 1 : 0,
+            static_cast<unsigned long long>(g_remaster_fsr_eye_calls[0].load()),
+            static_cast<unsigned long long>(g_remaster_fsr_eye_calls[1].load()),
+            static_cast<unsigned long long>(g_remaster_fsr_eye_calls[2].load()),
+            static_cast<unsigned long long>(
+                g_remaster_fsr_passthrough_calls.load()),
+            static_cast<unsigned long long>(
+                g_remaster_fsr_forced_resets.load()));
+    }
+}
+
+// [FEATURE:REMASTER-FSR2-PER-EYE 3/4] On GPUs the FidelityFX loader does not
+// serve with FSR 4 (NVIDIA, Intel, RX 6000, Steam Deck) 5.01 runs its own,
+// statically linked FSR 2 inside the same upscale dispatch, so the loader
+// twin above never exists there. That FSR 2 keeps its history in five
+// engine render targets (two ping-pong pairs and the luma history) and its
+// per-frame state in a small object. The right eye gets five twin render
+// targets: copies of the game's CRenderTarget objects that own their own
+// textures, created with the objects' own vtable slot 2 from the same
+// description and released with slot 1. For the duration of a right-eye
+// dispatch the surfaces' table points at the twins and the object carries
+// the right eye's counter and frame index; the game's pointers and values
+// are put back afterwards. The other RTN_FSR2_* targets are written and read
+// within one dispatch and stay shared. Resets follow the loader path's rules
+// (the reset byte is the object's +0x14).
+constexpr uint32_t kRemasterFsr2HistoryTargets[] = {0x5A, 0x5B, 0x5C, 0x5D, 0x5F};
+constexpr const char* kRemasterFsr2HistoryNames[] = {"LockStatus1",
+    "LockStatus2", "InternalUpscaled1", "InternalUpscaled2", "LumaHistory"};
+constexpr size_t kRemasterFsr2TargetCount = std::size(kRemasterFsr2HistoryTargets);
+constexpr size_t kRemasterFsr2TwinBytes = 0x80;
+struct alignas(16) RemasterFsr2TwinObject {
+    uint8_t bytes[kRemasterFsr2TwinBytes];
+};
+struct RemasterFsr2Twin {
+    const uint8_t* original{};
+    uint32_t original_texture{};
+    std::array<uint32_t, 3> original_shape{};  // width, height, format
+    RemasterFsr2TwinObject* twin{};
+};
+using EngineRenderTargetVirtual = void(__fastcall*)(void*);
+EngineRenderTargetVirtual g_engine_render_target_create{};
+EngineRenderTargetVirtual g_engine_render_target_release{};
+const void* g_engine_render_target_vtable{};
+const volatile uint8_t* g_engine_fsr_builtin_flag{};
+std::array<RemasterFsr2Twin, kRemasterFsr2TargetCount> g_remaster_fsr2_twins{};
+uint32_t g_remaster_fsr2_right_counter{};
+uint32_t g_remaster_fsr2_right_frame_index{};
+std::atomic<uint32_t> g_remaster_fsr2_twin_builds{};
+std::atomic<bool> g_remaster_fsr2_twin_failure_logged{};
+
+std::array<uint32_t, 3> remaster_fsr2_target_shape(const uint8_t* target) {
+    std::array<uint32_t, 3> shape{};
+    memcpy(&shape[0], target + 0xC, sizeof(uint32_t));
+    memcpy(&shape[1], target + 0x10, sizeof(uint32_t));
+    memcpy(&shape[2], target + 0x18, sizeof(uint32_t));
+    return shape;
+}
+
+void remaster_fsr2_release_twin_locked(RemasterFsr2Twin& entry) {
+    if (entry.twin != nullptr) {
+        g_engine_render_target_release(entry.twin->bytes);
+        delete entry.twin;
+    }
+    entry = {};
+}
+
+// Twins for the five history targets of |surfaces|, (re)built when the game
+// (re)created a target (new texture id or shape). Returns false when a target
+// is missing or a twin cannot be made; the caller then runs the dispatch as
+// the game does. Called with g_remaster_fsr_mutex held, on the render thread.
+bool remaster_fsr2_twins_ready_locked(uint8_t* surfaces) {
+    namespace addresses = w3vr::engine_addresses;
+    const size_t table = engine_frame_offset(addresses::Value::RenderSurfacesTargets);
+    const size_t texture = engine_frame_offset(addresses::Value::RenderTargetTexture);
+    const size_t object_size =
+        engine_frame_offset(addresses::Value::RenderTargetObjectSize);
+    bool rebuilt = false;
+    for (size_t i = 0; i < kRemasterFsr2TargetCount; ++i) {
+        const uint8_t* original{};
+        memcpy(&original,
+            surfaces + table + sizeof(void*) * kRemasterFsr2HistoryTargets[i],
+            sizeof(original));
+        const void* vtable{};
+        uint32_t original_texture{};
+        if (original != nullptr) {
+            memcpy(&vtable, original, sizeof(vtable));
+            memcpy(&original_texture, original + texture, sizeof(original_texture));
+        }
+        if (original == nullptr || vtable != g_engine_render_target_vtable ||
+            original_texture == 0) {
+            if (!g_remaster_fsr2_twin_failure_logged.exchange(true)) {
+                log_line("FSR per-eye: built-in FSR2 target RTN_FSR2_%s unusable "
+                    "(object %p vtable %p texture %u); this eye pair shares one "
+                    "history", kRemasterFsr2HistoryNames[i], original, vtable,
+                    original_texture);
+            }
+            return false;
+        }
+        auto& entry = g_remaster_fsr2_twins[i];
+        const auto shape = remaster_fsr2_target_shape(original);
+        if (entry.twin != nullptr && entry.original == original &&
+            entry.original_texture == original_texture &&
+            entry.original_shape == shape) {
+            continue;
+        }
+        remaster_fsr2_release_twin_locked(entry);
+        auto* twin = new RemasterFsr2TwinObject{};
+        memcpy(twin->bytes, original, object_size);
+        const uint32_t none = 0;
+        memcpy(twin->bytes + texture, &none, sizeof(none));
+        g_engine_render_target_create(twin->bytes);
+        uint32_t twin_texture{};
+        memcpy(&twin_texture, twin->bytes + texture, sizeof(twin_texture));
+        if (twin_texture == 0) {
+            delete twin;
+            if (!g_remaster_fsr2_twin_failure_logged.exchange(true)) {
+                log_line("FSR per-eye: built-in FSR2 twin of RTN_FSR2_%s could "
+                    "not be created (%ux%u format %u); this eye pair shares one "
+                    "history", kRemasterFsr2HistoryNames[i], shape[0], shape[1],
+                    shape[2]);
+            }
+            return false;
+        }
+        entry.original = original;
+        entry.original_texture = original_texture;
+        entry.original_shape = shape;
+        entry.twin = twin;
+        rebuilt = true;
+        log_line("FSR per-eye: built-in FSR2 twin RTN_FSR2_%s %ux%u format %u "
+            "texture %u (game %p texture %u)", kRemasterFsr2HistoryNames[i],
+            shape[0], shape[1], shape[2], twin_texture, original,
+            original_texture);
+    }
+    if (rebuilt) {
+        // The right eye starts a fresh history on the new twins.
+        g_remaster_fsr_eye_guards[1].valid = false;
+        g_remaster_fsr2_right_counter = 0;
+        g_remaster_fsr2_right_frame_index = 0;
+        g_remaster_fsr2_twin_builds.fetch_add(1, std::memory_order_relaxed);
+    }
+    return true;
+}
+
+uintptr_t remaster_fsr2_builtin_dispatch(void* state, void* frame_data,
+    void* params, uintptr_t index, uintptr_t fifth) {
+    namespace addresses = w3vr::engine_addresses;
+    uint8_t* fsr2{};
+    memcpy(&fsr2,
+        static_cast<uint8_t*>(state) +
+            engine_frame_offset(addresses::Value::FsrStateBuiltinFsr2),
+        sizeof(fsr2));
+    auto* surfaces = static_cast<uint8_t*>(params);
+    std::scoped_lock lock{g_remaster_fsr_mutex};
+    if (fsr2 == nullptr || surfaces == nullptr ||
+        !remaster_fsr2_twins_ready_locked(surfaces)) {
+        g_remaster_fsr_passthrough_calls.fetch_add(1, std::memory_order_relaxed);
+        return g_engine_fsr_upscale_dispatch(
+            state, frame_data, params, index, fifth);
+    }
+    uint8_t* reset_byte =
+        fsr2 + engine_frame_offset(addresses::Value::Fsr2ResetFlag);
+    auto* counter = fsr2 + engine_frame_offset(addresses::Value::Fsr2FrameCounter);
+    auto* frame_index = fsr2 + engine_frame_offset(addresses::Value::Fsr2FrameIndex);
+    auto* table = surfaces +
+        engine_frame_offset(addresses::Value::RenderSurfacesTargets);
+    const RemasterFsrDispatch d =
+        remaster_fsr_begin_dispatch_locked(state, frame_data, reset_byte);
+    uintptr_t result{};
+    if (d.slot == 1) {
+        std::array<void*, kRemasterFsr2TargetCount> game_targets{};
+        for (size_t i = 0; i < kRemasterFsr2TargetCount; ++i) {
+            auto* slot = table + sizeof(void*) * kRemasterFsr2HistoryTargets[i];
+            memcpy(&game_targets[i], slot, sizeof(void*));
+            void* twin = g_remaster_fsr2_twins[i].twin->bytes;
+            memcpy(slot, &twin, sizeof(void*));
+        }
+        uint32_t game_counter{};
+        uint32_t game_frame_index{};
+        memcpy(&game_counter, counter, sizeof(game_counter));
+        memcpy(&game_frame_index, frame_index, sizeof(game_frame_index));
+        memcpy(counter, &g_remaster_fsr2_right_counter, sizeof(uint32_t));
+        memcpy(frame_index, &g_remaster_fsr2_right_frame_index, sizeof(uint32_t));
+        result = g_engine_fsr_upscale_dispatch(
+            state, frame_data, params, index, fifth);
+        memcpy(&g_remaster_fsr2_right_counter, counter, sizeof(uint32_t));
+        memcpy(&g_remaster_fsr2_right_frame_index, frame_index, sizeof(uint32_t));
+        memcpy(counter, &game_counter, sizeof(game_counter));
+        memcpy(frame_index, &game_frame_index, sizeof(game_frame_index));
+        for (size_t i = 0; i < kRemasterFsr2TargetCount; ++i) {
+            memcpy(table + sizeof(void*) * kRemasterFsr2HistoryTargets[i],
+                &game_targets[i], sizeof(void*));
+        }
+    } else {
+        result = g_engine_fsr_upscale_dispatch(
+            state, frame_data, params, index, fifth);
+    }
+    remaster_fsr_end_dispatch_locked(d, reset_byte, "built-in FSR2 targets",
+        surfaces, g_remaster_fsr2_twins[0].twin);
+    return result;
+}
+
+uintptr_t __fastcall hook_remaster_fsr_upscale_dispatch(
+    void* state, void* frame_data, void* params, uintptr_t index,
+    uintptr_t fifth) {
+    namespace addresses = w3vr::engine_addresses;
+    if (state == nullptr || frame_data == nullptr ||
+        !remaster_engine_fsr_stereo_active() ||
+        !g_engine_dual_render_active.load(std::memory_order_acquire)) {
+        g_remaster_fsr_passthrough_calls.fetch_add(1, std::memory_order_relaxed);
+        return g_engine_fsr_upscale_dispatch(
+            state, frame_data, params, index, fifth);
+    }
+    if (g_engine_fsr_builtin_flag != nullptr && *g_engine_fsr_builtin_flag != 0) {
+        return remaster_fsr2_builtin_dispatch(
+            state, frame_data, params, index, fifth);
+    }
+    auto* bytes = static_cast<uint8_t*>(state);
+    const size_t context_offset =
+        engine_frame_offset(addresses::Value::FsrStateContext);
+    const size_t reset_offset =
+        engine_frame_offset(addresses::Value::FsrStateResetFlag);
+    ffxContext game_context{};
+    memcpy(&game_context, bytes + context_offset, sizeof(game_context));
+    const ffxContext twin = remaster_fsr_twin_for(game_context);
+    if (twin == nullptr) {
+        g_remaster_fsr_passthrough_calls.fetch_add(1, std::memory_order_relaxed);
+        return g_engine_fsr_upscale_dispatch(
+            state, frame_data, params, index, fifth);
+    }
+
+    std::scoped_lock lock{g_remaster_fsr_mutex};
+    const RemasterFsrDispatch d =
+        remaster_fsr_begin_dispatch_locked(state, frame_data, bytes + reset_offset);
+    if (d.slot == 1) {
+        memcpy(bytes + context_offset, &twin, sizeof(twin));
+    }
+    const uintptr_t result = g_engine_fsr_upscale_dispatch(
+        state, frame_data, params, index, fifth);
+    if (d.slot == 1) {
+        memcpy(bytes + context_offset, &game_context, sizeof(game_context));
+    }
+    remaster_fsr_end_dispatch_locked(d, bytes + reset_offset, "loader",
+        game_context, twin);
+    return result;
+}
+
+// Slot of the game exe's import |dll|!|name| (by-name imports only).
+void** find_exe_import_slot(const char* dll, const char* name) {
+    auto* image = reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr));
+    if (image == nullptr) {
+        return nullptr;
+    }
+    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(image);
+    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(
+        image + dos->e_lfanew);
+    const auto& directory =
+        nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+    if (directory.VirtualAddress == 0) {
+        return nullptr;
+    }
+    for (auto* desc = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR*>(
+             image + directory.VirtualAddress);
+         desc->Name != 0; ++desc) {
+        if (_stricmp(reinterpret_cast<const char*>(image + desc->Name), dll) != 0 ||
+            desc->OriginalFirstThunk == 0) {
+            continue;
+        }
+        auto* names = reinterpret_cast<IMAGE_THUNK_DATA64*>(
+            image + desc->OriginalFirstThunk);
+        auto* slots = reinterpret_cast<IMAGE_THUNK_DATA64*>(
+            image + desc->FirstThunk);
+        for (; names->u1.AddressOfData != 0; ++names, ++slots) {
+            if (IMAGE_SNAP_BY_ORDINAL64(names->u1.Ordinal)) {
+                continue;
+            }
+            const auto* by_name = reinterpret_cast<const IMAGE_IMPORT_BY_NAME*>(
+                image + names->u1.AddressOfData);
+            if (strcmp(reinterpret_cast<const char*>(by_name->Name), name) == 0) {
+                return reinterpret_cast<void**>(&slots->u1.Function);
+            }
+        }
+    }
+    return nullptr;
+}
+
+bool write_import_slot(void** slot, void* value) {
+    DWORD protection{};
+    if (!VirtualProtect(slot, sizeof(void*), PAGE_READWRITE, &protection)) {
+        return false;
+    }
+    InterlockedExchangePointer(slot, value);
+    DWORD ignored{};
+    VirtualProtect(slot, sizeof(void*), protection, &ignored);
+    return true;
+}
+
+// [FEATURE:REMASTER-FSR-PER-EYE 6/7] The exe imports the FidelityFX API from
+// amd_fidelityfx_loader_dx12.dll. Only the exe's own import slots are
+// redirected; the AMD DLLs are left untouched. The engine dispatch hook is
+// enabled only once the slots are in place, so a twin is never dispatched
+// without the lifetime hooks that destroy it.
+// [FEATURE:REMASTER-FSR2-PER-EYE 4/4] Checks every piece of the built-in FSR 2
+// path the per-eye code relies on (the upscale dispatch's flag test and call,
+// the FSR 2 dispatch's use of the reset byte, counter, frame index and the
+// three history table reads, and the CRenderTarget vtable slots) and arms it.
+// Reads code only; |dispatch| is the still unpatched upscale dispatch. Returns
+// the reason when the path stays off (then FSR 2 runs as the game does).
+const char* resolve_remaster_fsr2_builtin_path(const uint8_t* dispatch) {
+    namespace addresses = w3vr::engine_addresses;
+    const auto build = running_game_build();
+    auto* module = reinterpret_cast<const uint8_t*>(GetModuleHandleW(nullptr));
+    if (module == nullptr || dispatch == nullptr) {
+        return "no module";
+    }
+    const auto at = [&](addresses::Value which) {
+        return module + addresses::value(build, which);
+    };
+    const auto matches = [](const uint8_t* code, const uint8_t* bytes,
+                             size_t size) {
+        return addresses::signature_matches(code, addresses::Signature{bytes, size});
+    };
+    // cmp byte [rip+disp32], 0 at +0x15 (the last two signature bytes), then
+    // mov rdi,r8; mov r14,rdx; mov rbx,rcx and the branch at +0x25.
+    constexpr uint8_t kAfterFlagTest[] = {
+        0x00, 0x49, 0x8B, 0xF8, 0x4C, 0x8B, 0xF2, 0x48, 0x8B, 0xD9};
+    constexpr size_t kFlagDisp = sizeof(addresses::kFsrUpscaleDispatch501Bytes);
+    if (!matches(dispatch + kFlagDisp + 4, kAfterFlagTest, sizeof(kAfterFlagTest))) {
+        return "flag test";
+    }
+    const uint8_t* branch = at(addresses::Value::FsrBuiltinBranch);
+    if (branch != dispatch + kFlagDisp + 4 + sizeof(kAfterFlagTest) ||
+        !matches(branch, addresses::kFsrBuiltinBranch501Bytes,
+            sizeof(addresses::kFsrBuiltinBranch501Bytes))) {
+        return "built-in branch";
+    }
+    const uint8_t* fsr2 = at(addresses::Value::Fsr2BuiltinDispatch);
+    const uint8_t* call = branch + sizeof(addresses::kFsrBuiltinBranch501Bytes) - 1;
+    if (w3vr::call_site_hook::call_destination(call) !=
+            reinterpret_cast<uintptr_t>(fsr2) ||
+        !matches(fsr2, addresses::kFsr2BuiltinDispatch501Bytes,
+            sizeof(addresses::kFsr2BuiltinDispatch501Bytes))) {
+        return "built-in FSR2 dispatch";
+    }
+    const struct {
+        addresses::Value site;
+        const uint8_t* bytes;
+        size_t size;
+        const char* name;
+    } sites[] = {
+        {addresses::Value::Fsr2DispatchResetSite, addresses::kFsr2DispatchReset501Bytes,
+            sizeof(addresses::kFsr2DispatchReset501Bytes), "reset byte"},
+        {addresses::Value::Fsr2DispatchParitySite, addresses::kFsr2DispatchParity501Bytes,
+            sizeof(addresses::kFsr2DispatchParity501Bytes), "parity/LockStatus"},
+        {addresses::Value::Fsr2DispatchUpscaledSite,
+            addresses::kFsr2DispatchUpscaled501Bytes,
+            sizeof(addresses::kFsr2DispatchUpscaled501Bytes), "InternalUpscaled"},
+        {addresses::Value::Fsr2DispatchLumaSite, addresses::kFsr2DispatchLuma501Bytes,
+            sizeof(addresses::kFsr2DispatchLuma501Bytes), "LumaHistory"},
+        {addresses::Value::Fsr2DispatchFrameIndexSite,
+            addresses::kFsr2DispatchFrameIndex501Bytes,
+            sizeof(addresses::kFsr2DispatchFrameIndex501Bytes), "frame index"},
+        {addresses::Value::Fsr2DispatchCounterSite,
+            addresses::kFsr2DispatchCounter501Bytes,
+            sizeof(addresses::kFsr2DispatchCounter501Bytes), "counter"},
+        {addresses::Value::RenderTargetReleaseFunction,
+            addresses::kRenderTargetRelease501Bytes,
+            sizeof(addresses::kRenderTargetRelease501Bytes), "render target release"},
+        {addresses::Value::RenderTargetCreateFunction,
+            addresses::kRenderTargetCreate501Bytes,
+            sizeof(addresses::kRenderTargetCreate501Bytes), "render target create"},
+        {addresses::Value::RenderTargetIdStoreSite,
+            addresses::kRenderTargetIdStore501Bytes,
+            sizeof(addresses::kRenderTargetIdStore501Bytes), "texture id store"},
+    };
+    for (const auto& site : sites) {
+        if (!matches(at(site.site), site.bytes, site.size)) {
+            return site.name;
+        }
+    }
+    const uint8_t* vtable = at(addresses::Value::RenderTargetVtable);
+    uintptr_t release{};
+    uintptr_t create{};
+    memcpy(&release, vtable + sizeof(void*), sizeof(release));
+    memcpy(&create, vtable + 2 * sizeof(void*), sizeof(create));
+    if (release != reinterpret_cast<uintptr_t>(
+            at(addresses::Value::RenderTargetReleaseFunction)) ||
+        create != reinterpret_cast<uintptr_t>(
+            at(addresses::Value::RenderTargetCreateFunction))) {
+        return "render target vtable";
+    }
+    if (engine_frame_offset(addresses::Value::RenderTargetObjectSize) >
+        kRemasterFsr2TwinBytes) {
+        return "render target size";
+    }
+    int32_t disp{};
+    memcpy(&disp, dispatch + kFlagDisp, sizeof(disp));
+    g_engine_fsr_builtin_flag = dispatch + kFlagDisp + 5 + disp;
+    g_engine_render_target_vtable = vtable;
+    g_engine_render_target_release = reinterpret_cast<EngineRenderTargetVirtual>(release);
+    g_engine_render_target_create = reinterpret_cast<EngineRenderTargetVirtual>(create);
+    return nullptr;
+}
+
+void install_remaster_engine_fsr_hooks() {
+    if (!remaster_engine_fsr_stereo_active() ||
+        running_game_build() != w3vr::game_build::Build::Remaster501 ||
+        g_engine_fsr_upscale_dispatch != nullptr) {
+        return;
+    }
+    constexpr const char* kLoader = "amd_fidelityfx_loader_dx12.dll";
+    HMODULE loader = GetModuleHandleA(kLoader);
+    if (loader == nullptr) {
+        log_line("FSR per-eye disabled: %s is not loaded", kLoader);
+        return;
+    }
+    g_ffx_query = reinterpret_cast<PfnFfxQuery>(
+        GetProcAddress(loader, "ffxQuery"));
+    struct ImportSpec {
+        const char* name;
+        void* detour;
+        void** original;
+        void** slot;
+    };
+    ImportSpec imports[] = {
+        {"ffxCreateContext", reinterpret_cast<void*>(&hook_ffx_create_context),
+            reinterpret_cast<void**>(&g_ffx_create_context), nullptr},
+        {"ffxDestroyContext", reinterpret_cast<void*>(&hook_ffx_destroy_context),
+            reinterpret_cast<void**>(&g_ffx_destroy_context), nullptr},
+        {"ffxConfigure", reinterpret_cast<void*>(&hook_ffx_configure),
+            reinterpret_cast<void**>(&g_ffx_configure), nullptr},
+    };
+    for (auto& import : imports) {
+        import.slot = find_exe_import_slot(kLoader, import.name);
+        if (import.slot == nullptr || *import.slot == nullptr) {
+            log_line("FSR per-eye disabled: import %s!%s not found", kLoader,
+                import.name);
+            return;
+        }
+    }
+    auto* target = engine_function_target(
+        w3vr::engine_addresses::Function::FsrUpscaleDispatch);
+    const char* builtin_off =
+        target != nullptr ? resolve_remaster_fsr2_builtin_path(target) : "no dispatch";
+    if (target == nullptr ||
+        MH_CreateHook(target,
+            reinterpret_cast<void*>(&hook_remaster_fsr_upscale_dispatch),
+            reinterpret_cast<void**>(&g_engine_fsr_upscale_dispatch)) != MH_OK) {
+        g_engine_fsr_upscale_dispatch = nullptr;
+        log_line("FSR per-eye disabled: upscale dispatch hook unavailable");
+        return;
+    }
+    size_t patched = 0;
+    for (auto& import : imports) {
+        // Whatever the slot holds now (the loader's export, or another
+        // tool's wrapper) stays the next link of the chain.
+        *import.original = *import.slot;
+        if (!write_import_slot(import.slot, import.detour)) {
+            break;
+        }
+        ++patched;
+    }
+    if (patched != std::size(imports) || MH_EnableHook(target) != MH_OK) {
+        for (size_t i = 0; i < patched; ++i) {
+            write_import_slot(imports[i].slot, *imports[i].original);
+        }
+        MH_RemoveHook(target);
+        g_engine_fsr_upscale_dispatch = nullptr;
+        g_engine_fsr_builtin_flag = nullptr;
+        log_line("FSR per-eye disabled: import redirect or hook enable failed");
+        return;
+    }
+    log_line("FSR per-eye hooked: right-eye twin context per game upscale "
+        "context, per-eye resets, per_eye_motion=%d",
+        g_config.remaster_dlss_per_eye_motion ? 1 : 0);
+    if (builtin_off == nullptr) {
+        log_line("FSR per-eye: built-in FSR2 path armed (flag %p, %zu right-eye "
+            "history targets)", g_engine_fsr_builtin_flag,
+            kRemasterFsr2TargetCount);
+    } else {
+        log_line("FSR per-eye: built-in FSR2 path off (%s mismatch); FSR 2 keeps "
+            "one history for both eyes", builtin_off);
+    }
+}
+
+// [FIX:REMASTER-PAIR-JITTER 3/6] Index of the stereo pair a render belongs
+// to, for frame_data (FrameBuilder's frame + 0x10, as the jitter generator
+// and the noise passes receive it) or, inside the frame builder, for the
+// render tag it applied. Pair ids advance by 1 per duplicate-render pair and
+// are the same for both eyes (run-ahead included: the tag belongs to the
+// factory that created the pair). Masked so the generator's int index and
+// index - 1 stay positive.
+bool stereo_pair_render_index(void* frame_data, bool tag_first, uint32_t& index) {
+    if (!g_engine_dual_render_active.load(std::memory_order_acquire)) {
+        return false;
+    }
+    uint64_t pair_id = 0;
+    const auto from_tag = [&pair_id]() {
+        if ((g_engine_render_eye == 0 || g_engine_render_eye == 1) &&
+            g_engine_render_pair_id != UINT64_MAX) {
+            pair_id = g_engine_render_pair_id;
+        }
+    };
+    if (tag_first) {
+        from_tag();
+    }
+    if (pair_id == 0 && frame_data != nullptr) {
+        void* frame = static_cast<uint8_t*>(frame_data) -
+            engine_frame_offset(
+                w3vr::engine_addresses::Value::DlssFrameDataFromFrame);
+        g_engine_dual_frame_mutex.lock();
+        auto found = g_engine_dual_frame_eyes.find(frame);
+        if (found == g_engine_dual_frame_eyes.end()) {
+            found = g_engine_dual_frame_eyes.find(frame_data);
+        }
+        if (found != g_engine_dual_frame_eyes.end() && found->second.eye <= 1 &&
+            found->second.pair_id != UINT64_MAX) {
+            pair_id = found->second.pair_id;
+        }
+        g_engine_dual_frame_mutex.unlock();
+    }
+    if (pair_id == 0 && !tag_first) {
+        from_tag();
+    }
+    if (pair_id == 0) {
+        return false;
+    }
+    index = static_cast<uint32_t>(pair_id & 0x3FFFFFFFu) + 1u;
+    return true;
+}
+
+using EngineTemporalJitterFunction =
+    void*(__fastcall*)(void*, float*, int, void*, int);
+EngineTemporalJitterFunction g_engine_temporal_jitter{};
+std::atomic<uint64_t> g_pair_jitter_current_calls{};
+std::atomic<uint64_t> g_pair_jitter_current_replaced{};
+std::atomic<uint64_t> g_pair_jitter_previous_replaced{};
+std::atomic<uint64_t> g_pair_noise_reads{};
+std::atomic<uint64_t> g_pair_noise_replaced{};
+// Set once both jitter calls are redirected; the detours replace nothing
+// before (or if the second redirect fails).
+std::atomic<bool> g_pair_jitter_active{};
+bool g_pair_noise_active{};
+
+// [FIX:REMASTER-PAIR-JITTER 4/6] Both eyes of a pair get the generator's
+// sample for the pair index, and the previous sample is the pair before:
+// what this eye itself used last time. The game builds the projection, the
+// previous projection and the DLSS constants from these two values, so they
+// stay consistent with each other.
+void* __fastcall hook_temporal_jitter_current(
+    void* context, float* out, int mode, void* frame_data, int counter) {
+    g_pair_jitter_current_calls.fetch_add(1, std::memory_order_relaxed);
+    uint32_t index{};
+    if (g_pair_jitter_active.load(std::memory_order_acquire) &&
+        stereo_pair_render_index(frame_data, true, index)) {
+        const uint64_t count = g_pair_jitter_current_replaced.fetch_add(
+            1, std::memory_order_relaxed) + 1;
+        if (count == 1) {
+            log_line("Pair jitter first replacement mode=%d counter=%d index=%u eye=%d",
+                mode, counter, index, g_engine_render_eye);
+        }
+        return g_engine_temporal_jitter(
+            context, out, mode, frame_data, static_cast<int>(index));
+    }
+    return g_engine_temporal_jitter(context, out, mode, frame_data, counter);
+}
+
+void* __fastcall hook_temporal_jitter_previous(
+    void* context, float* out, int mode, void* frame_data, int counter) {
+    uint32_t index{};
+    if (g_pair_jitter_active.load(std::memory_order_acquire) &&
+        stereo_pair_render_index(frame_data, true, index)) {
+        g_pair_jitter_previous_replaced.fetch_add(1, std::memory_order_relaxed);
+        return g_engine_temporal_jitter(
+            context, out, mode, frame_data, static_cast<int>(index - 1u));
+    }
+    return g_engine_temporal_jitter(context, out, mode, frame_data, counter);
+}
+
+// [FIX:REMASTER-PAIR-NOISE 3/4] Called from the noise-read stubs with
+// frame_data (r14) and the value the game was about to load; returns the
+// value to load instead. GTAO masks it with 63 and steps it per render, so
+// the pair index gives both eyes the same pattern and each eye's history
+// all 64 of them.
+uint32_t __fastcall pair_noise_counter(void* frame_data, uint32_t original) {
+    g_pair_noise_reads.fetch_add(1, std::memory_order_relaxed);
+    uint32_t index{};
+    if (!g_pair_noise_active ||
+        !stereo_pair_render_index(frame_data, false, index)) {
+        return original;
+    }
+    g_pair_noise_replaced.fetch_add(1, std::memory_order_relaxed);
+    return index;
+}
+
+// Replaces the 7-byte `mov edx|eax, [r14+0xC40]` at |site| with a call to a
+// stub (plus a 2-byte nop). The stub saves the flags and every volatile
+// register except the destination (xmm0-5 included: the passes keep values
+// in them across the load), calls pair_noise_counter(r14, [r14+0xC40]) and
+// puts its result in the destination, zero-extended like the original load.
+// It sits within rel32 reach of the site and has unwind data.
+bool install_frame_noise_read_stub(uint8_t* site, bool destination_edx) {
+    constexpr uint8_t kLoadEdx[] = {0x41, 0x8B, 0x96, 0x40, 0x0C, 0x00, 0x00};
+    constexpr uint8_t kLoadEax[] = {0x41, 0x8B, 0x86, 0x40, 0x0C, 0x00, 0x00};
+    const uint8_t* load = destination_edx ? kLoadEdx : kLoadEax;
+    if (site == nullptr ||
+        memcmp(site, load, w3vr::engine_addresses::kFrameNoiseReadBytes) != 0) {
+        return false;
+    }
+    // Saved besides rcx and r8-r11: rax when edx is the destination, rdx
+    // when eax is.
+    const uint8_t saved_push = destination_edx ? 0x50 : 0x52;
+    const uint8_t saved_pop = destination_edx ? 0x58 : 0x5A;
+    const uint8_t saved_unwind_reg = destination_edx ? 0x00 : 0x20;
+    const uint8_t result_move[] = {0x89, static_cast<uint8_t>(
+        destination_edx ? 0xC2 : 0xC0)};  // mov edx,eax | mov eax,eax
+    std::vector<uint8_t> code{
+        0x9C,                                      // pushfq
+        saved_push,                                // push rax | rdx
+        0x51, 0x41, 0x50, 0x41, 0x51, 0x41, 0x52, 0x41, 0x53,  // push rcx, r8-r11
+        0x48, 0x81, 0xEC, 0x80, 0x00, 0x00, 0x00,  // sub rsp,0x80 (prolog: 18 bytes)
+        0xF3, 0x0F, 0x7F, 0x44, 0x24, 0x20,        // movdqu [rsp+0x20],xmm0
+        0xF3, 0x0F, 0x7F, 0x4C, 0x24, 0x30,        // ... xmm1
+        0xF3, 0x0F, 0x7F, 0x54, 0x24, 0x40,        // ... xmm2
+        0xF3, 0x0F, 0x7F, 0x5C, 0x24, 0x50,        // ... xmm3
+        0xF3, 0x0F, 0x7F, 0x64, 0x24, 0x60,        // ... xmm4
+        0xF3, 0x0F, 0x7F, 0x6C, 0x24, 0x70,        // ... xmm5
+        0x4C, 0x89, 0xF1,                          // mov rcx,r14
+        0x41, 0x8B, 0x96, 0x40, 0x0C, 0x00, 0x00,  // mov edx,[r14+0xC40]
+        0xFF, 0x15, 0x00, 0x00, 0x00, 0x00,        // call [rip+rel32] (patched below)
+        0xF3, 0x0F, 0x6F, 0x44, 0x24, 0x20,        // movdqu xmm0,[rsp+0x20]
+        0xF3, 0x0F, 0x6F, 0x4C, 0x24, 0x30,
+        0xF3, 0x0F, 0x6F, 0x54, 0x24, 0x40,
+        0xF3, 0x0F, 0x6F, 0x5C, 0x24, 0x50,
+        0xF3, 0x0F, 0x6F, 0x64, 0x24, 0x60,
+        0xF3, 0x0F, 0x6F, 0x6C, 0x24, 0x70,
+        0x48, 0x81, 0xC4, 0x80, 0x00, 0x00, 0x00,  // add rsp,0x80
+        0x41, 0x5B, 0x41, 0x5A, 0x41, 0x59, 0x41, 0x58, 0x59,  // pop r11..r8, rcx
+        result_move[0], result_move[1],
+        saved_pop,                                 // pop rax | rdx
+        0x9D,                                      // popfq
+        0xC3};                                     // ret
+    constexpr size_t kPrologBytes = 18;
+    constexpr size_t kCallDisplacementOffset = 18 + 36 + 3 + 7 + 2;
+    constexpr size_t kHelperOffset = 0xA0;
+    constexpr size_t kUnwindOffset = 0xB0;
+    constexpr size_t kFunctionOffset = 0xD0;
+    constexpr size_t kStubBytes = 0x100;
+    if (code.size() > kHelperOffset || code[kCallDisplacementOffset - 2] != 0xFF ||
+        code[kCallDisplacementOffset - 1] != 0x15) {
+        log_line("Pair noise stub layout error size=%zu", code.size());
+        return false;
+    }
+    const int32_t helper_displacement = static_cast<int32_t>(
+        kHelperOffset - (kCallDisplacementOffset + sizeof(int32_t)));
+    memcpy(code.data() + kCallDisplacementOffset, &helper_displacement,
+        sizeof(helper_displacement));
+    // UNWIND_INFO v1, prolog 18 bytes, 8 codes (last prolog op first):
+    // alloc 0x80 at 18, push r11/r10/r9/r8/rcx at 11/9/7/5/3, push rax|rdx
+    // at 2, and pushfq as an 8-byte alloc at 1.
+    const uint8_t unwind[] = {
+        0x01, static_cast<uint8_t>(kPrologBytes), 0x08, 0x00,
+        0x12, 0xF2, 0x0B, 0xB0, 0x09, 0xA0, 0x07, 0x90,
+        0x05, 0x80, 0x03, 0x10, 0x02, saved_unwind_reg, 0x01, 0x02};
+    auto* stub = w3vr::call_site_hook::allocate_near(
+        reinterpret_cast<uintptr_t>(site), kStubBytes);
+    if (stub == nullptr) {
+        return false;
+    }
+    int32_t rel{};
+    if (!w3vr::call_site_hook::rel32_to(reinterpret_cast<uintptr_t>(site),
+            reinterpret_cast<uintptr_t>(stub), rel)) {
+        VirtualFree(stub, 0, MEM_RELEASE);
+        return false;
+    }
+    memcpy(stub, code.data(), code.size());
+    const auto helper = reinterpret_cast<uint64_t>(&pair_noise_counter);
+    memcpy(stub + kHelperOffset, &helper, sizeof(helper));
+    memcpy(stub + kUnwindOffset, unwind, sizeof(unwind));
+    auto* function = reinterpret_cast<RUNTIME_FUNCTION*>(stub + kFunctionOffset);
+    function->BeginAddress = 0;
+    function->EndAddress = static_cast<DWORD>(code.size());
+    function->UnwindData = static_cast<DWORD>(kUnwindOffset);
+    DWORD old_protect{};
+    if (!VirtualProtect(stub, kStubBytes, PAGE_EXECUTE_READ, &old_protect)) {
+        VirtualFree(stub, 0, MEM_RELEASE);
+        return false;
+    }
+    FlushInstructionCache(GetCurrentProcess(), stub, kStubBytes);
+    if (!RtlAddFunctionTable(function, 1, reinterpret_cast<DWORD64>(stub))) {
+        log_line("Pair noise stub unwind data not registered (stub still used)");
+    }
+    uint8_t patch[w3vr::engine_addresses::kFrameNoiseReadBytes] = {
+        0xE8, 0, 0, 0, 0, 0x66, 0x90};
+    memcpy(patch + 1, &rel, sizeof(rel));
+    DWORD protect{};
+    if (!VirtualProtect(site, sizeof(patch), PAGE_EXECUTE_READWRITE, &protect)) {
+        return false;
+    }
+    memcpy(site, patch, sizeof(patch));
+    VirtualProtect(site, sizeof(patch), protect, &protect);
+    FlushInstructionCache(GetCurrentProcess(), site, sizeof(patch));
+    return true;
+}
+
+// [FIX:REMASTER-PAIR-JITTER 5/6] [FIX:REMASTER-PAIR-NOISE 4/4] Installed at
+// startup, 5.01 only, after checking the code around every site. The
+// generator stays unpatched; only its two calls in the frame builder are
+// redirected. Each noise load is replaced only when its surroundings match.
+void install_remaster_pair_temporal_hooks() {
+    namespace addresses = w3vr::engine_addresses;
+    if (!g_config.remaster_pair_jitter && !g_config.remaster_pair_noise) {
+        return;
+    }
+    auto* module = reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr));
+    if (running_game_build() != w3vr::game_build::Build::Remaster501 ||
+        module == nullptr) {
+        log_line("Pair jitter/noise off: build mismatch");
+        return;
+    }
+    const auto code_matches = [module](uintptr_t rva, const uint8_t* bytes,
+                                  size_t size) {
+        return addresses::signature_matches(
+            module + rva, addresses::Signature{bytes, size});
+    };
+    if (g_config.remaster_pair_jitter && g_engine_temporal_jitter == nullptr) {
+        auto* generator = module + addresses::kTemporalJitterGenerator501Rva;
+        auto* current = module + addresses::kTemporalJitterCurrentCall501Rva;
+        auto* previous = module + addresses::kTemporalJitterPreviousCall501Rva;
+        const bool generator_matches = code_matches(
+            addresses::kTemporalJitterGenerator501Rva,
+            addresses::kTemporalJitterGenerator501Bytes,
+            sizeof(addresses::kTemporalJitterGenerator501Bytes));
+        const bool current_matches = code_matches(
+            addresses::kTemporalJitterCurrentSite501Rva,
+            addresses::kTemporalJitterCurrentSite501Bytes,
+            sizeof(addresses::kTemporalJitterCurrentSite501Bytes)) &&
+            w3vr::call_site_hook::call_destination(current) ==
+                reinterpret_cast<uintptr_t>(generator);
+        const bool previous_matches = code_matches(
+            addresses::kTemporalJitterPreviousSite501Rva,
+            addresses::kTemporalJitterPreviousSite501Bytes,
+            sizeof(addresses::kTemporalJitterPreviousSite501Bytes)) &&
+            w3vr::call_site_hook::call_destination(previous) ==
+                reinterpret_cast<uintptr_t>(generator);
+        void* previous_original{};
+        if (!generator_matches || !current_matches || !previous_matches) {
+            log_line("Pair jitter off: code mismatch generator=%d current=%d previous=%d",
+                generator_matches ? 1 : 0, current_matches ? 1 : 0,
+                previous_matches ? 1 : 0);
+        } else if (w3vr::call_site_hook::install(current,
+                       reinterpret_cast<void*>(&hook_temporal_jitter_current),
+                       reinterpret_cast<void**>(&g_engine_temporal_jitter)) == nullptr) {
+            g_engine_temporal_jitter = nullptr;
+            log_line("Pair jitter hook failed: current call=%p not redirected", current);
+        } else if (w3vr::call_site_hook::install(previous,
+                       reinterpret_cast<void*>(&hook_temporal_jitter_previous),
+                       &previous_original) == nullptr) {
+            // The current call keeps its detour but, with
+            // g_pair_jitter_active false, passes the game's counter through.
+            log_line("Pair jitter hook failed: previous call=%p not redirected", previous);
+        } else {
+            g_pair_jitter_active.store(true, std::memory_order_release);
+            log_line("Pair jitter hooked generator=%p current_call=%p previous_call=%p",
+                generator, current, previous);
+        }
+    }
+    if (g_config.remaster_pair_noise) {
+        const bool gtao_matches = code_matches(
+            addresses::kGtaoNoiseReadContext501Rva,
+            addresses::kGtaoNoiseReadContext501Bytes,
+            sizeof(addresses::kGtaoNoiseReadContext501Bytes));
+        const bool shadow_matches = code_matches(
+            addresses::kScreenShadowNoiseReadContext501Rva,
+            addresses::kScreenShadowNoiseReadContext501Bytes,
+            sizeof(addresses::kScreenShadowNoiseReadContext501Bytes));
+        // Set before any stub can run.
+        g_pair_noise_active = true;
+        const bool gtao = gtao_matches && install_frame_noise_read_stub(
+            module + addresses::kGtaoNoiseRead501Rva, true);
+        const bool shadow = shadow_matches && install_frame_noise_read_stub(
+            module + addresses::kScreenShadowNoiseRead501Rva, false);
+        log_line("Pair noise gtao=%d (code %d) screen_shadows=%d (code %d)",
+            gtao ? 1 : 0, gtao_matches ? 1 : 0, shadow ? 1 : 0,
+            shadow_matches ? 1 : 0);
+    }
+}
+
+// [FIX:REMASTER-PAIR-JITTER 6/6] Census window deltas: current = current-jitter
+// generator calls, pair = of those given the pair sample, previous = previous
+// samples replaced; noise reads / replaced.
+void log_pair_temporal_census_locked(uint64_t window_presents) {
+    if (window_presents == 0 ||
+        (g_engine_temporal_jitter == nullptr && !g_pair_noise_active)) {
+        return;
+    }
+    static uint64_t previous_calls{};
+    static uint64_t previous_current{};
+    static uint64_t previous_previous{};
+    static uint64_t previous_reads{};
+    static uint64_t previous_noise{};
+    const uint64_t calls = g_pair_jitter_current_calls.load(std::memory_order_relaxed);
+    const uint64_t current = g_pair_jitter_current_replaced.load(std::memory_order_relaxed);
+    const uint64_t previous = g_pair_jitter_previous_replaced.load(std::memory_order_relaxed);
+    const uint64_t reads = g_pair_noise_reads.load(std::memory_order_relaxed);
+    const uint64_t noise = g_pair_noise_replaced.load(std::memory_order_relaxed);
+    log_vrs_line(
+        "PERF pair temporal jitter_calls=%llu jitter_pair=%llu previous_pair=%llu "
+        "noise_reads=%llu noise_pair=%llu",
+        static_cast<unsigned long long>(calls - previous_calls),
+        static_cast<unsigned long long>(current - previous_current),
+        static_cast<unsigned long long>(previous - previous_previous),
+        static_cast<unsigned long long>(reads - previous_reads),
+        static_cast<unsigned long long>(noise - previous_noise));
+    previous_calls = calls;
+    previous_current = current;
+    previous_previous = previous;
+    previous_reads = reads;
+    previous_noise = noise;
+}
+
+// Collector init (from kaarele's [FEATURE:REMASTER-LOCAL-LIGHTS 2/2], reduced
+// to what remaster_pair_previous_transforms needs; the local-light hooks are
+// not in this fork): 0x01BF84D0 assigns the render's frame index (+0xB0).
+constexpr uint8_t kRemaster501CollectorInitBytes[] = {
+    0x48, 0x8B, 0xC4, 0x4C, 0x89, 0x48, 0x20, 0x55, 0x48, 0x81, 0xEC, 0x90,
+    0x00, 0x00, 0x00, 0x48, 0x89, 0x70, 0x10, 0x49, 0x8B, 0xE8, 0x48, 0x89};
+// Collector init: mov eax,[scene+0x1B8]; mov [collector+0xB0],eax.
+constexpr uintptr_t kRemaster501CollectorFrameIndexRva = 0x01BF85B6;
+constexpr uint8_t kRemaster501CollectorFrameIndexBytes[] = {
+    0x8B, 0x85, 0xB8, 0x01, 0x00, 0x00, 0x41, 0x89, 0x86, 0xB0, 0x00, 0x00, 0x00};
+
+struct RemasterLocalLightHook {
+    const char* name;
+    uintptr_t rva;
+    const uint8_t* signature;
+    size_t signature_size;
+};
+constexpr RemasterLocalLightHook kRemasterCollectorInitHook{"CollectorInit",
+    0x01BF84D0, kRemaster501CollectorInitBytes, sizeof(kRemaster501CollectorInitBytes)};
+
+using EngineCollectorInitFn = void(__fastcall*)(void*, void*, void*, void*, uintptr_t);
+EngineCollectorInitFn g_engine_collector_init{};
+std::atomic<uint64_t> g_local_light_last_pair{};
+
+// Local-light lines: in the census log during a measurement run (diagnostics
+// off), otherwise through log_line; never twice.
+void log_local_light_line(const char* fmt, ...) {
+    va_list args{};
+    va_start(args, fmt);
+    if (g_config.vrs_log_file) {
+        append_log_file_line_v(fmt, args);
+    } else if (g_config.logging_enabled) {
+        write_log_line_v(fmt, args);
+    }
+    va_end(args);
+}
+
+bool install_remaster_local_light_hook(uint8_t* module,
+    const RemasterLocalLightHook& hook, void* detour, void** original) {
+    auto* target = module + hook.rva;
+    if (memcmp(target, hook.signature, hook.signature_size) != 0) {
+        log_local_light_line("LL %s signature mismatch at RVA 0x%llX; left vanilla",
+            hook.name, static_cast<unsigned long long>(hook.rva));
+        return false;
+    }
+    if (MH_CreateHook(target, detour, original) == MH_OK &&
+        MH_EnableHook(target) == MH_OK) {
+        log_local_light_line("LL %s hooked target=%p bytes=%zu", hook.name, target,
+            hook.signature_size);
+        return true;
+    }
+    *original = nullptr;
+    log_local_light_line("LL %s hook failed target=%p; left vanilla", hook.name, target);
+    return false;
+}
+
+// [FIX:REMASTER-PAIR-PREVIOUS 2/4] 5.01 strict Stereo. Every engine render
+// ("collection") takes a new frame index: the collector init 0x01BF84D0 does
+// ++scene+0x1B8 and copies it to collector+0xB0, so the two eyes of a pair get
+// consecutive indices. Render proxies (IRenderProxyBase) stamp the index of
+// the last render that visited them at +0xEC. A transform update (base
+// UpdateTransform 0x01D46AA0, base relink transform 0x01D46670, decal
+// 0x01CF5A10) copies localToWorld (+0x40) to the previous transform (+0x80)
+// and marks it valid for exactly the next render: +0xC0 = +0xEC + 1.
+// The tick's updates are applied in the first eye's flush, so the first eye
+// sees +0xC0 == its index and gets object motion; the second eye's index is
+// one higher and the previous transform counts as stale: moving objects get
+// camera-only motion vectors in that eye (the left one; DLSS/FSR smear them).
+// With remaster_pair_previous_transforms the three writers record the proxies
+// they update; at the second render's collector init, every recorded proxy
+// still marked valid for the first render (+0xC0 == first index) is marked
+// valid for this render too. Each recorded proxy holds a reference (+0x8,
+// released through vtable +0x10) until then.
+constexpr uint8_t kRemaster501ProxyRelinkTransformBytes[] = {
+    0x8B, 0x81, 0xEC, 0x00, 0x00, 0x00, 0xFF, 0xC0, 0x89, 0x81, 0xC0, 0x00,
+    0x00, 0x00, 0x8B, 0x41, 0x40, 0x89, 0x81, 0x80, 0x00, 0x00, 0x00};
+constexpr uint8_t kRemaster501ProxyUpdateTransformBytes[] = {
+    0x48, 0x83, 0xEC, 0x58, 0x8B, 0x81, 0xEC, 0x00, 0x00, 0x00, 0xFF, 0xC0,
+    0x89, 0x81, 0xC0, 0x00, 0x00, 0x00, 0x8B, 0x41, 0x40, 0x89, 0x81, 0x80,
+    0x00, 0x00, 0x00};
+constexpr uint8_t kRemaster501DecalUpdateTransformBytes[] = {
+    0x40, 0x53, 0x48, 0x83, 0xEC, 0x50, 0x8B, 0x81, 0xEC, 0x00, 0x00, 0x00,
+    0x48, 0x8B, 0xD9, 0xFF, 0xC0, 0x89, 0x81, 0xC0, 0x00, 0x00, 0x00, 0x8B,
+    0x41, 0x40, 0x89, 0x81, 0x80, 0x00};
+constexpr RemasterLocalLightHook kRemasterProxyRelinkTransformHook{
+    "ProxyRelinkTransform", 0x01D46670, kRemaster501ProxyRelinkTransformBytes,
+    sizeof(kRemaster501ProxyRelinkTransformBytes)};
+constexpr RemasterLocalLightHook kRemasterProxyUpdateTransformHook{
+    "ProxyUpdateTransform", 0x01D46AA0, kRemaster501ProxyUpdateTransformBytes,
+    sizeof(kRemaster501ProxyUpdateTransformBytes)};
+constexpr RemasterLocalLightHook kRemasterDecalUpdateTransformHook{
+    "DecalUpdateTransform", 0x01CF5A10, kRemaster501DecalUpdateTransformBytes,
+    sizeof(kRemaster501DecalUpdateTransformBytes)};
+constexpr size_t kProxyPreviousValidOffset = 0xC0;
+constexpr size_t kProxyRefCountOffset = 0x08;
+constexpr size_t kPairMovedProxyCap = 16384;
+
+using EngineProxyTransformFn = void(__fastcall*)(void*, void*, void*, void*);
+EngineProxyTransformFn g_engine_proxy_relink_transform{};
+EngineProxyTransformFn g_engine_proxy_update_transform{};
+EngineProxyTransformFn g_engine_decal_update_transform{};
+bool g_pair_previous_transforms_active{};
+std::mutex g_pair_moved_mutex;
+std::vector<void*> g_pair_moved_proxies;    // updated since the last collection
+std::vector<void*> g_pair_pending_proxies;  // updated before the pair's first render
+uint64_t g_pair_pending_pair_id{};
+uint32_t g_pair_pending_first_index{};
+std::atomic<uint64_t> g_pair_previous_recorded{};
+std::atomic<uint64_t> g_pair_previous_revalidated{};
+std::atomic<uint64_t> g_pair_previous_not_valid{};
+std::atomic<uint64_t> g_pair_previous_overflow{};
+std::atomic<uint64_t> g_pair_previous_second_renders{};
+
+void record_pair_moved_proxy(void* proxy) {
+    if (proxy == nullptr ||
+        !g_engine_dual_render_active.load(std::memory_order_acquire)) {
+        return;
+    }
+    std::scoped_lock lock{g_pair_moved_mutex};
+    if (g_pair_moved_proxies.size() >= kPairMovedProxyCap) {
+        g_pair_previous_overflow.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    _InterlockedIncrement(reinterpret_cast<volatile long*>(
+        static_cast<uint8_t*>(proxy) + kProxyRefCountOffset));
+    g_pair_moved_proxies.push_back(proxy);
+    g_pair_previous_recorded.fetch_add(1, std::memory_order_relaxed);
+}
+
+void release_render_proxies(std::vector<void*>& proxies) {
+    using ReleaseFn = void(__fastcall*)(void*);
+    for (void* proxy : proxies) {
+        auto* const* vtable = *static_cast<void* const* const*>(proxy);
+        reinterpret_cast<ReleaseFn>(vtable[2])(proxy);
+    }
+    proxies.clear();
+}
+
+void __fastcall hook_engine_proxy_relink_transform(
+    void* proxy, void* second, void* third, void* fourth) {
+    g_engine_proxy_relink_transform(proxy, second, third, fourth);
+    record_pair_moved_proxy(proxy);
+}
+
+void __fastcall hook_engine_proxy_update_transform(
+    void* proxy, void* second, void* third, void* fourth) {
+    g_engine_proxy_update_transform(proxy, second, third, fourth);
+    record_pair_moved_proxy(proxy);
+}
+
+void __fastcall hook_engine_decal_update_transform(
+    void* proxy, void* second, void* third, void* fourth) {
+    g_engine_decal_update_transform(proxy, second, third, fourth);
+    record_pair_moved_proxy(proxy);
+}
+
+// Collector init (render thread, after the engine assigned the frame index).
+void remaster_pair_previous_at_collection(
+    uint32_t frame_index, uint64_t pair_id, bool tagged, bool second) {
+    std::vector<void*> moved;
+    {
+        std::scoped_lock lock{g_pair_moved_mutex};
+        moved.swap(g_pair_moved_proxies);
+    }
+    if (!tagged) {
+        release_render_proxies(moved);
+        release_render_proxies(g_pair_pending_proxies);
+        return;
+    }
+    if (!second) {
+        // The tick's updates, applied in this (first) render's flush.
+        release_render_proxies(g_pair_pending_proxies);
+        g_pair_pending_proxies.swap(moved);
+        g_pair_pending_pair_id = pair_id;
+        g_pair_pending_first_index = frame_index;
+        return;
+    }
+    uint64_t revalidated = 0;
+    uint64_t not_valid = 0;
+    if (g_pair_pending_pair_id == pair_id) {
+        for (void* proxy : g_pair_pending_proxies) {
+            auto* stamp = reinterpret_cast<volatile uint32_t*>(
+                static_cast<uint8_t*>(proxy) + kProxyPreviousValidOffset);
+            if (*stamp == g_pair_pending_first_index) {
+                *stamp = frame_index;
+                ++revalidated;
+            } else {
+                ++not_valid;
+            }
+        }
+    }
+    release_render_proxies(g_pair_pending_proxies);
+    // Updates applied between the two renders are already valid for this one.
+    release_render_proxies(moved);
+    g_pair_previous_revalidated.fetch_add(revalidated, std::memory_order_relaxed);
+    g_pair_previous_not_valid.fetch_add(not_valid, std::memory_order_relaxed);
+    const uint64_t renders = g_pair_previous_second_renders.fetch_add(
+        1, std::memory_order_relaxed) + 1;
+    if (renders <= 4 || renders % 600 == 0) {
+        log_local_light_line("Pair previous transforms render=%llu pair=%llu index=%u "
+            "first=%u revalidated=%llu not_valid=%llu total_recorded=%llu "
+            "total_revalidated=%llu overflow=%llu",
+            static_cast<unsigned long long>(renders),
+            static_cast<unsigned long long>(pair_id), frame_index,
+            g_pair_pending_first_index,
+            static_cast<unsigned long long>(revalidated),
+            static_cast<unsigned long long>(not_valid),
+            static_cast<unsigned long long>(
+                g_pair_previous_recorded.load(std::memory_order_relaxed)),
+            static_cast<unsigned long long>(
+                g_pair_previous_revalidated.load(std::memory_order_relaxed)),
+            static_cast<unsigned long long>(
+                g_pair_previous_overflow.load(std::memory_order_relaxed)));
+    }
+}
+
+// Reduced from kaarele's collector init detour (its local-light bookkeeping
+// is not in this fork): tag the render with its pair and eye, then
+// [FIX:REMASTER-PAIR-PREVIOUS 3/4].
+void __fastcall hook_remaster_collector_init(
+    void* collector, void* frame, void* scene, void* fourth, uintptr_t fifth) {
+    g_engine_collector_init(collector, frame, scene, fourth, fifth);
+    // Without a scene the frame index is a constant (100): not a world render.
+    if (collector == nullptr || scene == nullptr) {
+        return;
+    }
+    uint32_t frame_index{};
+    memcpy(&frame_index, static_cast<uint8_t*>(collector) + 0xB0,
+        sizeof(frame_index));
+    // The frame builder (the only caller) carries the eye tag on this thread.
+    int eye = g_engine_render_eye;
+    uint64_t pair_id = g_engine_render_pair_id;
+    bool tagged = (eye == 0 || eye == 1) && pair_id != 0 && pair_id != UINT64_MAX;
+    if (!tagged && frame != nullptr &&
+        g_engine_dual_render_active.load(std::memory_order_acquire)) {
+        std::scoped_lock lock{g_engine_dual_frame_mutex};
+        const auto found = g_engine_dual_frame_eyes.find(frame);
+        if (found != g_engine_dual_frame_eyes.end() && found->second.eye <= 1 &&
+            found->second.pair_id != 0 && found->second.pair_id != UINT64_MAX) {
+            eye = static_cast<int>(found->second.eye);
+            pair_id = found->second.pair_id;
+            tagged = true;
+        }
+    }
+    const bool second = tagged &&
+        g_local_light_last_pair.exchange(pair_id, std::memory_order_relaxed) == pair_id;
+    // [FIX:REMASTER-PAIR-PREVIOUS 3/4]
+    if (g_pair_previous_transforms_active) {
+        remaster_pair_previous_at_collection(frame_index, pair_id, tagged, second);
+    }
+}
+
+// [FIX:REMASTER-PAIR-PREVIOUS 4/4] Installed after the local-light hooks,
+// which may already own the collector init hook.
+void install_remaster_pair_previous_hooks() {
+    if (!g_config.remaster_pair_previous_transforms ||
+        g_pair_previous_transforms_active) {
+        return;
+    }
+    auto* module = reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr));
+    if (running_game_build() != w3vr::game_build::Build::Remaster501 ||
+        module == nullptr || mode3_aer_presentation_active()) {
+        log_local_light_line("Pair previous transforms off: needs 5.01 strict Stereo");
+        return;
+    }
+    // kaarele checks his local-light layout probes here; this fork checks the
+    // one the collector detour reads (the frame index at collector +0xB0).
+    if (g_engine_collector_init == nullptr &&
+        (memcmp(module + kRemaster501CollectorFrameIndexRva,
+             kRemaster501CollectorFrameIndexBytes,
+             sizeof(kRemaster501CollectorFrameIndexBytes)) != 0 ||
+            !install_remaster_local_light_hook(module, kRemasterCollectorInitHook,
+                reinterpret_cast<void*>(&hook_remaster_collector_init),
+                reinterpret_cast<void**>(&g_engine_collector_init)))) {
+        log_local_light_line("Pair previous transforms off: no collector init hook");
+        return;
+    }
+    const RemasterLocalLightHook* const hooks[3]{
+        &kRemasterProxyRelinkTransformHook, &kRemasterProxyUpdateTransformHook,
+        &kRemasterDecalUpdateTransformHook};
+    for (size_t i = 0; i < 3; ++i) {
+        if (memcmp(module + hooks[i]->rva, hooks[i]->signature,
+                hooks[i]->signature_size) != 0) {
+            log_local_light_line("Pair previous transforms off: %s signature mismatch",
+                hooks[i]->name);
+            return;
+        }
+    }
+    // The flag goes up before the hooks so no recorded proxy is ever missed
+    // by the collection side; recording only starts once a hook is enabled.
+    g_pair_previous_transforms_active = true;
+    const bool installed =
+        install_remaster_local_light_hook(module, kRemasterProxyRelinkTransformHook,
+            reinterpret_cast<void*>(&hook_engine_proxy_relink_transform),
+            reinterpret_cast<void**>(&g_engine_proxy_relink_transform)) &&
+        install_remaster_local_light_hook(module, kRemasterProxyUpdateTransformHook,
+            reinterpret_cast<void*>(&hook_engine_proxy_update_transform),
+            reinterpret_cast<void**>(&g_engine_proxy_update_transform)) &&
+        install_remaster_local_light_hook(module, kRemasterDecalUpdateTransformHook,
+            reinterpret_cast<void*>(&hook_engine_decal_update_transform),
+            reinterpret_cast<void**>(&g_engine_decal_update_transform));
+    log_local_light_line("Pair previous transforms %s (relink=%p update=%p decal=%p)",
+        installed ? "active" : "partially hooked",
+        reinterpret_cast<void*>(g_engine_proxy_relink_transform),
+        reinterpret_cast<void*>(g_engine_proxy_update_transform),
+        reinterpret_cast<void*>(g_engine_decal_update_transform));
 }
 
 // Per-build address table. The hook adjusts the view inputs (indices
@@ -50252,6 +52402,9 @@ void ensure_initialized() {
         install_engine_gameplay_entry_probe();
         install_engine_scene_enqueue_probe();
         install_engine_temporal_camera_builder_hook();
+        install_remaster_engine_dlss_hooks();
+        install_remaster_dlss_mip_bias_hook();
+        install_remaster_engine_fsr_hooks();
         install_engine_view_factory_probe();
         install_engine_render_proxy_distance_scale_hook();
         install_engine_native_camera_authority_hooks();
@@ -50262,6 +52415,7 @@ void ensure_initialized() {
         initialize_engine_player_pose_helpers();
         install_engine_world_vector_to_view_ratio_hook();
         install_engine_animated_component_visibility_hook();
+        install_remaster_pair_temporal_hooks();
         install_engine_frame_factory_probe();
         // [FIX:PAIR-ENQUEUE-AFTER-FENCE 11/11]
         install_pair_enqueue_after_fence_hooks();
@@ -50271,6 +52425,7 @@ void ensure_initialized() {
         install_engine_menu_state_probe();
         install_engine_viewport_resolution_hook();
         install_engine_camera_light_placement_hook();
+        install_remaster_pair_previous_hooks();
         log_line(
             "Hook routes taau_functional=%u taau_metadata=%u dlss=%u reverse_diagnostics=%u mode=%d",
             taau_functional_hooks_needed() ? 1u : 0u,

@@ -779,3 +779,182 @@ refer to features not yet taken over are marked; our own results follow.
 - Not taken over: kaarele's pair rate limit (`[openxr] pair_rate_divisor`, measured by him as not
   worth using) and the world-marker part of the audit (the world-marker hook is not in this fork).
 - Open: headset check (smoothness, latency, moving characters) with `pair_barrier_lag=1`.
+
+## 2026-10-24: per-eye upscaler and motion vectors, taken over from kaarele/witcher3-remastered-vr
+
+From kaarele's port status log (state `e729bd9`, MIT). His tests ran on Linux/Proton with an NVIDIA
+RTX 3080 and a Meta Quest 3 through WiVRn unless stated otherwise; our own results follow.
+
+### DLSS SR on 5.01 under Proton
+- Proton blocks it before the mod does anything: 5.01 skips its Streamline setup when
+  `ntdll!wine_get_version` exists. The DLL now NOPs that jump in memory at load (exact 5.01 build,
+  18 context bytes checked), on by default with `temporal_backend=dlss`.
+- Flat (no OpenXR): Streamline 2, `_nvngx` and `nvngx_dlss` load, no Streamline errors, DLSS image.
+- Strict Stereo: the game evaluates DLSS once per eye frame through one state and viewport, so one
+  history mixed both eyes. Fix: hooks on the constants builder, input prepare and SR apply give
+  each eye its own Streamline viewport (engine id, +0x100 for the right eye) and their own copy of
+  the state's frame guards (both eyes of a pair share `frame_data+0xC44`, so the second eye's
+  constants were otherwise skipped). The per-eye motion-vector camera record (V14003) is ported
+  (builder 0x02291600, view+0x530). Null HMD: every pair gets constants/prepare/apply for both
+  viewports, 0 Streamline errors, both eyes clean and consistent (no blending), same frame rate
+  as FXAA (CPU bound).
+- Status: tested in the headset (DLSS Quality to DLAA).
+
+### Same jitter and noise in both eyes (`remaster_pair_jitter`, `remaster_pair_noise`, 5.01)
+- Symptom (owner, headset): fine detail such as Geralt's outfit looks noisy in VR, worse than on a
+  flat screen; very noisy at DLSS Balanced, barely acceptable at Quality.
+- Cause found statically:
+  - The frame builder (0x01C1A210) asks the jitter generator (0x01C0A9B0; Halton(3,2) of
+    index + 1, or the FidelityFX query for FSR) for the current jitter with the render counter
+    (render context +0x7F0) and for the previous jitter with counter - 1.
+  - The counter is advanced once per engine render (0x01BF85A2, `inc [extra+0x1B8]`), so in
+    strict Stereo the eyes take turns: each eye's own DLSS history only sees every other sample
+    (one half of the pixel in y), the two eyes never use the same offset, and the "previous"
+    jitter is the other eye's.
+  - The same counter, copied to frame_data +0xC40, is the GTAO noise index (& 63, 0x01D1A0AD)
+    and the screen-space shadow noise input (0x01C6D1AA), so each eye gets a different noise
+    pattern and each eye's GTAO history only 32 of the 64.
+- `remaster_pair_jitter=1` redirects the generator's two calls in the frame builder (call-site
+  redirect, code checked first): both eyes of a pair use the sample for the pair index, the
+  previous sample is the one for the pair before (what this eye used last), and each eye's
+  history steps through the whole sequence. The game builds the projection, the previous
+  projection and the DLSS constants from these values, so they stay consistent.
+- `remaster_pair_noise=1` replaces the two 7-byte loads of frame_data +0xC40 with a call into a
+  small stub that returns the pair index. Other users of +0xC40 are unchanged, in particular the
+  DLSS once-per-frame checks (0x01B7E0A0 and its siblings compare it with the last frame they
+  handled, so both eyes must keep distinct values there).
+- Pair index: the tag the mod gives every duplicate-render pair (same for both eyes, also with
+  run-ahead); renders without a tag keep the game's counter.
+- Status (2026-10-22, 0.1.3): on in the release ini; tested headless (zero-IPD left/right disagreement 3-4x lower) and in the headset. Census line `PERF pair temporal jitter_calls= jitter_pair=
+  previous_pair= noise_reads= noise_pair=`.
+
+### Second eye keeps object motion (`remaster_pair_previous_transforms`, 5.01)
+- Symptom (owner, headset): with DLSS Quality/Balanced/Performance the left eye was more jagged
+  and flickered on moving characters (Geralt's armour). With FSR 2 per eye at 63 mm IPD, the left
+  eye smeared a running Geralt. The right eye was clean.
+- Cause: every eye render gets its own frame index:
+  - the collector init 0x141BF84D0 increments scene+0x1B8 and copies it to collector+0xB0;
+  - the right eye renders first in each pair.
+- The writers of a proxy's previous transform copy +0x40 to +0x80 and stamp "previous valid" (+0xC0)
+  as last-visited index (+0xEC) + 1:
+  - relink 0x141D46670;
+  - UpdateTransform 0x141D46AA0 (vtable +0x50);
+  - decal 0x141CF5A10.
+  The tick's updates are applied in the first eye's flush, so the stamp matches only the first
+  eye. The second eye treated moving objects as static (camera-only motion vectors).
+- Proof: swapping the render order (`taau_reverse_eye_order=1`) moved the smear and the lower
+  detail to the right eye (headless high-frequency L/R 0.96/0.94 -> 1.03/1.06).
+- Fix: the three writers are hooked to record the updated proxies of a pair. On the second render,
+  every recorded proxy whose +0xC0 still equals the first render's index is re-stamped to the current
+  index. About 270 proxies per pair in the village, no overflow.
+- Result (headless, DLSS Quality, zero IPD):
+  - L/R detail 0.963 -> 0.993 standing and 0.938 -> 0.982 walking.
+  - Moving-Geralt L/R difference 4.2 -> 1.8.
+  - FSR 2 at 63 mm: both eyes crisp.
+  Tested in the headset by the owner: "looks amazing". On in the release ini for 0.1.3.
+- Diagnostic: `[debug] dlss_eye_constants_log=1` (with logging and diagnostics) logs the Streamline
+  constants each eye's DLSS receives.
+
+### Per-eye FSR history in Stereo (`[engine] remaster_fsr_per_eye`, 5.01)
+
+- Problem: with Anti-aliasing = FSR (AAMode 5), 5.01 dispatches one upscale ffxContext for every
+  render. Strict Stereo renders both eyes through it, so one FSR history alternates between the
+  eyes and blends them (ghosting); the per-eye frustum gate also stays on the envelope route
+  because temporal jitter runs without a per-eye history.
+- Game path (Steam 5.01): the exe imports `ffxCreateContext`, `ffxConfigure`, `ffxQuery`,
+  `ffxDestroyContext` and `ffxDispatch` from `amd_fidelityfx_loader_dx12.dll` (FidelityFX SDK 2.x
+  API; the game ships loader 2.3.0, upscaler 4.1.1, frame generation 4.0.1). 0x01C64D20 creates
+  the upscale context into FSR state +0x40 (description: `FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE`,
+  flags 0x28 depth inverted + auto exposure, +1 HDR, +0x40 dynamic resolution, max render size =
+  max upscale size = the output size, chained to the DX12 backend description; no allocation
+  callbacks). The upscaler selection 0x01C09E73 calls the FSR dispatch 0x01C665B0 (state =
+  renderer +0xD0, the same frame_data as the DLSS functions); it fills
+  `FFX_API_DISPATCH_DESC_TYPE_UPSCALE` (jitter from frame_data +0x4D0, render/output sizes from
+  +0xBDC..+0xBE8, near/far +0x40/+0x44, vertical FOV from +0x2C) and dispatches on `&state->ctx`
+  (call 0x01C66C3D). The history reset is the byte at state +0x26, cleared after the dispatch
+  unless frame generation owns it (state +0x24). Jitter comes from the context's jitter queries
+  (0x10004/0x10005) in 0x01C0A9B0, indexed by the render counter.
+- Fix (`remaster_fsr_per_eye=1`, off by default): the mod redirects the exe's import slots for
+  `ffxCreateContext`, `ffxDestroyContext` and `ffxConfigure` (the AMD DLLs are not patched).
+  When the game creates an upscale context, the mod creates a twin with the game's own
+  description for the right eye; destroy and configure calls on the game's context are repeated
+  on the twin. The FSR dispatch 0x01C665B0 is hooked (signature checked): for a right-eye frame
+  (eye from the dual-render frame tag) the state's context field holds the twin for the duration
+  of the call, so the game's own code dispatches it. Resets follow the per-eye DLSS rules: a new
+  or long-interrupted eye restarts (frame index gap > 4), a reset the game asks for on the first
+  eye of a pair is repeated on the second (same frame index or the next), and a per-eye frustum
+  change restarts both. An untagged dual-render frame runs on the game's context with a reset and
+  restarts both eyes afterwards. With the key on, per-eye FSR also enables the per-eye
+  motion-vector camera record (`remaster_dlss_per_eye_motion`) and counts as a per-eye history for
+  the per-eye frustum gate.
+- Nothing depends on the FSR version: the twin is created through the same loader, so it gets the
+  provider the game's context gets (FSR 2/3.1 on most GPUs, FSR 4.x where the driver offers it).
+  The log names both providers and the twin's VRAM at creation:
+  `FSR per-eye: game upscale context ... right-eye twin ... vram=... MB`, then
+  `FSR per-eye: first left-eye dispatch` / `first right-eye dispatch`. With
+  `runtime_diagnostics=1`, `FSR per-eye dispatch eye= slot= frame_index= reset= calls=` lines.
+- Not covered: FSR frame generation (off in VR; disabled by the game under Wine); the jitter
+  sequence is still indexed by the render counter, so each eye sees every other sample (as with
+  DLSS; `remaster_pair_jitter` changes that). XeSS keeps one history for both eyes.
+- Built-in FSR 2 (headless run 2026-10-21 on an RTX 3080, AAMode 5): the loader hooks never fired
+  (no `ffxCreateContext`, the RANDC line said `per_eye_fsr=0`). The exe has its own FidelityFX FSR 2
+  (shaders `ffx_fsr2_*_pass.hlsl`, render targets `RTN_FSR2_*`), CDPR's "FSR 2 on unsupported GPUs".
+  The FSR dispatch 0x01C665B0 starts with `cmp byte [0x04068A8C], 0`; when the byte is set it
+  calls 0x01CD4A20 on the object at state +8 with the same frame_data and the render surfaces
+  (`CRenderSurfaces`, a `CRenderTarget*` table at +0x30 indexed by the render-target name) and
+  returns before any ffx call. The jitter generator 0x01C0A9B0 tests the same byte and then builds
+  the FSR 2 phase count and Halton sequence itself.
+  - State in the object: +0x10 a counter (`inc; and 0xF` per dispatch) whose low bit picks the
+    ping-pong pair, +0x14 the reset byte (read and cleared on entry), +0x3C the constants' frame
+    index (0 on reset, +1 per dispatch); +4/+8/+0xC are its constant buffers, refilled every
+    dispatch.
+  - History: `RTN_FSR2_LockStatus1/2` (0x5A/0x5B, table +0x300/+0x308), `InternalUpscaled1/2`
+    (0x5C/0x5D, +0x310/+0x318) and `LumaHistory` (0x5F, +0x328). The other `RTN_FSR2_*` targets
+    (prepared input colour, dilated depth/velocity, reconstructed previous depth, depth clip,
+    reactive masks, exposure and its mips, SPD counter) are written and read within one dispatch.
+  - `CRenderTarget` (0x50 bytes, vtable 0x036EBA80): +8 the GpuApi texture id, +0xC/+0x10 size,
+    +0x14 type, +0x18 format; vtable slot 1 (0x01BEF260) releases the texture and clears +8,
+    slot 2 (0x01BEF2C0) creates it from the object's description and stores the id at +8.
+- Fix for the built-in path (same key): the dispatch hook sees the byte. For the right eye it
+  makes five twin render targets once (copies of the game's objects, texture id cleared, slot 2
+  creates their own textures; rebuilt when the game recreates a target, released with slot 1)
+  and, for the duration of each right-eye dispatch, points the five table entries at the twins
+  and gives the object the right eye's counter and frame index; the game's pointers and values
+  are restored afterwards. Resets and the per-eye bookkeeping are the loader path's (reset byte
+  = object +0x14). Every piece is signature checked at startup (the flag test and call, the FSR 2
+  prologue, its reset/parity/table/frame-index/counter code, the vtable slots and the id store);
+  on a mismatch only the built-in path stays off. Logs: `FSR per-eye: built-in FSR2 path armed`,
+  one `built-in FSR2 twin RTN_FSR2_<name> WxH format F texture T` line per twin, then
+  `first left/right-eye dispatch on built-in FSR2 targets`. VRAM: five textures at the output
+  size (two RGBA16F upscaled histories, two lock-status and the luma history), about 100 MB at
+  2476x2594.
+- Status (2026-10-22, 0.1.3): on in the release ini. Built-in FSR 2 path tested headless at 63 mm IPD (both eyes crisp with `remaster_pair_previous_transforms=1`) and tried in the headset on an RTX 3080 (works, large performance cost). The loader path (AMD) is untested.
+
+### This fork: results (2026-10-24)
+- AMD Radeon RX 7900 XTX, Windows, SteamVR null driver at 240 Hz, 1872x1572 per eye, strict Stereo.
+  Build and CTest 100/100 green (new: `call_site_hook` test, address-table check that per-eye FSR is
+  5.01 only).
+- Per-eye DLSS: 5.01 does not offer DLSS on AMD (it writes `AAMode=5` back), so DLSS itself is
+  kaarele's NVIDIA test. With `temporal_backend=dlss` and FXAA in the game the three DLSS hooks and
+  the motion-vector camera builder install with verified signatures; 5.01 calls the DLSS constants
+  builder even under FXAA, and the calls alternate per eye (right eye viewport +0x100). Smoke run
+  passed.
+- Per-eye FSR (`AAMode=5`, `FSR2Quality=2`, `remaster_fsr_per_eye=1`): the FidelityFX loader path,
+  untested by kaarele, works on AMD. The game's upscale context reports provider 4.1.2; the
+  right-eye twin is created with the same provider (about 177 MB VRAM) and the dispatches alternate
+  between the game's context (left) and the twin (right). Compared with the shared FSR history the
+  eye images are cleaner (fewer doubled edges on Geralt during a camera turn).
+- Pair jitter, pair noise and second-eye motion: all hooks verified; in gameplay every jitter call
+  (600 per 5 s window) and every noise read (1200) used the pair index, and about 80 moved render
+  proxies per pair were re-validated for the second eye, no overflow. Eye images clean.
+- Everything together with `pair_barrier_lag=1`: smoke run passed, no barrier timeouts, both eyes on
+  the same tick (`second_entries=0`), FSR per eye on both eyes.
+- 4.04 (smoke without OpenXR with all 5.01 keys requested, and with the SteamVR null driver):
+  passed; the 5.01 keys stay off; TAAU still installs the motion-vector camera builder at its fixed
+  4.04 address and writes the per-eye record (now through the table offset, 0x460 on 4.04).
+- Not taken over: kaarele's local-light features. `remaster_pair_previous_transforms` needs his
+  collector init detour; only its pair-tagging part is taken over, and its layout check is reduced to
+  the frame index it reads.
+- Open: headset check (FSR per eye with all three pair switches; sharpness, smear on moving
+  characters, flicker); DLSS per eye on NVIDIA by someone who has one; a launcher option for the
+  per-eye upscaler on 5.x (the launcher writes `AAMode=1` and `temporal_backend=none` there).

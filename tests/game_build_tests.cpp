@@ -131,6 +131,12 @@ int main() {
                         addresses::Value::RenderSceneFenceWaitReturn) == 0,
                 "pair enqueue after fence is 5.01 only");
         }
+        require(addresses::rva(Build::Remaster501, Function::FsrUpscaleDispatch) == 0x01C665B0 &&
+                addresses::rva(Build::NextGen404, Function::FsrUpscaleDispatch) == 0 &&
+                addresses::value(Build::Remaster501, addresses::Value::FsrStateContext) == 0x40 &&
+                addresses::value(Build::Remaster501, addresses::Value::FsrStateResetFlag) == 0x26 &&
+                addresses::value(Build::NextGen404, addresses::Value::FsrStateContext) == 0,
+            "per-eye FSR is 5.01 only");
         require(addresses::rva(Build::Unknown, Function::IsAnyMenu) == 0,
             "no engine addresses on unknown builds");
         require(addresses::signature(Build::NextGen404, Function::IsAnyMenu).size == 0,

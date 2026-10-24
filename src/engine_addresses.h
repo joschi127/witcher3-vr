@@ -33,6 +33,12 @@ enum class Function : size_t {
     CameraLightPlacement,  // places one camera light from the render camera (pos + yaw)
     RenderFenceWait,       // CRenderFence wait, vtable +0x18 (fence): blocks until it is signalled
     ParallelFlushCommands, // ParallelRenderCommands::FlushCommands (commands): staged batches -> ready, apply
+    DlssConstantsBuilder,  // fills Streamline constants + tags (state, frame_data, reset)
+    DlssInputPrepare,      // tags the DLSS inputs (state, frame_data, params)
+    DlssSrApply,           // sets DLSS options and evaluates SR (state, frame_data, params, pass, ...)
+    TemporalCameraBuild,   // builds the 0xB0 temporal camera record (motion-vector camera)
+    DlssMipBias,           // (frame_data, _, float* bias): texture LOD bias for the frame's samplers
+    FsrUpscaleDispatch,    // FSR upscale dispatch (state, frame_data, params, index, ...)
     Count,
 };
 
@@ -158,6 +164,151 @@ inline constexpr uint8_t kRenderSceneFenceWaitCall501Bytes[] = {
     0x48, 0x8B, 0x8F, 0xD0, 0x01, 0x00, 0x00, 0xC5, 0xF8, 0x28, 0xF0, 0x48,
     0x8B, 0x01, 0xFF, 0x50, 0x18};
 
+// DLSS SR on 5.01 (Streamline 2). Leading bytes, unique in the exe at these lengths.
+inline constexpr uint8_t kDlssConstantsBuilder501Bytes[] = {
+    0x44, 0x88, 0x44, 0x24, 0x18, 0x55, 0x53, 0x41, 0x56, 0x48, 0x8D, 0xAC,
+    0x24, 0xA0, 0xC2, 0xFF, 0xFF, 0xB8, 0x60, 0x3E, 0x00, 0x00, 0xE8, 0x55};
+inline constexpr uint8_t kDlssInputPrepare501Bytes[] = {
+    0x40, 0x55, 0x56, 0x41, 0x56, 0x48, 0x8D, 0x6C, 0x24, 0xB9, 0x48, 0x81,
+    0xEC, 0xF0, 0x00, 0x00, 0x00, 0x48, 0x83, 0x3A, 0x00, 0x48, 0x8B, 0xF2};
+inline constexpr uint8_t kDlssSrApply501Bytes[] = {
+    0x4C, 0x8B, 0xDC, 0x55, 0x53, 0x57, 0x41, 0x56, 0x41, 0x57, 0x48, 0x8D,
+    0x6C, 0x24, 0xA0, 0x48, 0x81, 0xEC, 0x60, 0x01, 0x00, 0x00, 0x80, 0x79};
+// Same code as 4.04 0x015FE010 apart from the AVX encoding; its 0x4E-byte
+// wrapper (5.01 0x02291BB0, 4.04 0x015FFA40) matches instruction for instruction.
+inline constexpr uint8_t kTemporalCameraBuild501Bytes[] = {
+    0x48, 0x8B, 0xC4, 0x48, 0x89, 0x58, 0x08, 0x48, 0x89, 0x70, 0x10, 0x48,
+    0x89, 0x78, 0x18, 0x55, 0x48, 0x8D, 0xA8, 0x18, 0xFF, 0xFF, 0xFF, 0x48,
+    0x81, 0xEC, 0xE0, 0x01, 0x00, 0x00, 0xC5, 0xFC};
+// [FEATURE:REMASTER-DLSS-IMAGE 1/5] 5.01 texture LOD bias, called by the frame
+// builder (0x141C1AC02) and two other passes. Unless frame_data+0xBEC is set,
+// AA modes 3-8 get clamp(log2(render_h / output_h) - 1, -3, 0) plus the
+// TextureMipBias setting (render_h at frame_data+0xBE0, output_h at +0xBE8),
+// other modes TextureMipBias alone. push rbx; sub rsp,0x30; cmp byte ptr
+// [rcx+0xBEC],0; mov rbx,r8; mov r8,rcx; jne: unique in the 5.01 exe.
+inline constexpr uint8_t kDlssMipBias501Bytes[] = {
+    0x40, 0x53, 0x48, 0x83, 0xEC, 0x30, 0x80, 0xB9, 0xEC, 0x0B, 0x00, 0x00,
+    0x00, 0x49, 0x8B, 0xD8, 0x4C, 0x8B, 0xC1, 0x0F, 0x85, 0x84, 0x00, 0x00,
+    0x00};
+
+// [FIX:REMASTER-PAIR-JITTER 1/6] 5.01 only. The frame builder (FrameBuilder)
+// asks the temporal jitter generator (0x01C0A9B0: (context, float2* out,
+// mode, frame_data, index); Halton(3,2) of index + 1, or the FidelityFX
+// jitter query for FSR) twice per render: the current jitter with the render
+// counter (render context +0x7F0, +1 per engine render) and the previous one
+// with counter - 1. In strict Stereo every eye render advances the counter,
+// so each eye's own history only ever sees every other Halton sample (half
+// the pixel in y) and the two eyes jitter differently. Generator entry:
+// mov [rsp+8],rcx; push rbx; push rdi; push r14; sub rsp,0x70; xor ebx,ebx;
+// lea r14,[rdx+4].
+inline constexpr uintptr_t kTemporalJitterGenerator501Rva = 0x01C0A9B0;
+inline constexpr uint8_t kTemporalJitterGenerator501Bytes[] = {
+    0x48, 0x89, 0x4C, 0x24, 0x08, 0x53, 0x57, 0x41, 0x56, 0x48, 0x83, 0xEC,
+    0x70, 0x33, 0xDB, 0x4C, 0x8D, 0x72, 0x04};
+// The current-jitter call, from its counter load: mov eax,[rsi+0x7F0];
+// lea rdx,[rsp+0x50]; mov r9,r14; mov [rsp+0x20],eax; call rel32.
+inline constexpr uintptr_t kTemporalJitterCurrentSite501Rva = 0x01C1B754;
+inline constexpr uintptr_t kTemporalJitterCurrentCall501Rva = 0x01C1B766;
+inline constexpr uint8_t kTemporalJitterCurrentSite501Bytes[] = {
+    0x8B, 0x86, 0xF0, 0x07, 0x00, 0x00, 0x48, 0x8D, 0x54, 0x24, 0x50, 0x4D,
+    0x8B, 0xCE, 0x89, 0x44, 0x24, 0x20, 0xE8, 0x45, 0xF2, 0xFE, 0xFF};
+// The previous-jitter call: mov eax,[rsi+0x7F0]; mov r9,r14; dec eax;
+// mov [rsp+0x20],eax; mov r8d,[r8+0x74]; call rel32.
+inline constexpr uintptr_t kTemporalJitterPreviousSite501Rva = 0x01C1B773;
+inline constexpr uintptr_t kTemporalJitterPreviousCall501Rva = 0x01C1B786;
+inline constexpr uint8_t kTemporalJitterPreviousSite501Bytes[] = {
+    0x8B, 0x86, 0xF0, 0x07, 0x00, 0x00, 0x4D, 0x8B, 0xCE, 0xFF, 0xC8, 0x89,
+    0x44, 0x24, 0x20, 0x45, 0x8B, 0x40, 0x74, 0xE8, 0x25, 0xF2, 0xFE, 0xFF};
+
+// [FIX:REMASTER-PAIR-NOISE 1/4] 5.01 only. The builder copies the render
+// counter to frame_data +0xC40. GTAO (0x01D19810) uses it & 63 as its noise
+// index and the screen-space shadow pass (0x01C6CC20) passes it to its
+// constants, so both noise patterns differ per eye and each eye's GTAO
+// history sees only every other index. Each site is one 7-byte load from
+// r14 = frame_data, which the mod replaces with a call into a stub.
+// GTAO: mov ecx,[r14+0xBE0]; mov edx,[r14+0xC40] (site); mov [rip+..],eax.
+inline constexpr uintptr_t kGtaoNoiseReadContext501Rva = 0x01D1A0A6;
+inline constexpr uintptr_t kGtaoNoiseRead501Rva = 0x01D1A0AD;
+inline constexpr uint8_t kGtaoNoiseReadContext501Bytes[] = {
+    0x41, 0x8B, 0x8E, 0xE0, 0x0B, 0x00, 0x00, 0x41, 0x8B, 0x96, 0x40, 0x0C,
+    0x00, 0x00, 0x89, 0x05};
+// Screen shadows: jne +0x0C; mov eax,[r14+0xC40] (site); mov [rbp-0x60],eax;
+// jmp +3.
+inline constexpr uintptr_t kScreenShadowNoiseReadContext501Rva = 0x01C6D1A8;
+inline constexpr uintptr_t kScreenShadowNoiseRead501Rva = 0x01C6D1AA;
+inline constexpr uint8_t kScreenShadowNoiseReadContext501Bytes[] = {
+    0x75, 0x0C, 0x41, 0x8B, 0x86, 0x40, 0x0C, 0x00, 0x00, 0x89, 0x45, 0xA0,
+    0xEB, 0x03};
+inline constexpr size_t kFrameNoiseReadBytes = 7;
+
+// [FEATURE:REMASTER-FSR-PER-EYE 1/7] 5.01 FSR upscale dispatch, the only
+// caller of ffxDispatch with FFX_API_DISPATCH_DESC_TYPE_UPSCALE (0x01C66C3D).
+// The upscaler selection (0x01C09F57) passes the FSR state (renderer +0xD0)
+// and the same frame_data as the DLSS functions. It dispatches on the
+// ffxContext at state +0x40 (created by 0x01C64D20, one per game) and takes
+// the history reset from the byte at state +0x26, which it clears afterwards
+// unless frame generation owns it (state +0x24). Leading bytes up to the
+// RIP-relative compare, unique in the exe.
+inline constexpr uint8_t kFsrUpscaleDispatch501Bytes[] = {
+    0x40, 0x55, 0x53, 0x57, 0x41, 0x56, 0x48, 0x8D, 0xAC, 0x24, 0x68, 0xFE,
+    0xFF, 0xFF, 0x48, 0x81, 0xEC, 0x98, 0x02, 0x00, 0x00, 0x80, 0x3D};
+// [FEATURE:REMASTER-FSR2-PER-EYE 1/4] The built-in FSR 2 (GPUs the FidelityFX
+// loader does not serve with FSR 4, e.g. NVIDIA, Intel, RX 6000): the upscale
+// dispatch above starts with cmp byte [flag], 0 (disp32 right after these
+// bytes); with the flag set it calls the exe's own FSR 2 (0x01CD4A20) on the
+// object at state +8 with the same frame_data and the render surfaces
+// (CRenderSurfaces; CRenderTarget* table at +0x30, indexed by the
+// render-target name) and returns. That FSR 2 keeps its per-frame state in the
+// object: +0x10 a counter whose low bit picks the ping-pong history pair,
+// +0x14 the reset byte (read and cleared on entry), +0x3C the constants'
+// frame index (0 after a reset, +1 per dispatch). Its history lives in five
+// engine render targets: RTN_FSR2_LockStatus1/2 (0x5A/0x5B),
+// RTN_FSR2_InternalUpscaled1/2 (0x5C/0x5D) and RTN_FSR2_LumaHistory (0x5F);
+// the other RTN_FSR2_* targets are written and read within one dispatch.
+// Bytes at FsrBuiltinBranch: je over it; mov eax,[rbp+0x1E0];
+// mov rcx,[rcx+8]; mov [rsp+0x20],eax; call rel32 (-> Fsr2BuiltinDispatch).
+inline constexpr uint8_t kFsrBuiltinBranch501Bytes[] = {
+    0x74, 0x20, 0x8B, 0x85, 0xE0, 0x01, 0x00, 0x00, 0x48, 0x8B, 0x49, 0x08,
+    0x89, 0x44, 0x24, 0x20, 0xE8};
+inline constexpr uint8_t kFsr2BuiltinDispatch501Bytes[] = {
+    0x48, 0x8B, 0xC4, 0x55, 0x53, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41,
+    0x56, 0x41, 0x57, 0x48, 0x8D, 0x6C, 0x24, 0x88};
+// movzx eax,byte [rcx+0x14] ... mov r15,rcx; mov byte [rcx+0x14],0
+inline constexpr uint8_t kFsr2DispatchReset501Bytes[] = {
+    0x0F, 0xB6, 0x41, 0x14, 0x33, 0xDB, 0x88, 0x85, 0xD8, 0x00, 0x00, 0x00,
+    0x48, 0x8B, 0xFA, 0x49, 0x63, 0xC1, 0x4C, 0x8B, 0xF9, 0xC6, 0x41, 0x14,
+    0x00};
+// mov eax,[r15+0x10]; and eax,1; ...; mov r9,[r8+rcx*8+0x300] (LockStatus)
+inline constexpr uint8_t kFsr2DispatchParity501Bytes[] = {
+    0x41, 0x8B, 0x47, 0x10, 0x83, 0xE0, 0x01, 0x89, 0x55, 0x80, 0x8B, 0xC8,
+    0x83, 0xF0, 0x01, 0x4D, 0x8B, 0x8C, 0xC8, 0x00, 0x03, 0x00, 0x00};
+// mov rax,[r8+rcx*8+0x310] (InternalUpscaled)
+inline constexpr uint8_t kFsr2DispatchUpscaled501Bytes[] = {
+    0x49, 0x8B, 0x84, 0xC8, 0x10, 0x03, 0x00, 0x00};
+// mov rax,[r8+0x328] (LumaHistory)
+inline constexpr uint8_t kFsr2DispatchLuma501Bytes[] = {
+    0x49, 0x8B, 0x80, 0x28, 0x03, 0x00, 0x00};
+// test r8b,r8b; je; mov [r15+0x3C],ebx; jmp; inc dword [r15+0x3C]
+inline constexpr uint8_t kFsr2DispatchFrameIndex501Bytes[] = {
+    0x45, 0x84, 0xC0, 0x74, 0x06, 0x41, 0x89, 0x5F, 0x3C, 0xEB, 0x04, 0x41,
+    0xFF, 0x47, 0x3C};
+// inc eax; and eax,0xF; mov [r15+0x10],eax
+inline constexpr uint8_t kFsr2DispatchCounter501Bytes[] = {
+    0xFF, 0xC0, 0x83, 0xE0, 0x0F, 0x41, 0x89, 0x47, 0x10};
+// CRenderTarget (0x50 bytes, vtable 0x036EBA80): +8 the GpuApi texture id,
+// +0xC/+0x10 size, +0x14 type, +0x18 format. Vtable slot 1 releases the
+// texture and clears +8; slot 2 creates it from the object's description and
+// stores the id at +8 (the store below), without touching anything else.
+inline constexpr uint8_t kRenderTargetRelease501Bytes[] = {
+    0x40, 0x53, 0x48, 0x83, 0xEC, 0x20, 0x8B, 0x41, 0x08, 0x48, 0x8D, 0x59,
+    0x08, 0x85, 0xC0, 0x74};
+inline constexpr uint8_t kRenderTargetCreate501Bytes[] = {
+    0x40, 0x55, 0x53, 0x41, 0x55, 0x41, 0x56, 0x48, 0x8D, 0xAC, 0x24, 0x78,
+    0xFF, 0xFF, 0xFF, 0x48};
+// cmp dword [r13+0x14],9; lea rcx,[r13+8]; mov [rcx],r14d
+inline constexpr uint8_t kRenderTargetIdStore501Bytes[] = {
+    0x41, 0x83, 0x7D, 0x14, 0x09, 0x49, 0x8D, 0x4D, 0x08, 0x44, 0x89, 0x31};
+
 inline constexpr Entry kEntries[] = {
     {"IsAnyMenu", 0x01F3C5C0, 0x01DF41A0, {kIsAnyMenuBytes, sizeof(kIsAnyMenuBytes)}},
     {"IsLoadingScreenVideoPlaying", 0x0154EED0, 0x0227A0F0,
@@ -194,6 +345,18 @@ inline constexpr Entry kEntries[] = {
         {kRenderFenceWait501Bytes, sizeof(kRenderFenceWait501Bytes)}},
     {"ParallelRenderCommands.FlushCommands", 0, 0x01C1CA10,
         {kParallelFlushCommands501Bytes, sizeof(kParallelFlushCommands501Bytes)}},
+    {"DlssConstantsBuilder", 0x01CFE280, 0x01B80230,
+        {kDlssConstantsBuilder501Bytes, sizeof(kDlssConstantsBuilder501Bytes)}},
+    {"DlssInputPrepare", 0x01CFD760, 0x01B7F550,
+        {kDlssInputPrepare501Bytes, sizeof(kDlssInputPrepare501Bytes)}},
+    {"DlssSrApply", 0x01CFCF20, 0x01B7E720,
+        {kDlssSrApply501Bytes, sizeof(kDlssSrApply501Bytes)}},
+    {"TemporalCameraBuild", 0x015FE010, 0x02291600,
+        {kTemporalCameraBuild501Bytes, sizeof(kTemporalCameraBuild501Bytes)}},
+    {"DlssMipBias", 0, 0x01C1D180,
+        {kDlssMipBias501Bytes, sizeof(kDlssMipBias501Bytes)}},
+    {"FsrUpscaleDispatch", 0, 0x01C665B0,
+        {kFsrUpscaleDispatch501Bytes, sizeof(kFsrUpscaleDispatch501Bytes)}},
 };
 static_assert(sizeof(kEntries) / sizeof(kEntries[0]) ==
     static_cast<size_t>(Function::Count));
@@ -228,6 +391,35 @@ enum class Value : size_t {
     ParallelStagedCountOffset,    // FlushCommands' this: entry count of staged bucket 0
     ParallelBucketStride,         // bytes from one bucket of a list to the next
     ParallelBucketCount,          // buckets per list (hashed by proxy address)
+    TemporalCameraRecordOffset,   // bytes from a view to its previous-frame camera record
+    DlssStateViewport,            // DLSS state: Streamline viewport id (u32)
+    DlssStateConstantsFrame,      // DLSS state: frame index last given constants
+    DlssStateApplyFrame,          // DLSS state: render counter of the last SR apply
+    DlssStatePrepareFrame,        // DLSS state: render counter of the last input prepare
+    DlssStateResetFlag,           // DLSS state: this frame's constants request a history reset
+    DlssFrameRayReconstructionFlag,  // frame_data: Ray Reconstruction path active
+    DlssFrameDataFromFrame,       // frame_data = frame + this
+    FsrStateContext,              // FSR state: the game's upscale ffxContext
+    FsrStateResetFlag,            // FSR state: byte requesting a history reset for the next dispatch
+    FsrBuiltinBranch,             // RVA of the upscale dispatch's call into the built-in FSR 2
+    Fsr2BuiltinDispatch,          // RVA of the built-in FSR 2 dispatch (object, frame_data, surfaces, ...)
+    Fsr2DispatchResetSite,        // RVA: its reset-byte read and clear
+    Fsr2DispatchParitySite,       // RVA: its ping-pong parity and LockStatus table read
+    Fsr2DispatchUpscaledSite,     // RVA: its InternalUpscaled table read
+    Fsr2DispatchLumaSite,         // RVA: its LumaHistory table read
+    Fsr2DispatchFrameIndexSite,   // RVA: its frame-index reset / increment
+    Fsr2DispatchCounterSite,      // RVA: its counter increment at the end
+    FsrStateBuiltinFsr2,          // FSR state: the built-in FSR 2 object
+    Fsr2FrameCounter,             // FSR 2 object: dispatch counter (low bit = history pair)
+    Fsr2ResetFlag,                // FSR 2 object: reset byte
+    Fsr2FrameIndex,               // FSR 2 object: constants' frame index
+    RenderSurfacesTargets,        // CRenderSurfaces: CRenderTarget* table, indexed by name
+    RenderTargetVtable,           // RVA of the CRenderTarget vtable
+    RenderTargetReleaseFunction,  // RVA of CRenderTarget vtable slot 1 (release texture)
+    RenderTargetCreateFunction,   // RVA of CRenderTarget vtable slot 2 (create texture)
+    RenderTargetIdStoreSite,      // RVA: slot 2's store of the new texture id
+    RenderTargetTexture,          // CRenderTarget: GpuApi texture id
+    RenderTargetObjectSize,       // CRenderTarget: object size
     Count,
 };
 
@@ -275,6 +467,48 @@ inline constexpr ValueEntry kValues[] = {
     {"ParallelStagedCountOffset", 0, 0x15C},
     {"ParallelBucketStride", 0, 0xC},
     {"ParallelBucketCount", 0, 17},
+    // Previous-frame camera record inside a view: the frame-data factory tests
+    // its valid byte at r8+0x470 (4.04 0x0162152D) / r8+0x540 (5.01 0x022C0888),
+    // with the view at descriptor+0x10.
+    {"TemporalCameraRecordOffset", 0x460, 0x530},
+    // DLSS state object (rcx of the three DLSS functions): the Streamline
+    // viewport id and the per-frame guards of the constants builder, the SR
+    // apply and the input prepare (compared with frame_data +0xC44/+0xC40).
+    {"DlssStateViewport", 0, 0x180},
+    {"DlssStateConstantsFrame", 0x6C, 0x120},
+    {"DlssStateApplyFrame", 0x70, 0x124},
+    {"DlssStatePrepareFrame", 0x74, 0x128},
+    // Byte the constants builder sets when this frame's constants request a
+    // history reset (stored 0x01B80513, read for Constants.reset 0x01B80552).
+    {"DlssStateResetFlag", 0, 0x110},
+    // frame_data byte the upscaler dispatch tests to take the Ray
+    // Reconstruction path instead of SR apply (0x01C09F7A).
+    {"DlssFrameRayReconstructionFlag", 0, 0xF73C},
+    // The DLSS functions receive frame + 0x10 (FrameBuilder: lea r14,[r12+0x10]).
+    {"DlssFrameDataFromFrame", 0x10, 0x10},
+    // [FEATURE:REMASTER-FSR-PER-EYE 2/7] See kFsrUpscaleDispatch501Bytes.
+    {"FsrStateContext", 0, 0x40},
+    {"FsrStateResetFlag", 0, 0x26},
+    // [FEATURE:REMASTER-FSR2-PER-EYE 2/4] See kFsrBuiltinBranch501Bytes.
+    {"FsrBuiltinBranch", 0, 0x01C665D5},
+    {"Fsr2BuiltinDispatch", 0, 0x01CD4A20},
+    {"Fsr2DispatchResetSite", 0, 0x01CD4A72},
+    {"Fsr2DispatchParitySite", 0, 0x01CD4B88},
+    {"Fsr2DispatchUpscaledSite", 0, 0x01CD4BCC},
+    {"Fsr2DispatchLumaSite", 0, 0x01CD4C11},
+    {"Fsr2DispatchFrameIndexSite", 0, 0x01CD5197},
+    {"Fsr2DispatchCounterSite", 0, 0x01CD6612},
+    {"FsrStateBuiltinFsr2", 0, 0x8},
+    {"Fsr2FrameCounter", 0, 0x10},
+    {"Fsr2ResetFlag", 0, 0x14},
+    {"Fsr2FrameIndex", 0, 0x3C},
+    {"RenderSurfacesTargets", 0, 0x30},
+    {"RenderTargetVtable", 0, 0x036EBA80},
+    {"RenderTargetReleaseFunction", 0, 0x01BEF260},
+    {"RenderTargetCreateFunction", 0, 0x01BEF2C0},
+    {"RenderTargetIdStoreSite", 0, 0x01BEF8B2},
+    {"RenderTargetTexture", 0, 0x8},
+    {"RenderTargetObjectSize", 0, 0x50},
 };
 static_assert(sizeof(kValues) / sizeof(kValues[0]) == static_cast<size_t>(Value::Count));
 

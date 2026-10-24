@@ -311,7 +311,9 @@ same). The material they were derived from is not.
   5.x VR settings the button must write (verified so far; details in
   `docs/remaster-port-status.md`):
   - `[PostProcess] AAMode=1` (FXAA; 5.x values: 0 off, 1 FXAA, 5 FSR, 6 DLSS, 7 XeSS). The mod
-    runs the No-AA route on 5.x; TAAU does not exist there.
+    runs the No-AA route on 5.x; TAAU does not exist there. FSR (5) and DLSS (6) are usable only
+    with the mod's per-eye histories (`remaster_fsr_per_eye=1`, `temporal_backend=dlss`), which the
+    button does not set yet; XeSS keeps one history for both eyes.
   - `[PostProcess] AllowShafts=false`: 5.x light shafts veil the whole image whenever the sun is
     in view, which the wide VR field of view makes almost permanent (washed-out colours).
   - Ray tracing off (`[Rendering/RT] EnableRT`, `RTAOEnabled`, `RTGIPreset`, `Shadows`,
