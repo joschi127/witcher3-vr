@@ -787,6 +787,22 @@ struct Config {
     // render thread's REDengine job waits per call site.
     bool perf_skip_descriptor_tracking{false};
     bool perf_job_wait_profile{false};
+    // [PERF:PAIR-BARRIER-LAG 1/11] [perf] pair_barrier_lag is a behaviour
+    // switch, not a measurement: 0 holds the strict-Stereo producer until the
+    // pair it just queued has rendered (the original barrier); 1 holds it
+    // until the pair before that one, so the next game tick overlaps the
+    // render of the current pair. pair_pose_lead_adaptive (only with lag 1)
+    // derives the pair pose lead from measured publication times.
+    int perf_pair_barrier_lag{0};
+    bool perf_pair_pose_lead_adaptive{true};
+    // [FIX:PAIR-ENQUEUE-AFTER-FENCE 3/11] [perf] pair_enqueue_after_fence is a
+    // behaviour switch, 5.01 only: 1 queues the duplicate eye of a strict-
+    // Stereo pair right after REDengine's per-tick fence wait in
+    // RenderSceneSetup, like the engine's own eye; 0 queues it inside the
+    // frame factory, before that wait (the old order; with
+    // pair_barrier_lag=1 the second eye then draws moving characters with
+    // the next tick's poses).
+    bool perf_pair_enqueue_after_fence{true};
     // [engine] descriptor_metadata_store: release switch, read whatever the
     // [debug] switches say. [perf] descriptor_shadow_verify (VRS census log
     // only) maintains both stores and compares every load.
@@ -1929,7 +1945,16 @@ void reset_mode3_aer_presentation_state(
     }
 }
 
-constexpr size_t kStreamlineCaptureRingSize = 3;
+constexpr size_t kStreamlineCaptureRingSize = 4;
+// [PERF:PAIR-BARRIER-LAG 2/11] Slots in use per eye: the published pair, the
+// pair being promoted and the one being captured. With pair run-ahead the
+// render thread no longer idles through the next game tick, so the GPU can
+// still hold the oldest slot when the next capture starts; give it a fourth.
+// A full ring drops the capture (never overwrites); the census counts that.
+uint32_t streamline_capture_ring_slots() {
+    return g_config.perf_pair_barrier_lag != 0 ? 4u : 3u;
+}
+std::atomic<uint64_t> g_streamline_capture_ring_full{};
 struct StreamlineCaptureSlot {
     ID3D12Resource* resource{};
     ID3D12Fence* last_use_fence{};
@@ -16034,6 +16059,8 @@ uint64_t g_vrs_census_previous_rate_sets{};
 
 void log_vrs_census_locked(uint64_t present);
 void log_job_wait_profile_locked(uint64_t window_presents, int64_t qpc_frequency);
+void log_pair_barrier_census_locked(uint64_t window_presents, int64_t qpc_frequency);
+void log_pair_enqueue_census_locked(uint64_t window_presents);
 void log_descriptor_shadow_census_locked();
 
 // One line per kVrsCensusPresentInterval Presents, written by the first bind
@@ -16123,6 +16150,9 @@ void log_vrs_census_locked(uint64_t present) {
     g_vrs_census_previous_binds = binds;
     g_vrs_census_previous_rate_sets = rate_sets;
     log_job_wait_profile_locked(window_presents, frequency.QuadPart);
+    log_pair_barrier_census_locked(window_presents, frequency.QuadPart);
+    // [FIX:PAIR-ENQUEUE-AFTER-FENCE 4/11]
+    log_pair_enqueue_census_locked(window_presents);
     log_descriptor_shadow_census_locked();
 }
 
@@ -17169,6 +17199,45 @@ void load_config() {
             read_ini_bool("perf", "job_wait_profile", false);
         if (g_config.perf_skip_descriptor_tracking) {
             log_vrs_line("PERF skip_descriptor_tracking=1: descriptor-copy metadata off");
+        }
+        // [PERF:PAIR-BARRIER-LAG 3/11] Read whatever the census log says; the
+        // census only reports the waits. Only the 5.01 pipeline has been
+        // audited for a second pair in flight (4.04 TAAU, Streamline DLSS
+        // and the world-marker hook have not), so other builds keep lag 0.
+        {
+            const int pair_barrier_lag =
+                read_ini_int("perf", "pair_barrier_lag", 0);
+            const bool lag_build_supported = running_game_build() ==
+                w3vr::game_build::Build::Remaster501;
+            g_config.perf_pair_barrier_lag = lag_build_supported
+                ? std::clamp(pair_barrier_lag, 0, 1)
+                : 0;
+            g_config.perf_pair_pose_lead_adaptive =
+                read_ini_bool("perf", "pair_pose_lead_adaptive", true);
+            if (pair_barrier_lag != 0) {
+                const char* const format =
+                    "PERF pair_barrier_lag=%d requested=%d build=%s "
+                    "pair_pose_lead_adaptive=%d";
+                const char* const build =
+                    w3vr::game_build::name(running_game_build());
+                if (g_config.vrs_log_file) {
+                    log_vrs_line(format, g_config.perf_pair_barrier_lag,
+                        pair_barrier_lag, build,
+                        g_config.perf_pair_pose_lead_adaptive ? 1 : 0);
+                } else {
+                    log_line(format, g_config.perf_pair_barrier_lag,
+                        pair_barrier_lag, build,
+                        g_config.perf_pair_pose_lead_adaptive ? 1 : 0);
+                }
+            }
+            // [FIX:PAIR-ENQUEUE-AFTER-FENCE 5/11] Release switch, read
+            // whatever the census log says; only 5.01 has the addresses.
+            g_config.perf_pair_enqueue_after_fence = lag_build_supported &&
+                read_ini_bool("perf", "pair_enqueue_after_fence", true);
+            log_vrs_line("PERF pair_enqueue_after_fence=%d%s",
+                g_config.perf_pair_enqueue_after_fence ? 1 : 0,
+                g_config.perf_pair_enqueue_after_fence
+                    ? "" : " (duplicate eye queued in the frame factory)");
         }
         // [PERF:DESCRIPTOR-SHADOW-STORE 8/14] Release switch: read whatever
         // the [debug] switches say. Verification follows the other [perf]
@@ -36405,6 +36474,599 @@ void mark_engine_pair_output_captured(uint64_t pair_id, uint32_t eye) {
     }
 }
 
+// [PERF:PAIR-BARRIER-LAG 4/11] Producer-thread state of the lagged barrier:
+// the pair the previous tick queued without waiting for it, and the capture
+// generation it was queued in. A route reset clears every mask and signal of
+// the old generation, so such a pair can never complete any more.
+std::atomic<uint64_t> g_engine_pair_barrier_pending{};
+std::atomic<uint32_t> g_engine_pair_barrier_pending_generation{};
+// PERF census counters. The producer thread is the only writer.
+std::atomic<uint64_t> g_engine_pair_barrier_waits{};
+std::atomic<uint64_t> g_engine_pair_barrier_wait_ticks{};
+std::atomic<uint64_t> g_engine_pair_barrier_max_ticks{};
+std::atomic<uint64_t> g_engine_pair_barrier_long_waits{};
+std::atomic<uint64_t> g_engine_pair_barrier_timeouts{};
+std::atomic<uint64_t> g_engine_pair_barrier_drains{};
+std::atomic<uint64_t> g_engine_pair_barrier_stale{};
+
+void count_engine_pair_barrier(std::atomic<uint64_t>& counter) {
+    counter.store(counter.load(std::memory_order_relaxed) + 1,
+        std::memory_order_relaxed);
+}
+
+// Lag 1: returns the pair to wait for now and queues produced_pair for the
+// next tick. The pending pair's masks and floors are then settled one tick
+// later, by the same wait_for_engine_pair_completion() call as with lag 0;
+// the eyes of produced_pair still complete and capture normally meanwhile
+// (its id is above both floors). A tick that queues no pair (menu, loading
+// video, retry window) drains the pending one, so nothing stays in flight
+// across a route change. A pending pair from an older generation, or one
+// left when the barrier stops applying, is dropped without waiting: waiting
+// could only run into the timeout.
+uint64_t take_lagged_engine_pair_barrier(
+    bool strict_pair_barrier,
+    uint64_t produced_pair,
+    bool produced_generation_stable) {
+    const uint32_t generation =
+        g_streamline_capture_generation.load(std::memory_order_acquire);
+    const bool queue_produced = strict_pair_barrier && produced_pair != 0 &&
+        produced_generation_stable;
+    if (strict_pair_barrier && produced_pair != 0 &&
+        !produced_generation_stable) {
+        count_engine_pair_barrier(g_engine_pair_barrier_stale);
+    }
+    const uint64_t pending = g_engine_pair_barrier_pending.exchange(
+        queue_produced ? produced_pair : 0, std::memory_order_relaxed);
+    const uint32_t pending_generation =
+        g_engine_pair_barrier_pending_generation.exchange(
+            generation, std::memory_order_relaxed);
+    if (pending == 0) {
+        return 0;
+    }
+    if (!strict_pair_barrier || pending_generation != generation) {
+        count_engine_pair_barrier(g_engine_pair_barrier_stale);
+        return 0;
+    }
+    if (produced_pair == 0) {
+        count_engine_pair_barrier(g_engine_pair_barrier_drains);
+    }
+    return pending;
+}
+
+// The census times each barrier wait with two QPC reads; without the census
+// log nothing is read or counted.
+int64_t begin_engine_pair_barrier_census() {
+    if (!g_config.vrs_log_file) {
+        return 0;
+    }
+    LARGE_INTEGER now{};
+    QueryPerformanceCounter(&now);
+    return now.QuadPart;
+}
+
+void end_engine_pair_barrier_census(int64_t begin, bool released) {
+    if (!g_config.vrs_log_file) {
+        return;
+    }
+    LARGE_INTEGER end{};
+    QueryPerformanceCounter(&end);
+    static const int64_t qpc_per_ms = [] {
+        LARGE_INTEGER frequency{};
+        QueryPerformanceFrequency(&frequency);
+        return std::max<int64_t>(1, frequency.QuadPart / 1000);
+    }();
+    const uint64_t ticks = static_cast<uint64_t>(
+        std::max<int64_t>(0, end.QuadPart - begin));
+    count_engine_pair_barrier(g_engine_pair_barrier_waits);
+    g_engine_pair_barrier_wait_ticks.store(
+        g_engine_pair_barrier_wait_ticks.load(std::memory_order_relaxed) +
+            ticks,
+        std::memory_order_relaxed);
+    uint64_t max_ticks =
+        g_engine_pair_barrier_max_ticks.load(std::memory_order_relaxed);
+    while (ticks > max_ticks &&
+        !g_engine_pair_barrier_max_ticks.compare_exchange_weak(
+            max_ticks, ticks, std::memory_order_relaxed)) {
+    }
+    if (ticks > static_cast<uint64_t>(qpc_per_ms)) {
+        count_engine_pair_barrier(g_engine_pair_barrier_long_waits);
+    }
+    if (!released) {
+        count_engine_pair_barrier(g_engine_pair_barrier_timeouts);
+    }
+}
+
+// [PERF:PAIR-BARRIER-LAG 5/11] Pair pose lead. locate_openxr_mode3_pair_pose()
+// predicts a pair's display time as the last completed display time plus a
+// whole number of periods (2, which assumes no run-ahead). Each strict-Stereo
+// pair keeps the completed time its pose was located from; its first real
+// publication measures how many periods actually passed. With lag 1 and
+// pair_pose_lead_adaptive the rounded average replaces the fixed lead. The
+// measurement itself always runs, so lag 0 logs the same numbers.
+constexpr int64_t kMode3PairPoseLeadFixedPeriods = 2;
+constexpr int64_t kMode3PairPoseLeadMinPeriods = 1;
+constexpr int64_t kMode3PairPoseLeadMaxPeriods = 6;
+constexpr uint64_t kMode3PairPoseLeadWarmupSamples = 8;
+constexpr size_t kMode3PairPoseLeadSlotCount = 16;
+struct Mode3PairPoseLeadSlot {
+    std::atomic<uint64_t> pair_id{};
+    std::atomic<int64_t> completed_time{};
+};
+std::array<Mode3PairPoseLeadSlot, kMode3PairPoseLeadSlotCount>
+    g_mode3_pair_pose_lead_slots{};
+// Set by locate_openxr_mode3_pair_pose() inside the factory, on the
+// producer thread; 0 when this tick located no pair pose.
+thread_local int64_t t_mode3_pair_pose_completed_time{};
+// Written by the publishing (render) thread only.
+std::atomic<float> g_mode3_pair_pose_observed_lead{};
+std::atomic<uint64_t> g_mode3_pair_pose_lead_samples{};
+
+int64_t mode3_pair_pose_lead_periods() {
+    if (g_config.perf_pair_barrier_lag == 0 ||
+        !g_config.perf_pair_pose_lead_adaptive ||
+        g_mode3_pair_pose_lead_samples.load(std::memory_order_relaxed) <
+            kMode3PairPoseLeadWarmupSamples) {
+        return kMode3PairPoseLeadFixedPeriods;
+    }
+    const float observed =
+        g_mode3_pair_pose_observed_lead.load(std::memory_order_relaxed);
+    return std::clamp<int64_t>(std::lround(observed),
+        kMode3PairPoseLeadMinPeriods, kMode3PairPoseLeadMaxPeriods);
+}
+
+void remember_mode3_pair_pose_origin(uint64_t pair_id, int64_t completed_time) {
+    if (pair_id == 0 || completed_time <= 0) {
+        return;
+    }
+    auto& slot = g_mode3_pair_pose_lead_slots[
+        pair_id % kMode3PairPoseLeadSlotCount];
+    slot.pair_id.store(0, std::memory_order_relaxed);
+    slot.completed_time.store(completed_time, std::memory_order_relaxed);
+    slot.pair_id.store(pair_id, std::memory_order_release);
+}
+
+// Called after a successful xrEndFrame. Only the first real publication of a
+// pair counts; rescues and repeats find the slot already consumed.
+void observe_mode3_pair_pose_publication(
+    PoseTimelineEvent reason,
+    uint64_t pair_id,
+    int64_t display_time,
+    int64_t period) {
+    if (reason != PoseTimelineEvent::SubmitReal || pair_id == 0 ||
+        period <= 0) {
+        return;
+    }
+    auto& slot = g_mode3_pair_pose_lead_slots[
+        pair_id % kMode3PairPoseLeadSlotCount];
+    uint64_t expected = pair_id;
+    if (slot.pair_id.load(std::memory_order_acquire) != pair_id) {
+        return;
+    }
+    const int64_t completed_time =
+        slot.completed_time.load(std::memory_order_relaxed);
+    if (!slot.pair_id.compare_exchange_strong(
+            expected, 0, std::memory_order_acq_rel) ||
+        completed_time <= 0 || display_time <= completed_time) {
+        return;
+    }
+    const float observed = static_cast<float>(display_time - completed_time) /
+        static_cast<float>(period);
+    // A hitch (loading, a timed-out pair) is not a pipeline depth.
+    if (!(observed < 64.0f)) {
+        return;
+    }
+    const uint64_t samples =
+        g_mode3_pair_pose_lead_samples.load(std::memory_order_relaxed);
+    const float average = samples == 0
+        ? observed
+        : g_mode3_pair_pose_observed_lead.load(std::memory_order_relaxed) +
+            (observed -
+                g_mode3_pair_pose_observed_lead.load(
+                    std::memory_order_relaxed)) * 0.125f;
+    g_mode3_pair_pose_observed_lead.store(average, std::memory_order_relaxed);
+    g_mode3_pair_pose_lead_samples.store(samples + 1, std::memory_order_relaxed);
+}
+
+// [PERF:PAIR-BARRIER-LAG 6/11] Called from the census under g_vrs_census_busy.
+// ms_per_wait is how long the producer (main) thread waited per strict-Stereo
+// pair; long waits are those over 1 ms (the wait spins ~0.2 ms, then parks).
+// masks is the completion-mask backlog, which must stay small; ring_full
+// counts eye captures dropped because every ring slot was still in use.
+void log_pair_barrier_census_locked(uint64_t window_presents, int64_t qpc_frequency) {
+    static uint64_t previous_waits{};
+    static uint64_t previous_ticks{};
+    static uint64_t previous_long_waits{};
+    static uint64_t previous_timeouts{};
+    static uint64_t previous_drains{};
+    static uint64_t previous_stale{};
+    static uint64_t previous_ring_full{};
+    const uint64_t waits =
+        g_engine_pair_barrier_waits.load(std::memory_order_relaxed);
+    const uint64_t ticks =
+        g_engine_pair_barrier_wait_ticks.load(std::memory_order_relaxed);
+    const uint64_t long_waits =
+        g_engine_pair_barrier_long_waits.load(std::memory_order_relaxed);
+    const uint64_t timeouts =
+        g_engine_pair_barrier_timeouts.load(std::memory_order_relaxed);
+    const uint64_t drains =
+        g_engine_pair_barrier_drains.load(std::memory_order_relaxed);
+    const uint64_t stale =
+        g_engine_pair_barrier_stale.load(std::memory_order_relaxed);
+    const uint64_t ring_full =
+        g_streamline_capture_ring_full.load(std::memory_order_relaxed);
+    const uint64_t max_ticks =
+        g_engine_pair_barrier_max_ticks.exchange(0, std::memory_order_relaxed);
+    const uint64_t window_waits = waits - previous_waits;
+    const double ticks_per_ms = static_cast<double>(qpc_frequency) / 1000.0;
+    const double window_ms = ticks_per_ms > 0.0
+        ? static_cast<double>(ticks - previous_ticks) / ticks_per_ms : 0.0;
+    if ((window_waits != 0 || g_config.perf_pair_barrier_lag != 0) &&
+        window_presents != 0 && ticks_per_ms > 0.0) {
+        size_t masks{};
+        {
+            std::scoped_lock lock{g_engine_pair_completion_mutex};
+            masks = g_engine_pair_completion_masks.size();
+        }
+        log_vrs_line(
+            "PERF pair barrier lag=%d waits=%llu waits_per_present=%.3f "
+            "ms_per_wait=%.3f ms_per_present=%.3f max_ms=%.2f long_waits=%llu "
+            "timeouts=%llu drains=%llu stale=%llu masks=%zu ring_slots=%u "
+            "ring_full=%llu pose_lead=%lld observed_lead=%.2f lead_samples=%llu",
+            g_config.perf_pair_barrier_lag,
+            static_cast<unsigned long long>(window_waits),
+            static_cast<double>(window_waits) /
+                static_cast<double>(window_presents),
+            window_waits != 0
+                ? window_ms / static_cast<double>(window_waits) : 0.0,
+            window_ms / static_cast<double>(window_presents),
+            static_cast<double>(max_ticks) / ticks_per_ms,
+            static_cast<unsigned long long>(long_waits - previous_long_waits),
+            static_cast<unsigned long long>(timeouts - previous_timeouts),
+            static_cast<unsigned long long>(drains - previous_drains),
+            static_cast<unsigned long long>(stale - previous_stale),
+            masks, streamline_capture_ring_slots(),
+            static_cast<unsigned long long>(ring_full - previous_ring_full),
+            static_cast<long long>(mode3_pair_pose_lead_periods()),
+            static_cast<double>(g_mode3_pair_pose_observed_lead.load(
+                std::memory_order_relaxed)),
+            static_cast<unsigned long long>(
+                g_mode3_pair_pose_lead_samples.load(
+                    std::memory_order_relaxed)));
+    }
+    previous_waits = waits;
+    previous_ticks = ticks;
+    previous_long_waits = long_waits;
+    previous_timeouts = timeouts;
+    previous_drains = drains;
+    previous_stale = stale;
+    previous_ring_full = ring_full;
+}
+
+// [FIX:PAIR-ENQUEUE-AFTER-FENCE 6/11] [perf] pair_enqueue_after_fence (5.01).
+// 5.01 sends skinning and relink updates (pose slot, localToWorld, bbox)
+// through ParallelRenderCommands: producers append, building any
+// CRenderCommand_RenderScene or CRenderCommand_Fence publishes everything
+// appended so far, and every frame build applies whatever is published at
+// that point (FlushCommands in the frame builder, once per eye).
+// RenderSceneSetup calls the frame factory, waits for the fence the previous
+// tick's Fence command signals after that tick's primary eye, then commits
+// the primary RenderScene and the next Fence command. The factory hook used
+// to queue the duplicate (first-rendered) eye inside the factory call,
+// before that wait. With pair_barrier_lag=1 the next tick therefore published
+// its batch while the second eye of the previous pair was still queued, and
+// that eye drew moving characters with the next tick's poses and transforms
+// (different poses per eye; with shadow reuse also misplaced self-shadows).
+// Now the factory hook leaves the duplicate in a per-thread slot and the
+// hooked fence wait queues it as soon as RenderSceneSetup's own wait has
+// returned: the duplicate still renders first and the primary second, and
+// both publishes of a tick follow the previous tick's Fence command, as with
+// one eye. Other factory callers, and setup calls that will not wait (no
+// fence yet, a fence of another class, a hook or call site that did not
+// verify), queue the duplicate in the factory as before. A duplicate still
+// held when the setup returns is queued then, after the primary.
+using EngineRenderFenceWaitFn = uint64_t(__fastcall*)(void*);
+EngineRenderFenceWaitFn g_engine_render_fence_wait{};
+// Set together at install: the hooked wait (the fence vtable still points at
+// its entry), the two RenderSceneSetup return addresses and the fence field.
+uintptr_t g_render_fence_wait_entry{};
+uintptr_t g_render_scene_factory_return{};
+uintptr_t g_render_scene_fence_wait_return{};
+size_t g_render_scene_fence_offset{};
+// The call site's bytes check the slot: call [rax+0x18].
+constexpr size_t kRenderFenceWaitSlot = 0x18 / sizeof(uintptr_t);
+
+enum class PairEnqueueArm : uint8_t {
+    OutsideSetup,  // no RenderSceneSetup hook on this thread's stack, or key off
+    Armed,         // this setup call waits through the hooked fence wait
+    NoFence,       // no fence yet: this call creates it and does not wait
+    FenceClass,    // the fence is unreadable or waits through another function
+    Unhooked,      // the wait hook or a call site did not verify
+};
+
+struct PairEnqueueDeferral {
+    PairEnqueueArm arm{PairEnqueueArm::OutsideSetup};
+    void* render_context{};
+    void* frame_data{};  // holds the factory's reference until queued
+};
+// RenderSceneSetup, its factory call and its fence wait run on the producer
+// (main) thread.
+thread_local PairEnqueueDeferral t_pair_enqueue_deferral{};
+
+enum class PairEnqueueCount : size_t {
+    Deferred,     // queued right after RenderSceneSetup's fence wait
+    Late,         // still held when the setup returned; queued after the primary
+    Replaced,     // a second duplicate in one setup call; the first queued then
+    Outside,      // queued in the factory: no setup hook on the stack
+    OtherCaller,  // queued in the factory: another factory caller
+    NoFence,      // queued in the factory: PairEnqueueArm::NoFence
+    FenceClass,   // queued in the factory: PairEnqueueArm::FenceClass
+    Unhooked,     // queued in the factory: PairEnqueueArm::Unhooked
+    // Census probe of FlushCommands: the first flush of a pair id is the
+    // first-rendered eye, a repeat of that id the second one.
+    FlushFirst,
+    FlushFirstEntries,
+    FlushSecond,
+    FlushSecondEntries,
+    FlushSecondNonzero,
+    FlushUntagged,  // frame builds without a pair tag (mono, other builders)
+    FlushUntaggedEntries,
+    Count,
+};
+std::array<std::atomic<uint64_t>, static_cast<size_t>(PairEnqueueCount::Count)>
+    g_pair_enqueue_counts{};
+std::atomic<uint64_t> g_pair_enqueue_flush_second_max{};
+std::atomic<int> g_pair_enqueue_flush_second_eye{-1};
+std::atomic<uint64_t> g_pair_enqueue_flush_last_pair{};
+
+void count_pair_enqueue(PairEnqueueCount which, uint64_t amount = 1) {
+    g_pair_enqueue_counts[static_cast<size_t>(which)].fetch_add(
+        amount, std::memory_order_relaxed);
+}
+
+void log_pair_enqueue_line(const char* fmt, ...) {
+    va_list args{};
+    va_start(args, fmt);
+    if (g_config.vrs_log_file) {
+        append_log_file_line_v(fmt, args);
+    } else if (g_config.logging_enabled) {
+        write_log_line_v(fmt, args);
+    }
+    va_end(args);
+}
+
+// Defined with the frame factory hook: SceneEnqueue, then the release of the
+// factory's reference.
+void enqueue_engine_duplicate_frame(void* render_context, void* frame_data);
+
+// The slot is cleared before the enqueue, so nothing can queue it twice.
+void queue_held_pair_duplicate(PairEnqueueCount reason) {
+    auto& state = t_pair_enqueue_deferral;
+    void* const frame_data = state.frame_data;
+    if (frame_data == nullptr) {
+        return;
+    }
+    void* const render_context = state.render_context;
+    state.frame_data = nullptr;
+    state.render_context = nullptr;
+    count_pair_enqueue(reason);
+    enqueue_engine_duplicate_frame(render_context, frame_data);
+}
+
+// SEH only; no objects with destructors in this frame.
+bool read_render_scene_fence_wait(
+    const void* renderer, const void*& fence, uintptr_t& wait) {
+    fence = nullptr;
+    wait = 0;
+    __try {
+        memcpy(&fence, static_cast<const uint8_t*>(renderer) +
+            g_render_scene_fence_offset, sizeof(fence));
+        if (fence != nullptr) {
+            const uintptr_t* vtable{};
+            memcpy(&vtable, fence, sizeof(vtable));
+            wait = vtable[kRenderFenceWaitSlot];
+        }
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+PairEnqueueArm pair_enqueue_arm_for(const void* renderer) {
+    if (g_engine_render_fence_wait == nullptr) {
+        return PairEnqueueArm::Unhooked;
+    }
+    const void* fence{};
+    uintptr_t wait{};
+    if (renderer == nullptr ||
+        !read_render_scene_fence_wait(renderer, fence, wait)) {
+        return PairEnqueueArm::FenceClass;
+    }
+    if (fence == nullptr) {
+        return PairEnqueueArm::NoFence;
+    }
+    return wait == g_render_fence_wait_entry
+        ? PairEnqueueArm::Armed : PairEnqueueArm::FenceClass;
+}
+
+// Around the original RenderSceneSetup: arm this call; afterwards queue what
+// it still holds and restore the caller's state.
+PairEnqueueDeferral begin_pair_enqueue_deferral(const void* renderer) {
+    const PairEnqueueDeferral previous = t_pair_enqueue_deferral;
+    t_pair_enqueue_deferral = {};
+    if (g_config.perf_pair_enqueue_after_fence) {
+        t_pair_enqueue_deferral.arm = pair_enqueue_arm_for(renderer);
+    }
+    return previous;
+}
+
+void end_pair_enqueue_deferral(const PairEnqueueDeferral& previous) {
+    queue_held_pair_duplicate(PairEnqueueCount::Late);
+    t_pair_enqueue_deferral = previous;
+}
+
+// Factory hook, after both eyes were built and tagged: true when the slot
+// now holds the duplicate (and the factory's reference to it).
+bool hold_pair_duplicate_for_fence(
+    void* render_context, void* frame_data, uintptr_t return_address) {
+    if (!g_config.perf_pair_enqueue_after_fence) {
+        return false;
+    }
+    auto& state = t_pair_enqueue_deferral;
+    switch (state.arm) {
+    case PairEnqueueArm::Armed:
+        break;
+    case PairEnqueueArm::OutsideSetup:
+        count_pair_enqueue(PairEnqueueCount::Outside);
+        return false;
+    case PairEnqueueArm::NoFence:
+        count_pair_enqueue(PairEnqueueCount::NoFence);
+        return false;
+    case PairEnqueueArm::FenceClass:
+        count_pair_enqueue(PairEnqueueCount::FenceClass);
+        return false;
+    case PairEnqueueArm::Unhooked:
+        count_pair_enqueue(PairEnqueueCount::Unhooked);
+        return false;
+    }
+    if (return_address != g_render_scene_factory_return) {
+        count_pair_enqueue(PairEnqueueCount::OtherCaller);
+        return false;
+    }
+    // One factory call per setup; a second duplicate would otherwise leak.
+    queue_held_pair_duplicate(PairEnqueueCount::Replaced);
+    state.render_context = render_context;
+    state.frame_data = frame_data;
+    return true;
+}
+
+// Every CRenderFence wait passes through; only RenderSceneSetup's per-tick
+// wait queues a held duplicate, after the wait has returned.
+uint64_t __fastcall hook_engine_render_fence_wait(void* fence) {
+    const uint64_t result = g_engine_render_fence_wait(fence);
+    if (t_pair_enqueue_deferral.frame_data != nullptr &&
+        reinterpret_cast<uintptr_t>(_ReturnAddress()) ==
+            g_render_scene_fence_wait_return) {
+        queue_held_pair_duplicate(PairEnqueueCount::Deferred);
+    }
+    return result;
+}
+
+using EngineParallelFlushFn = void(__fastcall*)(void*);
+EngineParallelFlushFn g_engine_parallel_flush{};
+size_t g_parallel_staged_count_offset{};
+size_t g_parallel_bucket_stride{};
+size_t g_parallel_bucket_count{};
+
+// The entries this flush is about to apply: the staged count of every
+// bucket, read without the bucket locks (a racing publish may be missed).
+bool sum_parallel_staged_entries(const void* commands, uint64_t& entries) {
+    entries = 0;
+    __try {
+        const auto* counts = static_cast<const uint8_t*>(commands) +
+            g_parallel_staged_count_offset;
+        for (size_t bucket = 0; bucket < g_parallel_bucket_count; ++bucket) {
+            uint32_t count{};
+            memcpy(&count, counts + bucket * g_parallel_bucket_stride,
+                sizeof(count));
+            entries += count;
+        }
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+// Census only. The frame builder hook has applied the frame's tag on this
+// thread. Expected with the fix: the second eye of a pair finds (almost)
+// nothing staged, because its tick published nothing after the first eye's
+// flush and the next tick publishes only after the second eye.
+void __fastcall hook_engine_parallel_flush(void* commands) {
+    uint64_t entries{};
+    if (sum_parallel_staged_entries(commands, entries)) {
+        const uint64_t pair_id = g_engine_render_pair_id;
+        const int eye = g_engine_render_eye;
+        if (eye < 0 || eye > 1 || pair_id == 0 || pair_id == UINT64_MAX) {
+            count_pair_enqueue(PairEnqueueCount::FlushUntagged);
+            count_pair_enqueue(PairEnqueueCount::FlushUntaggedEntries, entries);
+        } else if (g_pair_enqueue_flush_last_pair.exchange(
+                       pair_id, std::memory_order_relaxed) != pair_id) {
+            count_pair_enqueue(PairEnqueueCount::FlushFirst);
+            count_pair_enqueue(PairEnqueueCount::FlushFirstEntries, entries);
+        } else {
+            count_pair_enqueue(PairEnqueueCount::FlushSecond);
+            count_pair_enqueue(PairEnqueueCount::FlushSecondEntries, entries);
+            if (entries != 0) {
+                count_pair_enqueue(PairEnqueueCount::FlushSecondNonzero);
+            }
+            g_pair_enqueue_flush_second_eye.store(
+                eye, std::memory_order_relaxed);
+            uint64_t max_entries = g_pair_enqueue_flush_second_max.load(
+                std::memory_order_relaxed);
+            while (entries > max_entries &&
+                !g_pair_enqueue_flush_second_max.compare_exchange_weak(
+                    max_entries, entries, std::memory_order_relaxed)) {
+            }
+        }
+    }
+    g_engine_parallel_flush(commands);
+}
+
+// Called from the census under g_vrs_census_busy; window deltas. deferred
+// should count one per strict-Stereo pair, late and the factory reasons stay
+// near 0 (no_fence: the first setup call). second_entries / second_max are
+// the batch entries the second eye of a pair applied: about 0 with the fix,
+// tens to hundreds per pair with the old order at lag 1 while characters move.
+void log_pair_enqueue_census_locked(uint64_t window_presents) {
+    if (window_presents == 0 ||
+        (g_engine_render_fence_wait == nullptr &&
+            g_engine_parallel_flush == nullptr)) {
+        return;
+    }
+    constexpr size_t kCounts = static_cast<size_t>(PairEnqueueCount::Count);
+    static std::array<uint64_t, kCounts> previous{};
+    std::array<uint64_t, kCounts> current{};
+    for (size_t index = 0; index < kCounts; ++index) {
+        current[index] =
+            g_pair_enqueue_counts[index].load(std::memory_order_relaxed);
+    }
+    const auto delta = [&](PairEnqueueCount which) {
+        const size_t index = static_cast<size_t>(which);
+        return static_cast<unsigned long long>(current[index] - previous[index]);
+    };
+    log_vrs_line(
+        "PERF pair enqueue after_fence=%d hooked=%d deferred=%llu late=%llu "
+        "replaced=%llu factory outside=%llu other_caller=%llu no_fence=%llu "
+        "fence_class=%llu unhooked=%llu",
+        g_config.perf_pair_enqueue_after_fence ? 1 : 0,
+        g_engine_render_fence_wait != nullptr ? 1 : 0,
+        delta(PairEnqueueCount::Deferred),
+        delta(PairEnqueueCount::Late),
+        delta(PairEnqueueCount::Replaced),
+        delta(PairEnqueueCount::Outside),
+        delta(PairEnqueueCount::OtherCaller),
+        delta(PairEnqueueCount::NoFence),
+        delta(PairEnqueueCount::FenceClass),
+        delta(PairEnqueueCount::Unhooked));
+    if (g_engine_parallel_flush != nullptr) {
+        log_vrs_line(
+            "PERF parallel flush first=%llu first_entries=%llu second=%llu "
+            "second_entries=%llu second_nonzero=%llu second_max=%llu "
+            "second_eye=%d untagged=%llu untagged_entries=%llu",
+            delta(PairEnqueueCount::FlushFirst),
+            delta(PairEnqueueCount::FlushFirstEntries),
+            delta(PairEnqueueCount::FlushSecond),
+            delta(PairEnqueueCount::FlushSecondEntries),
+            delta(PairEnqueueCount::FlushSecondNonzero),
+            static_cast<unsigned long long>(
+                g_pair_enqueue_flush_second_max.exchange(
+                    0, std::memory_order_relaxed)),
+            g_pair_enqueue_flush_second_eye.load(std::memory_order_relaxed),
+            delta(PairEnqueueCount::FlushUntagged),
+            delta(PairEnqueueCount::FlushUntaggedEntries));
+    }
+    previous = current;
+}
+
 void __fastcall hook_engine_render_scene_setup(void* renderer, float delta_time) {
     const uint64_t flight_hook_frame =
         w3vr::pipeline_flight::current_frame();
@@ -36417,15 +37079,25 @@ void __fastcall hook_engine_render_scene_setup(void* renderer, float delta_time)
     }
     const auto previous_pair = g_engine_producer_pair_id;
     g_engine_producer_pair_id = 0;
+    t_mode3_pair_pose_completed_time = 0;
+    const uint32_t generation_before_setup =
+        g_streamline_capture_generation.load(std::memory_order_acquire);
     const int64_t flight_original_begin =
         w3vr::pipeline_flight::cpu_begin();
+    // [FIX:PAIR-ENQUEUE-AFTER-FENCE 7/11] Arms the deferred duplicate enqueue
+    // for this call; a duplicate it still holds is queued before any barrier.
+    const PairEnqueueDeferral previous_deferral =
+        begin_pair_enqueue_deferral(renderer);
     g_engine_render_scene_setup(renderer, delta_time);
+    end_pair_enqueue_deferral(previous_deferral);
     w3vr::pipeline_flight::cpu_end(
         w3vr::pipeline_flight::Phase::EngineSceneSetupOriginal,
         flight_original_begin,
         flight_hook_frame);
     const auto produced_pair = g_engine_producer_pair_id;
     g_engine_producer_pair_id = previous_pair;
+    remember_mode3_pair_pose_origin(
+        produced_pair, t_mode3_pair_pose_completed_time);
     if (w3vr::pipeline_flight::enabled() &&
         g_engine_dual_render_active.load(std::memory_order_acquire)) {
         w3vr::pipeline_flight::record_thread_sample(
@@ -36439,14 +37111,46 @@ void __fastcall hook_engine_render_scene_setup(void* renderer, float delta_time)
     if (mode3_stereo_transport_active() &&
         !mode3_aer_presentation_active() &&
         g_engine_dual_render_active.load() &&
-        produced_pair != 0) {
+        produced_pair != 0 &&
+        g_config.perf_pair_barrier_lag == 0) {
         const int64_t flight_pair_wait_begin =
             w3vr::pipeline_flight::cpu_begin();
-        wait_for_engine_pair_completion(produced_pair, 64);
+        const int64_t census_wait_begin = begin_engine_pair_barrier_census();
+        const bool released =
+            wait_for_engine_pair_completion(produced_pair, 64);
+        end_engine_pair_barrier_census(census_wait_begin, released);
         w3vr::pipeline_flight::cpu_end(
             w3vr::pipeline_flight::Phase::EnginePairWait,
             flight_pair_wait_begin,
             flight_hook_frame);
+    }
+    // [PERF:PAIR-BARRIER-LAG 7/11] Lag 1 waits for the pair the previous tick
+    // queued instead (see take_lagged_engine_pair_barrier), under the same
+    // exact strict-Stereo predicate. Never release a pair on its first eye:
+    // the floors and mask erasure in wait_for_engine_pair_completion() would
+    // then drop that pair's second completion, its captures and its 0x3 mask.
+    if (g_config.perf_pair_barrier_lag != 0) {
+        const uint64_t barrier_pair = take_lagged_engine_pair_barrier(
+            mode3_stereo_transport_active() &&
+                !mode3_aer_presentation_active() &&
+                g_engine_dual_render_active.load(),
+            produced_pair,
+            generation_before_setup ==
+                g_streamline_capture_generation.load(
+                    std::memory_order_acquire));
+        if (barrier_pair != 0) {
+            const int64_t flight_pair_wait_begin =
+                w3vr::pipeline_flight::cpu_begin();
+            const int64_t census_wait_begin =
+                begin_engine_pair_barrier_census();
+            const bool released =
+                wait_for_engine_pair_completion(barrier_pair, 64);
+            end_engine_pair_barrier_census(census_wait_begin, released);
+            w3vr::pipeline_flight::cpu_end(
+                w3vr::pipeline_flight::Phase::EnginePairWait,
+                flight_pair_wait_begin,
+                flight_hook_frame);
+        }
     }
     w3vr::pipeline_flight::cpu_end(
         w3vr::pipeline_flight::Phase::EngineSceneSetupHook,
@@ -36470,6 +37174,101 @@ void install_engine_render_scene_setup_probe() {
         log_line("Engine render-scene producer barrier hooked target=%p", target);
     } else {
         log_line("Engine render-scene producer barrier hook failed target=%p", target);
+    }
+}
+
+// [FIX:PAIR-ENQUEUE-AFTER-FENCE 8/11] 5.01 strict Stereo only, at startup.
+// The fence wait hook needs its own code and both RenderSceneSetup call
+// sites; on any mismatch the duplicate is queued in the factory as before.
+// The FlushCommands probe needs the census log and works with either order.
+void install_pair_enqueue_after_fence_hooks() {
+    namespace addresses = w3vr::engine_addresses;
+    const auto build = running_game_build();
+    const bool fence_wanted = g_config.perf_pair_enqueue_after_fence;
+    const bool probe_wanted = g_config.vrs_log_file;
+    auto* module = reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr));
+    if ((!fence_wanted && !probe_wanted) ||
+        g_config.openxr_mode != kOpenXrModeStereo ||
+        build != w3vr::game_build::Build::Remaster501 || module == nullptr) {
+        return;
+    }
+    if (fence_wanted && g_engine_render_fence_wait == nullptr) {
+        const uintptr_t factory_return =
+            addresses::value(build, addresses::Value::RenderSceneFactoryReturn);
+        const uintptr_t wait_return =
+            addresses::value(build, addresses::Value::RenderSceneFenceWaitReturn);
+        // The call bytes end at the return address, so they also prove that
+        // it belongs to this call.
+        const auto site_matches = [module](uintptr_t return_rva,
+                                      const uint8_t* bytes, size_t size) {
+            return return_rva > size &&
+                addresses::signature_matches(module + return_rva - size,
+                    addresses::Signature{bytes, size});
+        };
+        const bool factory_site = site_matches(factory_return,
+            addresses::kRenderSceneFactoryCall501Bytes,
+            sizeof(addresses::kRenderSceneFactoryCall501Bytes));
+        const bool wait_site = site_matches(wait_return,
+            addresses::kRenderSceneFenceWaitCall501Bytes,
+            sizeof(addresses::kRenderSceneFenceWaitCall501Bytes));
+        auto* target = factory_site && wait_site
+            ? engine_function_target(addresses::Function::RenderFenceWait)
+            : nullptr;
+        if (target == nullptr) {
+            log_pair_enqueue_line(
+                "Pair enqueue after fence off: code mismatch factory_site=%d "
+                "wait_site=%d; duplicate eye queued in the frame factory",
+                factory_site ? 1 : 0, wait_site ? 1 : 0);
+        } else {
+            g_render_fence_wait_entry = reinterpret_cast<uintptr_t>(target);
+            g_render_scene_factory_return =
+                reinterpret_cast<uintptr_t>(module + factory_return);
+            g_render_scene_fence_wait_return =
+                reinterpret_cast<uintptr_t>(module + wait_return);
+            g_render_scene_fence_offset = static_cast<size_t>(addresses::value(
+                build, addresses::Value::RenderSceneFenceOffset));
+            if (MH_CreateHook(target,
+                    reinterpret_cast<void*>(&hook_engine_render_fence_wait),
+                    reinterpret_cast<void**>(&g_engine_render_fence_wait)) !=
+                    MH_OK ||
+                MH_EnableHook(target) != MH_OK) {
+                g_engine_render_fence_wait = nullptr;
+                log_pair_enqueue_line(
+                    "Pair enqueue after fence hook failed target=%p; duplicate "
+                    "eye queued in the frame factory", target);
+            } else {
+                log_pair_enqueue_line(
+                    "Pair enqueue after fence hooked wait=%p factory_return=0x%llX "
+                    "wait_return=0x%llX",
+                    target, static_cast<unsigned long long>(factory_return),
+                    static_cast<unsigned long long>(wait_return));
+            }
+        }
+    }
+    if (probe_wanted && g_engine_parallel_flush == nullptr) {
+        auto* target =
+            engine_function_target(addresses::Function::ParallelFlushCommands);
+        if (target == nullptr) {
+            log_pair_enqueue_line("Parallel flush probe off: code mismatch");
+            return;
+        }
+        g_parallel_staged_count_offset = static_cast<size_t>(addresses::value(
+            build, addresses::Value::ParallelStagedCountOffset));
+        g_parallel_bucket_stride = static_cast<size_t>(addresses::value(
+            build, addresses::Value::ParallelBucketStride));
+        g_parallel_bucket_count = static_cast<size_t>(addresses::value(
+            build, addresses::Value::ParallelBucketCount));
+        if (MH_CreateHook(target,
+                reinterpret_cast<void*>(&hook_engine_parallel_flush),
+                reinterpret_cast<void**>(&g_engine_parallel_flush)) != MH_OK ||
+            MH_EnableHook(target) != MH_OK) {
+            g_engine_parallel_flush = nullptr;
+            log_pair_enqueue_line("Parallel flush probe hook failed target=%p",
+                target);
+        } else {
+            log_pair_enqueue_line("Parallel flush probe hooked target=%p",
+                target);
+        }
     }
 }
 
@@ -44599,6 +45398,17 @@ size_t copy_readable_scene_descriptor(
 EngineSceneEnqueueFn g_engine_scene_enqueue_target{};
 bool g_engine_factory_duplicate_supported{};
 
+// [FIX:PAIR-ENQUEUE-AFTER-FENCE 9/11] Queues a duplicate frame as
+// CRenderCommand_RenderScene (which takes its own reference) and drops the
+// factory's reference: in the factory hook, or later from the deferral slot.
+void enqueue_engine_duplicate_frame(void* render_context, void* frame_data) {
+    g_engine_scene_enqueue_target(render_context, frame_data);
+
+    using ReleaseFrameDataFn = void(__fastcall*)(void*);
+    auto* vtable = *reinterpret_cast<void***>(frame_data);
+    auto release = reinterpret_cast<ReleaseFrameDataFn>(vtable[2]);
+    release(frame_data);
+}
 
 // Which camera did each built frame receive? (pos1 - pos0) along the primary
 // frame's right vector must equal +IPD when the duplicate is the right eye.
@@ -44782,8 +45592,15 @@ void* __fastcall hook_engine_frame_data_factory(void* render_context, void* rend
     // generation} duplication and temporal-history route active in cinema;
     // only fullscreen menus remain single-view.
     if (duplicate_render) {
+        // [PERF:PAIR-BARRIER-LAG 8/11] With run-ahead the next factory can
+        // run before the Present count moves, while the render thread still
+        // renders this pair; give every pair its own slot instead.
+        static std::atomic<uint64_t> lagged_descriptor_slot{};
+        const uint64_t descriptor_slot = g_config.perf_pair_barrier_lag != 0
+            ? lagged_descriptor_slot.fetch_add(1, std::memory_order_relaxed)
+            : present;
         right_scene_descriptor = &g_engine_dual_scene_descriptors[
-            present % g_engine_dual_scene_descriptors.size()];
+            descriptor_slot % g_engine_dual_scene_descriptors.size()];
         const bool asymmetric_taau_descriptor_hardening =
             native_asymmetric_noaa_route_active() &&
             temporal_backend_is_taau();
@@ -45068,16 +45885,18 @@ void* __fastcall hook_engine_frame_data_factory(void* render_context, void* rend
             }
             log_dual_frame_cameras(present, primary_eye, duplicate_eye,
                 result, right_frame_data);
-            g_engine_scene_enqueue_target(render_context, right_frame_data);
-
-            using ReleaseFrameDataFn = void(__fastcall*)(void*);
-            auto* vtable = *reinterpret_cast<void***>(right_frame_data);
-            auto release = reinterpret_cast<ReleaseFrameDataFn>(vtable[2]);
-            release(right_frame_data);
+            // [FIX:PAIR-ENQUEUE-AFTER-FENCE 10/11] From RenderSceneSetup the
+            // slot keeps the duplicate (and its reference) until the engine's
+            // fence wait has returned; any other route queues it here.
+            if (!hold_pair_duplicate_for_fence(render_context,
+                    right_frame_data, module + caller_rva)) {
+                enqueue_engine_duplicate_frame(render_context, right_frame_data);
+            }
 
             // Snapshot copies were taken after both originals and before
             // enqueue. Formatting is deferred until the duplicate is enqueued
-            // and released, preserving V1035's functional ordering.
+            // and released (or held for the fence wait), preserving V1035's
+            // functional ordering.
             if (primary_factory_capture != nullptr) {
                 emit_asymmetric_frame_factory(*primary_factory_capture);
             }
@@ -49444,6 +50263,8 @@ void ensure_initialized() {
         install_engine_world_vector_to_view_ratio_hook();
         install_engine_animated_component_visibility_hook();
         install_engine_frame_factory_probe();
+        // [FIX:PAIR-ENQUEUE-AFTER-FENCE 11/11]
+        install_pair_enqueue_after_fence_hooks();
         install_engine_dlss_command_emit_hook();
         install_engine_dlss_command_route_hook();
         install_engine_upscaler_pipeline_hook();
@@ -52273,9 +53094,13 @@ XrTime locate_openxr_mode3_pair_pose() {
         return 0;
     }
 
-    constexpr XrDuration kMode3PipelineLeadPeriods = 2;
+    // [PERF:PAIR-BARRIER-LAG 9/11] 2 periods unless lag 1 measured another
+    // depth; the completed time travels with the pair so its publication can
+    // measure the lead (mode3_pair_pose_lead_periods).
+    const XrDuration pipeline_lead_periods = mode3_pair_pose_lead_periods();
+    t_mode3_pair_pose_completed_time = completed_time;
     const XrTime target_time =
-        completed_time + period * kMode3PipelineLeadPeriods;
+        completed_time + period * pipeline_lead_periods;
 
     std::array<XrView, 2> located_views{{
         {XR_TYPE_VIEW}, {XR_TYPE_VIEW}}};
@@ -54022,8 +54847,12 @@ bool ensure_streamline_capture_ring(const D3D12_RESOURCE_DESC& source_desc) {
     heap_props.CreationNodeMask = 1;
     heap_props.VisibleNodeMask = 1;
 
+    // [PERF:PAIR-BARRIER-LAG 10/11] Slots past streamline_capture_ring_slots()
+    // stay null; every reader skips a slot without a resource.
     for (auto& eye_ring : g_streamline_capture_ring) {
-        for (auto& slot : eye_ring) {
+        for (uint32_t index = 0; index < streamline_capture_ring_slots();
+                ++index) {
+            auto& slot = eye_ring[index];
             if (FAILED(g_d3d12_device->CreateCommittedResource(
                     &heap_props,
                     D3D12_HEAP_FLAG_NONE,
@@ -54039,11 +54868,12 @@ bool ensure_streamline_capture_ring(const D3D12_RESOURCE_DESC& source_desc) {
     g_streamline_capture_width = static_cast<UINT>(source_desc.Width);
     g_streamline_capture_height = source_desc.Height;
     g_streamline_capture_format = capture_format;
-    log_line("Streamline stereo capture ring created size=%ux%u format=%u source_format=%u",
+    log_line("Streamline stereo capture ring created size=%ux%u format=%u source_format=%u slots=%u",
         g_streamline_capture_width,
         g_streamline_capture_height,
         static_cast<unsigned>(g_streamline_capture_format),
-        static_cast<unsigned>(source_desc.Format));
+        static_cast<unsigned>(source_desc.Format),
+        streamline_capture_ring_slots());
     return true;
 }
 
@@ -54061,10 +54891,10 @@ bool reserve_streamline_capture_slot(
     std::scoped_lock lock{g_streamline_capture_mutex};
     const uint64_t start = g_streamline_capture_write_count[eye].fetch_add(
         1, std::memory_order_relaxed);
-    for (uint32_t offset = 0;
-            offset < kStreamlineCaptureRingSize; ++offset) {
+    const uint32_t ring_slots = streamline_capture_ring_slots();
+    for (uint32_t offset = 0; offset < ring_slots; ++offset) {
         const uint32_t candidate_index = static_cast<uint32_t>(
-            (start + offset) % kStreamlineCaptureRingSize);
+            (start + offset) % ring_slots);
         auto& candidate = g_streamline_capture_ring[eye][candidate_index];
         if (candidate.recording_pending || candidate.resource == nullptr ||
             !private_resource_slot_retired(
@@ -54084,6 +54914,7 @@ bool reserve_streamline_capture_slot(
         slot_index = candidate_index;
         return true;
     }
+    g_streamline_capture_ring_full.fetch_add(1, std::memory_order_relaxed);
     return false;
 }
 
@@ -58222,6 +59053,10 @@ void render_openxr_test_frame(
             frame_state.predictedDisplayPeriod, std::memory_order_relaxed);
         g_xr_last_completed_display_time.store(
             frame_state.predictedDisplayTime, std::memory_order_release);
+        // [PERF:PAIR-BARRIER-LAG 11/11] Measures the pair pose lead.
+        observe_mode3_pair_pose_publication(trace_reason, trace_pair_id,
+            frame_state.predictedDisplayTime,
+            frame_state.predictedDisplayPeriod);
     }
     g_xr_frame_begin_qpc.store(0, std::memory_order_relaxed);
     g_xr_frame_begin_present.store(0, std::memory_order_relaxed);
