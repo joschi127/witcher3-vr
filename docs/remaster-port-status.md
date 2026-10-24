@@ -650,3 +650,17 @@ were made on Linux/Proton with NVIDIA unless stated otherwise; our own results f
 - The river seen from Kaer Morhen (open issue "Distant water switches between blue and white")
   looked correct in the headset. The Windows observation predates `configure` turning off
   screen-space reflections and the AMD driver update; which of them matters is not known.
+
+## 2026-10-24: SteamVR null-driver smoke on Windows
+
+- Build: `remaster` 9e19cef (no DLL source change since 0607003; the DLL is byte-identical to that
+  build), MSVC 14.51 Release, CTest 99/99.
+- `scripts/smoke-test.ps1` with the default `smoke-continue-remaster.txt`, diagnostics on,
+  `openxr.enabled=1,openxr.hmd_roll_scale=0` and SteamVR's `steamxr_win64.json`; SteamVR null
+  driver at 240 Hz, AMD Radeon RX 7900 XTX.
+- Result: PASSED in 93 s, 14/14 captures, gameplay reached, the game closed itself through the menu
+  (one stick flick up), virtual GameInput gamepad, dual render started. `xrCreateSession(D3D12)`
+  succeeded; stereo-array swapchain at the INI size 1872x1572 (runtime recommendation 1488x1560,
+  forced as intended). Eye pairs from 53 s to 78 s; the one at 48 s comes right at the end of the
+  load and has no pair, as before. The 57.5 s pair shows the same scene in both eyes with plausible
+  parallax and correct colours. No failed, exception or device-removed lines in the log.
