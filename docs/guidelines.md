@@ -125,7 +125,7 @@ game folder. Add Defender exclusions for the build directory and the installed `
   `build/smoke-runs/<date>_lx<n>_<name>`, writes `summary.txt` and restores everything
   (sha256-checked; changed saves are moved into the run folder). `dx12user.settings` is only
   compared, never restored (the game may refresh the account token on exit). Default script:
-  `scripts/test-input/smoke-continue-remaster-linux.txt` (5.01, ~105 s), checked for XR eye images
+  `scripts/test-input/smoke-continue-remaster-linux.txt` (5.01, ~130 s), checked for XR eye images
   in gameplay and an exit through the menu. Same go-ahead rule as above.
 - In-game test mode (`[test]` in `witcher3vr.ini`, logic in `src/test_input_script.h`):
   `record_input=1` records the physical gamepad to `witcher3vr-input-recording.txt`,

@@ -14,7 +14,7 @@ Exit code 0 = all runs passed. Standard library only; reuses linux/w3vr-linux.py
 
 The default script (scripts/test-input/smoke-continue-remaster-linux.txt) continues the latest save,
 walks, turns the camera, opens the game menu and quits through the system menu; it is checked with
---expect-eyes 70000-84000 and --expect-self-exit unless another --script is given. The run starts the real
+--expect-eyes 70000-97000 and --expect-self-exit unless another --script is given. The run starts the real
 game: like scripts/smoke-test.ps1 it needs the maintainer's go-ahead.
 
 Usage:
@@ -36,7 +36,7 @@ TOOL_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(TOOL_DIR, '..'))
 DEFAULT_SCRIPT = os.path.join(REPO, 'scripts', 'test-input', 'smoke-continue-remaster-linux.txt')
 # Captures of DEFAULT_SCRIPT between these times are in gameplay and must have both XR eye images.
-DEFAULT_EXPECT_EYES = '70000-84000'
+DEFAULT_EXPECT_EYES = '70000-97000'
 DEFAULT_OUTPUT = os.path.join(REPO, 'build', 'smoke-runs')
 
 sys.dont_write_bytecode = True  # no __pycache__ next to the tools

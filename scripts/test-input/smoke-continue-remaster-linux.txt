@@ -2,7 +2,9 @@
 # with Linux timings. Under Proton the game polls XInput (no GameInput redistributable), so the
 # test mode's virtual XInput gamepad drives it. Measured on a laptop iGPU under GE-Proton: main
 # menu ready by ~30 s, first stereo frame ~48 s after the first Present (16 s of loading after
-# Continue at 32 s); the gameplay part is shifted by +22 s for margin. Ends at ~105 s.
+# Continue at 32 s). Each capture stalls the game for seconds (two frames and both XR eye images
+# are written as PNG), so every step after a capture waits 6-8 s, and the fallback quit comes
+# 15 s after the menu exit. Ends at ~126 s.
 # In gameplay the game may poll XInput only a few times per second under Proton; the test
 # mode holds every scripted state for two reads, so short taps still arrive.
 # Use [test] keep_focus=1 so clicking another window does not pause the game.
@@ -18,36 +20,35 @@
 70000 capture          # loaded, standing
 71000 stick L 0 1      # walk forward
 74000 stick L 0 0
-75000 capture          # after walking
+78000 capture          # after walking
 
-77000 stick R 0.6 0    # turn the camera
-78500 stick R 0 0
-79500 capture          # after turning
+80000 stick R 0.6 0    # turn the camera
+81500 stick R 0 0
+88000 capture          # after turning
 
-81000 trigger L 1      # hold LT: Witcher Senses
-83500 capture
-85000 trigger L 0
-
-87000 tap START       # game menu (map, inventory, quests ...)
-90000 capture
-91000 tap B           # close the game menu
-
-94000 tap BACK        # system menu, cursor on RESUME
+90000 trigger L 1      # hold LT: Witcher Senses
 96000 capture
-97000 stick L 0 -1    # six flicks down: RESUME -> EXIT
-97150 stick L 0 0
-97400 stick L 0 -1
-97550 stick L 0 0
-97800 stick L 0 -1
-97950 stick L 0 0
-98200 stick L 0 -1
-98350 stick L 0 0
-98600 stick L 0 -1
-98750 stick L 0 0
-99000 stick L 0 -1
-99150 stick L 0 0
-100000 capture         # EXIT selected
-101000 tap A           # EXIT
-102500 tap A           # confirm
+97500 trigger L 0
 
-105000 quit            # fallback: close the game window
+104000 tap START       # game menu (map, inventory, quests ...)
+108000 capture
+110000 tap B           # close the game menu
+
+114000 tap BACK        # system menu, cursor on RESUME
+117000 capture
+124000 stick L 0 -1    # six flicks down: RESUME -> EXIT
+124150 stick L 0 0
+124400 stick L 0 -1
+124550 stick L 0 0
+124800 stick L 0 -1
+124950 stick L 0 0
+125200 stick L 0 -1
+125350 stick L 0 0
+125600 stick L 0 -1
+125750 stick L 0 0
+126000 stick L 0 -1
+126150 stick L 0 0
+127000 tap A           # EXIT
+128500 tap A           # confirm
+
+145000 quit            # fallback: close the game window
