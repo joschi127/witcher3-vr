@@ -17292,9 +17292,10 @@ void load_config() {
         // census only reports the waits. Only the 5.01 pipeline has been
         // audited for a second pair in flight (4.04 TAAU, Streamline DLSS
         // and the world-marker hook have not), so other builds keep lag 0.
+        // Default 1 on 5.01 (this fork, after the headless and headset checks).
         {
             const int pair_barrier_lag =
-                read_ini_int("perf", "pair_barrier_lag", 0);
+                read_ini_int("perf", "pair_barrier_lag", 1);
             const bool lag_build_supported = running_game_build() ==
                 w3vr::game_build::Build::Remaster501;
             g_config.perf_pair_barrier_lag = lag_build_supported
@@ -17399,11 +17400,12 @@ void load_config() {
             g_config.temporal_backend = TemporalBackend::None;
         }
         // [FEATURE:REMASTER-FSR-PER-EYE 3/7] Read on 5.01 whatever the
-        // temporal backend; FSR is the game's choice (AAMode 5).
+        // temporal backend; FSR is the game's choice (AAMode 5). Default on
+        // (this fork): without FSR in the game the hooks pass through.
         g_config.remaster_fsr_per_eye = false;
         if (running_game_build() == w3vr::game_build::Build::Remaster501) {
             g_config.remaster_fsr_per_eye =
-                read_ini_bool("engine", "remaster_fsr_per_eye", false);
+                read_ini_bool("engine", "remaster_fsr_per_eye", true);
             if (g_config.remaster_fsr_per_eye) {
                 g_config.remaster_dlss_per_eye_motion = read_ini_bool(
                     "engine", "remaster_dlss_per_eye_motion", true);
@@ -17412,19 +17414,21 @@ void load_config() {
             }
         }
         // [FIX:REMASTER-PAIR-JITTER 2/6] [FIX:REMASTER-PAIR-NOISE 2/4]
+        // Default on (this fork, as in kaarele's release settings).
         g_config.remaster_pair_jitter = false;
         g_config.remaster_pair_noise = false;
         if (running_game_build() == w3vr::game_build::Build::Remaster501) {
             g_config.remaster_pair_jitter =
-                read_ini_bool("engine", "remaster_pair_jitter", false);
+                read_ini_bool("engine", "remaster_pair_jitter", true);
             g_config.remaster_pair_noise =
-                read_ini_bool("engine", "remaster_pair_noise", false);
+                read_ini_bool("engine", "remaster_pair_noise", true);
         }
-        // [FIX:REMASTER-PAIR-PREVIOUS 1/4]
+        // [FIX:REMASTER-PAIR-PREVIOUS 1/4] Default on (this fork, as in
+        // kaarele's release settings).
         g_config.remaster_pair_previous_transforms = false;
         if (running_game_build() == w3vr::game_build::Build::Remaster501) {
             g_config.remaster_pair_previous_transforms = read_ini_bool(
-                "engine", "remaster_pair_previous_transforms", false);
+                "engine", "remaster_pair_previous_transforms", true);
         }
 
         if (temporal_backend_is_dlss()) {
