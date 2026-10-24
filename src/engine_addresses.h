@@ -33,6 +33,11 @@ enum class Function : size_t {
     CameraLightPlacement,  // places one camera light from the render camera (pos + yaw)
     RenderFenceWait,       // CRenderFence wait, vtable +0x18 (fence): blocks until it is signalled
     ParallelFlushCommands, // ParallelRenderCommands::FlushCommands (commands): staged batches -> ready, apply
+    DlssConstantsBuilder,  // fills Streamline constants + tags (state, frame_data, reset)
+    DlssInputPrepare,      // tags the DLSS inputs (state, frame_data, params)
+    DlssSrApply,           // sets DLSS options and evaluates SR (state, frame_data, params, pass, ...)
+    TemporalCameraBuild,   // builds the 0xB0 temporal camera record (motion-vector camera)
+    DlssMipBias,           // (frame_data, _, float* bias): texture LOD bias for the frame's samplers
     Count,
 };
 
@@ -158,6 +163,33 @@ inline constexpr uint8_t kRenderSceneFenceWaitCall501Bytes[] = {
     0x48, 0x8B, 0x8F, 0xD0, 0x01, 0x00, 0x00, 0xC5, 0xF8, 0x28, 0xF0, 0x48,
     0x8B, 0x01, 0xFF, 0x50, 0x18};
 
+// DLSS SR on 5.01 (Streamline 2). Leading bytes, unique in the exe at these lengths.
+inline constexpr uint8_t kDlssConstantsBuilder501Bytes[] = {
+    0x44, 0x88, 0x44, 0x24, 0x18, 0x55, 0x53, 0x41, 0x56, 0x48, 0x8D, 0xAC,
+    0x24, 0xA0, 0xC2, 0xFF, 0xFF, 0xB8, 0x60, 0x3E, 0x00, 0x00, 0xE8, 0x55};
+inline constexpr uint8_t kDlssInputPrepare501Bytes[] = {
+    0x40, 0x55, 0x56, 0x41, 0x56, 0x48, 0x8D, 0x6C, 0x24, 0xB9, 0x48, 0x81,
+    0xEC, 0xF0, 0x00, 0x00, 0x00, 0x48, 0x83, 0x3A, 0x00, 0x48, 0x8B, 0xF2};
+inline constexpr uint8_t kDlssSrApply501Bytes[] = {
+    0x4C, 0x8B, 0xDC, 0x55, 0x53, 0x57, 0x41, 0x56, 0x41, 0x57, 0x48, 0x8D,
+    0x6C, 0x24, 0xA0, 0x48, 0x81, 0xEC, 0x60, 0x01, 0x00, 0x00, 0x80, 0x79};
+// Same code as 4.04 0x015FE010 apart from the AVX encoding; its 0x4E-byte
+// wrapper (5.01 0x02291BB0, 4.04 0x015FFA40) matches instruction for instruction.
+inline constexpr uint8_t kTemporalCameraBuild501Bytes[] = {
+    0x48, 0x8B, 0xC4, 0x48, 0x89, 0x58, 0x08, 0x48, 0x89, 0x70, 0x10, 0x48,
+    0x89, 0x78, 0x18, 0x55, 0x48, 0x8D, 0xA8, 0x18, 0xFF, 0xFF, 0xFF, 0x48,
+    0x81, 0xEC, 0xE0, 0x01, 0x00, 0x00, 0xC5, 0xFC};
+// [FEATURE:REMASTER-DLSS-IMAGE 1/5] 5.01 texture LOD bias, called by the frame
+// builder (0x141C1AC02) and two other passes. Unless frame_data+0xBEC is set,
+// AA modes 3-8 get clamp(log2(render_h / output_h) - 1, -3, 0) plus the
+// TextureMipBias setting (render_h at frame_data+0xBE0, output_h at +0xBE8),
+// other modes TextureMipBias alone. push rbx; sub rsp,0x30; cmp byte ptr
+// [rcx+0xBEC],0; mov rbx,r8; mov r8,rcx; jne: unique in the 5.01 exe.
+inline constexpr uint8_t kDlssMipBias501Bytes[] = {
+    0x40, 0x53, 0x48, 0x83, 0xEC, 0x30, 0x80, 0xB9, 0xEC, 0x0B, 0x00, 0x00,
+    0x00, 0x49, 0x8B, 0xD8, 0x4C, 0x8B, 0xC1, 0x0F, 0x85, 0x84, 0x00, 0x00,
+    0x00};
+
 inline constexpr Entry kEntries[] = {
     {"IsAnyMenu", 0x01F3C5C0, 0x01DF41A0, {kIsAnyMenuBytes, sizeof(kIsAnyMenuBytes)}},
     {"IsLoadingScreenVideoPlaying", 0x0154EED0, 0x0227A0F0,
@@ -194,6 +226,16 @@ inline constexpr Entry kEntries[] = {
         {kRenderFenceWait501Bytes, sizeof(kRenderFenceWait501Bytes)}},
     {"ParallelRenderCommands.FlushCommands", 0, 0x01C1CA10,
         {kParallelFlushCommands501Bytes, sizeof(kParallelFlushCommands501Bytes)}},
+    {"DlssConstantsBuilder", 0x01CFE280, 0x01B80230,
+        {kDlssConstantsBuilder501Bytes, sizeof(kDlssConstantsBuilder501Bytes)}},
+    {"DlssInputPrepare", 0x01CFD760, 0x01B7F550,
+        {kDlssInputPrepare501Bytes, sizeof(kDlssInputPrepare501Bytes)}},
+    {"DlssSrApply", 0x01CFCF20, 0x01B7E720,
+        {kDlssSrApply501Bytes, sizeof(kDlssSrApply501Bytes)}},
+    {"TemporalCameraBuild", 0x015FE010, 0x02291600,
+        {kTemporalCameraBuild501Bytes, sizeof(kTemporalCameraBuild501Bytes)}},
+    {"DlssMipBias", 0, 0x01C1D180,
+        {kDlssMipBias501Bytes, sizeof(kDlssMipBias501Bytes)}},
 };
 static_assert(sizeof(kEntries) / sizeof(kEntries[0]) ==
     static_cast<size_t>(Function::Count));
@@ -228,6 +270,14 @@ enum class Value : size_t {
     ParallelStagedCountOffset,    // FlushCommands' this: entry count of staged bucket 0
     ParallelBucketStride,         // bytes from one bucket of a list to the next
     ParallelBucketCount,          // buckets per list (hashed by proxy address)
+    TemporalCameraRecordOffset,   // bytes from a view to its previous-frame camera record
+    DlssStateViewport,            // DLSS state: Streamline viewport id (u32)
+    DlssStateConstantsFrame,      // DLSS state: frame index last given constants
+    DlssStateApplyFrame,          // DLSS state: render counter of the last SR apply
+    DlssStatePrepareFrame,        // DLSS state: render counter of the last input prepare
+    DlssStateResetFlag,           // DLSS state: this frame's constants request a history reset
+    DlssFrameRayReconstructionFlag,  // frame_data: Ray Reconstruction path active
+    DlssFrameDataFromFrame,       // frame_data = frame + this
     Count,
 };
 
@@ -275,6 +325,25 @@ inline constexpr ValueEntry kValues[] = {
     {"ParallelStagedCountOffset", 0, 0x15C},
     {"ParallelBucketStride", 0, 0xC},
     {"ParallelBucketCount", 0, 17},
+    // Previous-frame camera record inside a view: the frame-data factory tests
+    // its valid byte at r8+0x470 (4.04 0x0162152D) / r8+0x540 (5.01 0x022C0888),
+    // with the view at descriptor+0x10.
+    {"TemporalCameraRecordOffset", 0x460, 0x530},
+    // DLSS state object (rcx of the three DLSS functions): the Streamline
+    // viewport id and the per-frame guards of the constants builder, the SR
+    // apply and the input prepare (compared with frame_data +0xC44/+0xC40).
+    {"DlssStateViewport", 0, 0x180},
+    {"DlssStateConstantsFrame", 0x6C, 0x120},
+    {"DlssStateApplyFrame", 0x70, 0x124},
+    {"DlssStatePrepareFrame", 0x74, 0x128},
+    // Byte the constants builder sets when this frame's constants request a
+    // history reset (stored 0x01B80513, read for Constants.reset 0x01B80552).
+    {"DlssStateResetFlag", 0, 0x110},
+    // frame_data byte the upscaler dispatch tests to take the Ray
+    // Reconstruction path instead of SR apply (0x01C09F7A).
+    {"DlssFrameRayReconstructionFlag", 0, 0xF73C},
+    // The DLSS functions receive frame + 0x10 (FrameBuilder: lea r14,[r12+0x10]).
+    {"DlssFrameDataFromFrame", 0x10, 0x10},
 };
 static_assert(sizeof(kValues) / sizeof(kValues[0]) == static_cast<size_t>(Value::Count));
 
