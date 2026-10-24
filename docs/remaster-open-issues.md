@@ -36,6 +36,9 @@ black, with or without the mod (see `remaster-port-status.md`, 2026-10-17).
   reflection or water fog; 5.01 adds `[PostProcess] WaterFogPerPixel=true`) that switches at a
   threshold of the camera angle or position. Next step: a test script with small camera movements on
   the balcony and a flat check (without the mod) with the same movements.
+- Not seen on Linux (2026-10-24, Heroic, GE-Proton, WiVRn, Pico 4, the 5.x VR settings from
+  `configure`, so screen-space reflections off): the river from Kaer Morhen looked correct. Next
+  check: the same spot on Windows with the current settings and driver.
 
 ## Usability
 

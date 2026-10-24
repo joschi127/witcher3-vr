@@ -581,7 +581,8 @@ were made on Linux/Proton with NVIDIA unless stated otherwise; our own results f
   differ, transient (a difference that did not repeat on a second look) and copy_source_lost
   (copies whose legacy source had data the shadow source lost). The first 20 examples of
   differ, shadow_only and legacy_only are logged once.
-- Status: on by default; verified with the null OpenXR runtime; headset confirmation pending.
+- Status: on by default; verified with the null OpenXR runtime; headset check on Linux done
+  (2026-10-24, see below).
 
 ### Render-thread CPU trims (descriptor copy, aim detector, pair barrier)
 - Descriptor copy, shadow store (`copy_descriptor_shadow_ranges`): both copy detours read one
@@ -621,7 +622,8 @@ were made on Linux/Proton with NVIDIA unless stated otherwise; our own results f
   (`descriptor_shadow_verify=1`, census with `[vrs] mode=3 uniform_rate=1x1`): differ 0,
   legacy_only 0, shadow_only > 0 (extra hits, as expected); increment 32, no overflows,
   collisions or long waits. Smoke test with diagnostics passed; eye images correct.
-  4.04 not checked yet.
+  4.04 checked on 2026-10-24 (Windows): smoke run and verification census green (differ 0,
+  legacy_only 0).
 
 ## 2026-10-24: first headset run on Linux
 
@@ -636,3 +638,15 @@ were made on Linux/Proton with NVIDIA unless stated otherwise; our own results f
   start; full stereo 3D in the headset while walking around. WiVRn reports symmetric FOVs
   (about +-52 degrees) and recommends 2592x2592 per eye for the Pico 4. The frame rate on the
   integrated GPU was too low to play smoothly, but enough for compatibility tests.
+- Headset check of the descriptor store and CPU trims on Linux, DLL from `remaster` 5a495d5, same
+  setup:
+  - Verification run with the null runtime (`descriptor_shadow_verify=1`, census with `[vrs]
+    mode=3 uniform_rate=1x1`): vkd3d-proton uses `increment=32 stride=1`, the path not seen on
+    Windows/AMD. differ 0 and legacy_only 0 in every census; no overflows, allocation failures,
+    owner collisions, increment mismatches or long waits. The short smoke script made no CBV or
+    Witcher Senses lookups, only resource lookups.
+  - Headset run by hand (mouse and keyboard, about 2.5 minutes, Witcher Senses used several times):
+    no flickering or wrong textures, no differences between the eyes.
+- The river seen from Kaer Morhen (open issue "Distant water switches between blue and white")
+  looked correct in the headset. The Windows observation predates `configure` turning off
+  screen-space reflections and the AMD driver update; which of them matters is not known.
