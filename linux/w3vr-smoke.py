@@ -280,12 +280,14 @@ def one_run(g, args, run_dir):
     if lines and not any('Test mode script loaded' in l for l in lines):
         failures.append('test mode script not loaded')
     # The game must have reached gameplay: a run that never leaves the main menu (e.g. Continue picks a save
-    # the build cannot load) would otherwise pass. The engine's gameplay entry runs only in the world.
-    gameplay = next((l for l in lines if 'Engine gameplay entry present=' in l), None)
+    # the build cannot load) would otherwise pass. Actor.IsInGameplayScene is first called once the world
+    # is loaded (hooked whenever engine hooks are on; the gameplay entry probe only with dual render).
+    gameplay = next((l for l in lines if 'Native Actor.IsInGameplayScene first call' in l
+                     or 'Engine gameplay entry present=' in l), None)
     if gameplay:
         notes.append('gameplay: reached at %s' % gameplay[1:13])
     elif lines and not args.no_gameplay_check:
-        failures.append('game never reached gameplay (no "Engine gameplay entry" line; main menu or load failed?)')
+        failures.append('game never reached gameplay (no Actor.IsInGameplayScene call; main menu or load failed?)')
     written = sum(1 for l in lines if 'Test mode capture written' in l)
     if written != expected_captures:
         failures.append('captures written %d, expected %d' % (written, expected_captures))

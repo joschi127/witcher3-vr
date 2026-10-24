@@ -23,6 +23,9 @@ param(
     # Keep the [test] settings in witcher3vr.ini after the run instead of restoring the file.
     [switch] $KeepIni,
 
+    # Do not fail when the game never reaches gameplay (for scripts that stay in menus).
+    [switch] $NoGameplayCheck,
+
     # Extra INI values for this run only, as 'section.key=value' (e.g. 'openxr.enabled=1').
     # Existing keys are replaced in place, missing keys are appended to their section.
     [string[]] $IniSet = @(),
@@ -161,6 +164,15 @@ $buildLine = $lines | Where-Object { $_ -match 'Game build ' } | Select-Object -
 if ($buildLine) { $notes.Add(($buildLine -replace '^\[[^\]]*\]\s*', '')) }
 
 if ($killed) { $failures.Add("game did not exit within $TimeoutSeconds s (killed)") }
+# A run that never leaves the main menu (e.g. 4.04 "Continue" picking a 5.x cloud save it cannot
+# load) would otherwise pass. Actor.IsInGameplayScene is first called once the world is loaded.
+$gameplayLine = $lines | Where-Object { $_ -match 'Native Actor\.IsInGameplayScene first call' } |
+    Select-Object -First 1
+if ($gameplayLine) {
+    $notes.Add('gameplay: reached at ' + ($gameplayLine -replace '^\[([^\]]*)\].*', '$1'))
+} elseif ($lines.Count -gt 0 -and -not $NoGameplayCheck) {
+    $failures.Add('game never reached gameplay (no Actor.IsInGameplayScene call; main menu or load failed?)')
+}
 if (-not ($lines | Where-Object { $_ -match 'Test mode script loaded' })) {
     $failures.Add('test mode script not loaded')
 }
