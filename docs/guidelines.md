@@ -162,6 +162,30 @@ simpler.
 - Record in `docs/remaster-port-status.md` which commits a run covered and which checks are still
   open, the same as for single changes.
 
+## Exchanging files between machines (optional)
+
+When the same state is tested on two machines (for example Windows and a Linux laptop, each with
+its own Claude Code session), files are exchanged through `local/exchange/` in each clone,
+kept in sync with [Syncthing](https://syncthing.net/) in its portable form
+([ADR 0006](adr/0006-exchange-folder-with-portable-syncthing.md)):
+
+- Syncthing is one executable per platform; unpack it under `local/tools/syncthing/` and start it
+  with its configuration next to it. No installation, service or administrator rights. Pair the two
+  machines once by device ID and share only `local/exchange/`. Global discovery and relays can be
+  turned off when both machines are on the same network.
+- It is set up when needed, by the AI agent of each session with the maintainer's go-ahead (the
+  firewall prompt on first start and the pairing confirmation stay with the maintainer). Where an
+  agent may not download files, the maintainer downloads the official archive into `local/tools/`
+  and the agent does the rest.
+- Suggested layout: `saves/` (test saves, one subfolder per state), `test-input/` (input scripts),
+  `builds/` (DLLs to compare), `runs/` (logs and captures to compare).
+- Whoever puts something there tells the other session (for example over Remote Control).
+- Saves go from `local/exchange/saves/` into a game only with the backup routine above, never by
+  syncing `gamesaves` directly. Settings files are exchanged only deliberately, one file at a time,
+  because of the account token.
+- `local/` is git-ignored, so nothing from the exchange folder can be committed by accident; the
+  data hygiene rules still apply to anything copied out of it.
+
 ## Launcher behaviour worth knowing
 
 "Configure Settings for VR" (`ConfigureGameSettingsForVr`, `launcher/config.cpp`) replaces
