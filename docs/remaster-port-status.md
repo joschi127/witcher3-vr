@@ -958,3 +958,12 @@ RTX 3080 and a Meta Quest 3 through WiVRn unless stated otherwise; our own resul
 - Open: headset check (FSR per eye with all three pair switches; sharpness, smear on moving
   characters, flicker); DLSS per eye on NVIDIA by someone who has one; a launcher option for the
   per-eye upscaler on 5.x (the launcher writes `AAMode=1` and `temporal_backend=none` there).
+
+## 2026-10-24: defaults on 5.01
+
+- On 5.01 the following now default to on (other builds unchanged): `[perf] pair_barrier_lag=1`,
+  `[engine] remaster_fsr_per_eye=1` (passes through unless the game uses FSR),
+  `remaster_pair_jitter=1`, `remaster_pair_noise=1`, `remaster_pair_previous_transforms=1`.
+  `temporal_backend` keeps its value (the launcher writes `none` on 5.x).
+- Smoke run with these defaults, FXAA, SteamVR null driver: passed, every hook installed, no errors.
+  Merge after the headset check of the run-ahead and per-eye upscaler PRs.
