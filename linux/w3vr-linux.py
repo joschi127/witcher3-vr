@@ -1083,12 +1083,17 @@ def print_heroic_launch_settings(g, runtime='auto'):
             die('SteamVR is not installed in any Steam library (install it from Steam first)')
         env.append(('XR_RUNTIME_JSON', steamvr))
         detail = 'SteamVR (%s)' % steamvr
+        kind = 'steamvr'
+    if kind:
+        # umu runs the game in Steam's runtime container, which must import the host's OpenXR runtime.
+        env.append(('PRESSURE_VESSEL_IMPORT_OPENXR_1_RUNTIMES', '1'))
     print('Runtime: %s' % detail)
     print('Heroic > The Witcher 3 > Settings (gear icon) > Advanced > Environment Variables, add:')
     print()
+    width = max(len(key) for key, _ in env)
     for key, value in env:
         current = g.get('launch_env', {}).get(key)
-        print('  %-20s %s%s' % (key, value, '' if current is None else
+        print('  %-*s  %s%s' % (width, key, value, '' if current is None else
                                 '   (set: %s)' % current if current == value else '   (now: %s)' % current))
     args = g.get('launch_args', '') or ''
     print()
@@ -1096,12 +1101,51 @@ def print_heroic_launch_settings(g, runtime='auto'):
           % ('   (set)' if '--launcher-skip' in args.split() else ''))
     print('  (the GOG build starts REDprelauncher.exe; --launcher-skip starts the DirectX 12 game directly)')
     print()
-    print('The mod needs only WINEDLLOVERRIDES. Without a headset, point [test] openxr_loader in witcher3vr.ini at the')
+    print('Without a headset, only WINEDLLOVERRIDES is needed: point [test] openxr_loader in witcher3vr.ini at the')
     print('null runtime instead of setting an OpenXR runtime here.')
     if g.get('flatpak_heroic') and kind:
-        print('Flatpak Heroic runs the game in its sandbox: it must be able to read the OpenXR runtime (%s)' % detail)
-        print('and reach its socket, e.g. flatpak override --user --filesystem=<runtime folder>:ro '
-              'com.heroicgameslauncher.hgl (not tested yet).')
+        print_heroic_flatpak_override(kind)
+
+
+HEROIC_FLATPAK_ID = 'com.heroicgameslauncher.hgl'
+
+
+def heroic_flatpak_override_paths(kind):
+    """The sandbox paths Flatpak Heroic needs for the active OpenXR runtime (tested: WiVRn Flatpak)."""
+    paths = ['xdg-config/openxr:ro']  # active_runtime.json
+    if kind.startswith('wivrn'):
+        if os.path.isdir('/var/lib/flatpak/app/io.github.wivrn.wivrn'):
+            paths.append('/var/lib/flatpak/app/io.github.wivrn.wivrn:ro')
+        else:
+            paths.append('xdg-data/flatpak/app/io.github.wivrn.wivrn:ro')
+        paths.append('xdg-run/wivrn')  # the WiVRn server's socket
+    return paths
+
+
+def print_heroic_flatpak_override(kind):
+    """Print the flatpak override that lets the game in Flatpak Heroic's sandbox reach the runtime (not run here)."""
+    paths = heroic_flatpak_override_paths(kind)
+    current = set()
+    override = os.path.join(os.environ.get('XDG_DATA_HOME') or os.path.expanduser('~/.local/share'),
+                            'flatpak', 'overrides', HEROIC_FLATPAK_ID)
+    try:
+        with open(override, encoding='utf-8') as f:
+            for line in f:
+                if line.startswith('filesystems='):
+                    current.update(p for p in line.strip().split('=', 1)[1].split(';') if p)
+    except OSError:
+        pass
+    missing = [p for p in paths if p not in current]
+    print()
+    print('Flatpak Heroic runs the game in its sandbox, which must see the OpenXR runtime%s:'
+          % ('' if missing else ' (set)'))
+    print()
+    print('  flatpak override --user %s %s' % (' '.join('--filesystem=' + p for p in paths), HEROIC_FLATPAK_ID))
+    print()
+    print('Restart Heroic afterwards. Undo with flatpak override --user --reset %s' % HEROIC_FLATPAK_ID)
+    print('(this removes all your own overrides for Heroic).')
+    if not kind.startswith('wivrn'):
+        print('(Only tested with WiVRn; other runtimes may need their own folders and sockets.)')
 
 
 def cmd_launch_options(args):
