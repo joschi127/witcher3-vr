@@ -1,6 +1,6 @@
-# 0005: Merge with kaarele's project; home of the combined repository
+# 0005: Possible merge with kaarele's project; home of a combined repository
 
-- Status: Proposed (the goal is agreed; the transfer proposal and the home are open)
+- Status: Proposed (both maintainers would like to combine the projects; nothing is agreed yet)
 - Date: 2026-10-23
 - Decided by: the maintainer and kaarele (open)
 
@@ -8,8 +8,10 @@
 
 This fork (`joschi127/witcher3-vr`) and
 [kaarele/witcher3-remastered-vr](https://github.com/kaarele/witcher3-remastered-vr) work on the
-same mod for Remastered 5.x. Both want one combined project; this fork already takes over
-kaarele's changes feature by feature ([ADR 0004](0004-adopt-kaarele-changes-feature-by-feature.md)).
+same mod for Remastered 5.x. Both maintainers have said they would like to combine the two
+projects into one; whether and how that happens is not settled. This fork already takes over
+kaarele's changes feature by feature ([ADR 0004](0004-adopt-kaarele-changes-feature-by-feature.md)),
+which is useful on its own and does not depend on a merge.
 
 Links to this repository are already public and in use, for example in the VR modding community
 on Discord: `https://github.com/joschi127/witcher3-vr` and the release
@@ -36,9 +38,9 @@ Facts checked on 2026-10-23 (GitHub documentation and API):
 
 ## Decision
 
-Agreed:
-- The goal is one combined repository for both projects.
-- Both maintainers get maintainer permissions in the combined repository.
+Intended by both maintainers, not agreed yet:
+- one combined repository for both projects;
+- both maintainers with maintainer permissions in it.
 
 Proposed by the maintainer, not agreed yet: do not create the combined repository as a new one,
 but transfer the existing `joschi127/witcher3-vr`, so that its frequently used public links keep

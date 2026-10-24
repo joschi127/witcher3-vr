@@ -7,9 +7,10 @@
 ## Context
 
 The fork has grown from a port of one mod to a second game version into a project with its own
-releases, a parallel project to merge with (kaarele/witcher3-remastered-vr) and several people
-and AI agents working on it. Decisions and their reasons were spread over the guidelines, the
-port status log, issues and git history, so the reasons behind a rule were hard to find.
+releases, a parallel project that may be combined with it (kaarele/witcher3-remastered-vr)
+and several people and AI agents working on it. Decisions and their reasons were spread over
+the guidelines, the port status log, issues and git history, so the reasons behind a rule were
+hard to find.
 
 ## Decision
 
