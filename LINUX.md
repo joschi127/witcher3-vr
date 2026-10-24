@@ -1,11 +1,12 @@
-# Witcher 3 Remastered VR on Linux (Steam + Proton)
+# Witcher 3 Remastered VR on Linux
 
-This guide covers running the mod on Linux under Steam and Proton, with an OpenXR runtime such as
-WiVRn on the host. The main target is **The Witcher 3 Remastered, patch 5.01** (Steam's default
-branch). Patch 4.04 is covered briefly [at the end](#patch-404-next-gen-branch).
+This guide covers running the mod on Linux under Proton, started from Steam or from Heroic Games
+Launcher (GOG edition), with an OpenXR runtime such as WiVRn on the host. The main target is
+**The Witcher 3 Remastered, patch 5.01**. Patch 4.04 is covered briefly
+[at the end](#patch-404-next-gen-branch).
 
 `linux/w3vr-linux.py` replaces the Windows launcher on Linux. It is Python 3 with the standard
-library only, so it also runs on SteamOS. The [README](README.md#linux-steam--proton) has the short
+library only, so it also runs on SteamOS. The [README](README.md#linux-proton) has the short
 version of these steps.
 
 > **State in this repository.** This guide and the Linux tools come from
@@ -18,41 +19,70 @@ version of these steps.
 > as the Windows launcher does, and `install --sha256` also accepts this repository's release
 > checksum files (`sha256sum` format).
 
+The setup is the same for Steam and Heroic except for where the launch settings go: a launch-option
+line in Steam, environment variables and a sandbox permission in Heroic (see
+[Launcher setup](#launcher-setup)).
+
 ## Requirements
 
-- **Steam with Proton.** Proton Hotfix is tested. The tool finds native Steam, Flatpak Steam and
-  the Steam Deck layout, and every Steam library. GOG installs in Heroic Games Launcher (native or
-  Flatpak) are found as well, see [Heroic (GOG)](#heroic-gog); for any other install, every command
-  takes `--game-dir DIR --prefix WINEPREFIX`.
-- **The Witcher 3 Remastered, patch 5.01, DirectX 12**, on Steam's default branch. The mod checks
-  the game build at startup and does nothing on other builds.
-- **An OpenXR runtime on the host.** WiVRn (Flatpak `io.github.wivrn.wivrn`) is tested. The tool
-  also recognises Monado and SteamVR as the active runtime, but they are untested.
+- **Steam or Heroic Games Launcher, with Proton.**
+  - Steam: Proton Hotfix is tested (in kaarele's project). The tool finds native Steam, Flatpak
+    Steam and the Steam Deck layout, and every Steam library.
+  - Heroic (native or Flatpak) with the GOG edition: GE-Proton 11 is tested, Proton-CachyOS without
+    a headset.
+  - For any other install, every command takes `--game-dir DIR --prefix WINEPREFIX`.
+- **The Witcher 3 Remastered, patch 5.01, DirectX 12.** The mod checks the game build at startup
+  and does nothing on other builds.
+  - Steam: the default branch.
+  - Heroic: the GOG edition, kept at 5.01 (automatic updates off).
+- **An OpenXR runtime on the host.** WiVRn (Flatpak `io.github.wivrn.wivrn`) is tested, with a
+  Quest 3 (kaarele's project) and a Pico 4 (this repository). The tool also recognises Monado and
+  SteamVR as the active runtime, but they are untested.
 - **Python 3.** SteamOS, Bazzite and most desktop distributions include it.
-- **A `dxgi.dll` built from this repository.** There is no release package yet. Build it as
-  described in [linux/BUILD-LINUX.md](linux/BUILD-LINUX.md); the result is
+- **A `dxgi.dll` built from this repository.** The Linux tests of this repository use a DLL built
+  on Linux, as described in [linux/BUILD-LINUX.md](linux/BUILD-LINUX.md); the result is
   `build/linux-clang-cl/dxgi.dll`.
 - **A Witcher 3 VR Remastered release zip** from
   [joschi127/witcher3-vr releases](https://github.com/joschi127/witcher3-vr/releases). It supplies
   `openxr_loader.dll` and the base script mods. Check it against its SHA-256 file with
   `sha256sum -c <name>-SHA256.txt`.
-- **For DLSS:** an NVIDIA RTX GPU. Other GPUs use FXAA (untested by this project).
+- **For DLSS:** an NVIDIA RTX GPU. Other GPUs use FXAA (tested on an AMD integrated GPU).
 - Mouse and keyboard, or a gamepad. VR motion controllers are not supported.
 
 ## Before you start
 
-- **Back up your saves.** They are in
-  `steamapps/compatdata/292030/pfx/drive_c/users/steamuser/Documents/The Witcher 3/gamesaves`,
-  inside the Steam library that holds the game (Heroic: the same path below the game's Wine prefix,
-  which `status` prints). `install` also makes a verified backup first (see
-  [backup-saves](#backup-saves)).
+- **Back up your saves.** `install` also makes a verified backup first (see
+  [backup-saves](#backup-saves)). The saves are in `drive_c/users/steamuser/Documents/The Witcher
+  3/gamesaves` inside the game's Wine prefix (`status` prints the prefix):
+  - Steam: the prefix is `steamapps/compatdata/292030/pfx` in the Steam library that holds the
+    game.
+  - Heroic: the prefix is set in the game's Heroic settings (*Wine*); with Proton it is the `pfx/`
+    folder inside it.
 - **Start the game once without the mod**, reach the main menu and quit. This creates the Proton
   prefix and the settings files the tool edits (`dx12user.settings` and `input.settings`).
 - **Close the game** before you run `install`, `configure` or `uninstall`. The game rewrites its
   settings when it exits, and the tool refuses to run while it is running.
-- **Connect the headset to WiVRn.** WiVRn only registers itself as the active OpenXR runtime
-  (`$XDG_CONFIG_HOME/openxr/1/active_runtime.json`) while a headset is connected, and Proton's VR
-  setup and the mod's OpenXR start-up both run once, at game launch.
+
+## WiVRn and the headset
+
+1. **Install WiVRn:** `flatpak install --user flathub io.github.wivrn.wivrn` (per user; a
+   system-wide install works too). Start it and follow its setup assistant.
+2. **Install the WiVRn app on the headset.** Quest headsets get it from the store. For a Pico the
+   assistant installs the APK over USB with `adb`. Server and headset app must be the same version.
+   - Pico 4: turn on developer mode (*Settings > General > About*, tap *Software Version* several
+     times), then *Settings > Developer > USB Debugging*. Accept the debugging prompt in the
+     headset when you plug in the cable.
+   - Use a USB data cable, connected to the PC directly. With a charge-only cable, or behind some
+     docks, the headset does not show up at all (`adb devices` stays empty).
+   - `adb` needs udev rules for the headset. Debian's `android-sdk-platform-tools-common` includes
+     them for Pico (USB vendor `2d40`).
+3. **Connect the headset to WiVRn before you start the game.** WiVRn only registers itself as the
+   active OpenXR runtime (`$XDG_CONFIG_HOME/openxr/1/active_runtime.json`) while a headset is
+   connected, and Proton's VR setup and the mod's OpenXR start-up both run once, at game launch.
+   `status` shows the active runtime.
+
+WiVRn's dashboard also shows a launch-option line for Steam games; the tool prints the matching
+settings for your launcher, see [Launcher setup](#launcher-setup).
 
 ## Install with w3vr-linux.py
 
@@ -65,39 +95,88 @@ python3 linux/w3vr-linux.py status
 python3 linux/w3vr-linux.py install <release>.zip --dll build/linux-clang-cl/dxgi.dll
 python3 linux/w3vr-linux.py configure
 python3 linux/w3vr-linux.py launch-options
-python3 linux/w3vr-linux.py wivrn-shortcut        # optional
+python3 linux/w3vr-linux.py wivrn-shortcut        # optional, Steam only
 ```
 
-`python3 linux/w3vr-linux.py <command> --help` lists the options of each command.
+Then add what `launch-options` prints to your launcher, as described in
+[Launcher setup](#launcher-setup). `python3 linux/w3vr-linux.py <command> --help` lists the options
+of each command; [Commands](#commands) describes them.
+
+## Launcher setup
+
+Both launchers run the game inside Steam's runtime container (Heroic through umu). Proton's
+`wineopenxr` passes the game's OpenXR calls (D3D12) to the host runtime, so the container must
+import the host's runtime (`PRESSURE_VESSEL_IMPORT_OPENXR_1_RUNTIMES=1`). Nothing is needed inside the Wine
+prefix: Proton registers `wineopenxr` as the prefix's OpenXR runtime by itself.
+
+### Steam
+
+`launch-options` prints the line for
+*Steam > The Witcher 3 > Properties > General > Launch Options*. With WiVRn installed as a system-wide Flatpak:
+
+```text
+PRESSURE_VESSEL_IMPORT_OPENXR_1_RUNTIMES=1 PRESSURE_VESSEL_FILESYSTEMS_RW=/var/lib/flatpak/app/io.github.wivrn.wivrn %command% --launcher-skip
+```
+
+- The two `PRESSURE_VESSEL_*` variables let the game, inside Steam's runtime container, reach the
+  OpenXR runtime on the host. `PRESSURE_VESSEL_FILESYSTEMS_RW` is only added for a Flatpak WiVRn;
+  for a per-user Flatpak install it points to `~/.local/share/flatpak/app/io.github.wivrn.wivrn`.
+- `--launcher-skip` makes the REDprelauncher start the DirectX 12 game directly.
+- If your runtime shows its own launch string (for example the WiVRn dashboard), prefer that, and
+  keep `%command% --launcher-skip`.
+- `WINEDLLOVERRIDES="dxgi=n,b"` and `PROTON_ENABLE_NVAPI=1` can be added. Proton Hotfix already
+  sets both for this game on NVIDIA systems; on other Proton versions they make sure the mod's
+  `dxgi.dll` loads and NVAPI is available for DLSS.
 
 ### Heroic (GOG)
 
-Tested with Heroic 2.22 (Flatpak) and the GOG edition on patch 5.01, under GE-Proton 11 and
-Proton-CachyOS, without a headset (OpenXR through the null runtime from `tools/w3vr-nullxr`).
-The tool finds the install and its Wine prefix from Heroic's settings by itself.
+Tested with Heroic 2.22 (Flatpak) and the GOG edition on patch 5.01: under GE-Proton 11 with WiVRn
+(per-user Flatpak) and a Pico 4, and under GE-Proton 11 and Proton-CachyOS without a headset
+(OpenXR through the null runtime from `tools/w3vr-nullxr`). The tool finds the install and its Wine
+prefix from Heroic's settings by itself and does not change Heroic's settings.
 
 1. Install the game in Heroic and keep it on patch 5.01: turn off automatic updates for it. The mod
    does nothing on other builds.
 2. Choose a Proton build: in Heroic's *Wine Manager*, the GE-Proton builds are on their own tab at
    the top of the page; download *GE-Proton-latest*, then select it under *The Witcher 3 >
-   Settings > Wine*. Proton-CachyOS works as well.
+   Settings > Wine*. Proton-CachyOS works as well. With Proton the tool uses the prefix's `pfx/`
+   folder.
 3. Turn off cloud saves for the game in Heroic while you test.
 4. Start the game once without the mod and quit from the main menu, then run `install` and
    `configure` as above.
-5. Run `launch-options` and add what it lists in the game's Heroic settings: the environment
-   variables (at least `WINEDLLOVERRIDES` = `dxgi=n,b`) and the game argument `--launcher-skip`,
-   which makes the GOG build's REDprelauncher start the DirectX 12 game directly.
+5. Run `launch-options` and add what it lists under *Heroic > The Witcher 3 > Settings > Advanced*;
+   it marks what is already set:
+   - environment variables: `WINEDLLOVERRIDES` = `dxgi=n,b`, and for a headset
+     `PRESSURE_VESSEL_IMPORT_OPENXR_1_RUNTIMES` = `1`;
+   - game argument: `--launcher-skip`, which makes the GOG build's REDprelauncher start the
+     DirectX 12 game directly.
+6. **Flatpak Heroic only, for a headset:** let Heroic's sandbox see the OpenXR runtime.
+   `launch-options` prints the command for your install; for a per-user WiVRn Flatpak:
+
+   ```bash
+   flatpak override --user --filesystem=xdg-config/openxr:ro \
+     --filesystem=xdg-data/flatpak/app/io.github.wivrn.wivrn:ro \
+     --filesystem=xdg-run/wivrn com.heroicgameslauncher.hgl
+   ```
+
+   These are the active-runtime file, the WiVRn runtime and the WiVRn server's socket. Quit Heroic
+   completely and start it again, so that the override applies.
 
 To play without the mod, remove `WINEDLLOVERRIDES` again or run `uninstall`.
+
+## Commands
 
 ### status
 
 Shows what the tool found, without changing anything:
 
-- the Steam root (and whether it is Flatpak Steam), the game folder, the Steam branch and build id
+- the launcher and the game folder:
+  - Steam: the Steam root (and whether it is Flatpak Steam), the Steam branch and build id;
+  - Heroic: Heroic's settings folder, the Wine prefix, the Proton build and the game's
+    `WINEDLLOVERRIDES`
 - the `bin/x64_dx12/witcher3.exe` build: `Remastered 5.01`, `4.04 (Steam next-gen)`, or
   `UNKNOWN build` with its TimeDateStamp and SizeOfImage
-- the Proton prefix's `Documents/The Witcher 3` folder
+- the prefix's `Documents/The Witcher 3` folder
 - whether the mod is active (`bin/x64_dx12/dxgi.dll` exists). With `install --dll` it reports
   `differs from reference`, because your DLL replaces the release's reference DLL.
 - the active OpenXR runtime, whether an NVIDIA GPU was found, and whether the game is running
@@ -143,15 +222,15 @@ existing `witcher3vr.ini` is updated and keeps your other keys; otherwise the to
 | Option | Default | What it does |
 |---|---|---|
 | `--mode stereo\|mono\|aer` | `stereo` | `stereo` = strict Stereo, both eyes from one game tick. `mono` = Mono. `aer` = AER+AFW (4.04 only; faster, but can shimmer). |
-| `--aa dlss\|none\|taau` | `dlss` on NVIDIA; otherwise `none` (5.01) or `taau` (4.04) | `dlss` = the game's DLSS with a separate history per eye. `none` = FXAA on 5.01. `taau` exists on 4.04 only. |
-| `--dlss-quality 0-4` | `2` | `1` Quality, `2` Balanced, `3` Performance, `4` Ultra Performance, `0` DLAA. On 5.01 the in-game DLSS setting also changes it while playing. |
-| `--res WIDTHxHEIGHT` | `2476x2594` | Per-eye render size. The default is WiVRn's recommended size for a Quest 3; for another headset pass your runtime's recommended per-eye size. |
+| `--aa dlss\|none\|taau\|fsr` | `none` on 5.01; on 4.04 `dlss` on NVIDIA, otherwise `taau` | `none` = FXAA on 5.01. `dlss` = the game's DLSS with a separate history per eye. `taau` exists on 4.04 only. On 5.01 `dlss` and `fsr` are refused until the per-eye history is taken over. |
+| `--dlss-quality 0-4` | `1` | `1` Quality, `2` Balanced, `3` Performance, `4` Ultra Performance, `0` DLAA. On 5.01 the in-game DLSS setting also changes it while playing. |
+| `--res WIDTHxHEIGHT\|runtime` | `2476x2594` | Per-eye render size. The default is WiVRn's recommended size for a Quest 3; for another headset pass your runtime's recommended per-eye size (WiVRn with a Pico 4: `2592x2592`), or `runtime` to use the runtime's recommendation at every start. |
 | `--hud-size` | `0.5` | Size of the VR HUD plane in Stereo (`0.5` = half size). |
 | `--hud-frame` | `1.0` | The game's HUD frame scale (`1.0` = vanilla; lower values pull the panels toward the centre). |
 | `--hud-locked 0\|1` | `1` | `1` = the HUD stays in front of you; turn your head to look at it. `F9` recentres. |
-| `--near-view OFFSET` | `-1.0` | Start in the near view with this camera offset. Negative values move the camera back, positive values closer. Geralt is centred by `[engine] camera_center`. |
+| `--near-view OFFSET` | `-1.0` | Start in the near view with this camera offset. Negative values move the camera back, positive values closer. |
 | `--no-near-view` | | Start in the game's standard camera instead. |
-| `--symmetric` | | 5.01: render the symmetric envelope and crop it (older projection) instead of per-eye frusta. |
+| `--symmetric` | | 5.01: render the symmetric envelope and crop it (older projection) instead of per-eye frusta. Per-eye frusta are not taken over yet, so this changes nothing here. |
 | `--world-detail` | `0.7` | `0.4`-`1.0`, lower = less CPU per eye. Affects 4.04 only. |
 | `--diagnostics` | off | Turn on the mod log and diagnostics. They cost frame rate; use them only when you need logs. |
 | `--reset-settings` | | 4.04: apply the VR graphics template to `dx12user.settings` again. |
@@ -162,30 +241,13 @@ What it writes is listed in [Settings written by configure](#settings-written-by
 
 ### launch-options
 
-Prints the Steam launch options for the active OpenXR runtime. Paste the line into
-*Steam > The Witcher 3 > Properties > General > Launch Options*. With WiVRn installed as a
-system-wide Flatpak it prints:
+Prints the launch settings for the active OpenXR runtime. `--runtime wivrn|steamvr` picks a runtime
+instead of the active one. What to do with the output is described in
+[Launcher setup](#launcher-setup).
 
-```text
-PRESSURE_VESSEL_IMPORT_OPENXR_1_RUNTIMES=1 PRESSURE_VESSEL_FILESYSTEMS_RW=/var/lib/flatpak/app/io.github.wivrn.wivrn %command% --launcher-skip
-```
-
-- The two `PRESSURE_VESSEL_*` variables let the game, inside Steam's runtime container, reach the
-  OpenXR runtime on the host. `PRESSURE_VESSEL_FILESYSTEMS_RW` is only added for a Flatpak WiVRn;
-  for a per-user Flatpak install it points to `~/.local/share/flatpak/app/io.github.wivrn.wivrn`.
-- `--launcher-skip` makes the REDprelauncher start the DirectX 12 game directly.
-- If your runtime shows its own launch string (for example the WiVRn dashboard), prefer that, and
-  keep `%command% --launcher-skip`.
-- `WINEDLLOVERRIDES="dxgi=n,b"` and `PROTON_ENABLE_NVAPI=1` can be added. Proton Hotfix already
-  sets both for this game on NVIDIA systems; on other Proton versions they make sure the mod's
-  `dxgi.dll` loads and NVAPI is available for DLSS.
-
-For a Heroic (GOG) install there is no launch-option line. The command lists the environment
-variables to add under *Heroic > The Witcher 3 > Settings > Advanced > Environment Variables*
-instead (at least `WINEDLLOVERRIDES` = `dxgi=n,b`) and shows which of them are already set. The
-tool does not change Heroic's settings itself. Heroic reads the game's Wine prefix from its game
-settings; with Proton the tool uses its `pfx/` folder. Turn off cloud saves for the game in Heroic
-while testing.
+- Steam: the launch-option line.
+- Heroic: the environment variables and the game argument, and for Flatpak Heroic the
+  `flatpak override` command, each marked when it is already set.
 
 ### wivrn-shortcut
 
@@ -196,7 +258,7 @@ python3 linux/w3vr-linux.py wivrn-shortcut [--remove] [--autostart 0|1]
 - Adds a desktop entry (`$XDG_DATA_HOME/applications/witcher3-vr-wivrn.desktop`, category
   `X-WiVRn-VR`) so *The Witcher 3 VR* shows in WiVRn's in-headset app list while no VR app is
   running. It starts the game through Steam (`flatpak run com.valvesoftware.Steam` for Flatpak
-  Steam). `--remove` deletes the entry.
+  Steam), so it is not available for Heroic installs. `--remove` deletes the entry.
 - `--autostart 1` also sets WiVRn's `application` option, so the game starts whenever the headset
   connects. `--autostart 0` removes it. Restart the WiVRn server to apply.
 
@@ -217,7 +279,11 @@ python3 linux/w3vr-linux.py uninstall [--restore-settings]
 - Removes the HUD editor line from `dx12filelist.txt` (4.04) and renames `witcher3vr.ini` to
   `witcher3vr.ini.uninstalled`. The HUD editor key bindings stay in `input.settings`.
 - `--restore-settings` restores `dx12user.settings` from `dx12user.settings.w3vr-original.bak`.
-- Saves are not touched. Clear the launch options in Steam afterwards.
+- Saves are not touched. Remove the launch settings afterwards:
+  - Steam: clear the launch options.
+  - Heroic: remove the environment variables and the game argument, and the `flatpak override`
+    paths if you added them (`flatpak override --user --reset com.heroicgameslauncher.hgl` removes
+    all your overrides for Heroic).
 
 Deleting `bin/x64_dx12/dxgi.dll` alone also switches the mod off: Proton loads the native
 `dxgi.dll` from the game folder whenever it exists.
@@ -232,7 +298,7 @@ Deleting `bin/x64_dx12/dxgi.dll` alone also switches the mod off: Proton loads t
 | `[openxr] mode3_aer_presentation` | `0` | Strict Stereo (`1` with `--mode aer`) |
 | `[openxr] resolution_auto`, `render_width`, `render_height` | `0`, from `--res` | |
 | `[openxr] native_stereo` | `0` on 5.01, `1` on 4.04 | 5.01 uses `remaster_asymmetric_ndc` instead |
-| `[engine] remaster_asymmetric_ndc` | `1` (5.01) | Per-eye projection; `0` with `--symmetric` |
+| `[engine] remaster_asymmetric_ndc` | `1` (5.01) | Per-eye projection; `0` with `--symmetric` (not taken over yet, ignored) |
 | `[openxr] world_detail_range` | `0.700` | `--world-detail` |
 | `[openxr] hud_size` | `0.500` | `--hud-size` |
 | `[openxr] hud_stereo_shift_px` | `-72` | `round(-36 / hud_size)`: keeps the HUD plane at about 1 m |
@@ -293,6 +359,14 @@ start the game once and run `configure` again.
 - **DLSS under Proton.** The game skips its Streamline (DLSS) setup when it detects Wine. With
   `[engine] temporal_backend=dlss` the mod patches that check in memory at startup (exact 5.01
   build only; it changes nothing on Windows). `[engine] remaster_sl_wine_bypass=0` turns it off.
+- **Camera.** The 5.01 default exploration camera (*Modern*) re-frames while walking. With the game
+  pitch locked for VR only the camera translation remains, so the view seems to zoom in and out.
+  The *Close* preset (*Options > Gameplay > Exploration camera*), which `configure` selects, does
+  not do this.
+
+**Not taken over yet.** kaarele's project has these as well; in this repository the keys are
+ignored until they are taken over (see the note at the top):
+
 - **DLSS per eye.** In strict Stereo both eyes go through one DLSS state. The mod gives each eye
   its own Streamline viewport, and with it its own DLSS history and motion-vector camera history;
   otherwise DLSS would blend the two eyes. 5.01 has no TAAU and no AER mode.
@@ -302,10 +376,6 @@ start the game once and run `configure` again.
   the headset only uses a crop of it (about 1993x2089 of 2476x2594), so about a third of the
   rendered pixels are discarded and the image is less sharp. `configure --symmetric` selects the
   older way.
-- **Camera.** The 5.01 default exploration camera (*Modern*) re-frames while walking. With the game
-  pitch locked for VR only the camera translation remains, so the view seems to zoom in and out.
-  The *Close* preset (*Options > Gameplay > Exploration camera*), which `configure` selects, does
-  not do this.
 - **HUD.** A `hud_size` below 1 is drawn with filtering and shrinks toward the centre of the
   visible image; the controller-locked HUD is levelled (heading only). Menus and loading screens
   are centred on the visible image too. INI switches: `hud_filtered_sampling`, `hud_anchor_level`,
@@ -341,12 +411,13 @@ The tool is the supported way. To do the same by hand, with the game closed:
 4. Set the `dx12user.settings` keys from the same section.
 5. Add the HUD editor bindings to `input.settings`. `HUD_EDITOR_BINDINGS` and `HUD_CONTEXTS` in
    `linux/w3vr-linux.py` (and the launcher's `launcher/config.cpp`) list the exact lines.
-6. Set the launch options as shown under [launch-options](#launch-options).
+6. Set up your launcher as shown under [Launcher setup](#launcher-setup).
 
 ## Patch 4.04 (next-gen branch)
 
 The tool also recognises Patch 4.04 and applies the 4.04 preset from the original mod. This
-project develops and tests 5.01; 4.04 is not tested with this repository's DLL.
+project develops and tests 5.01; 4.04 is not tested with this repository's DLL on Linux. The steps
+below are for Steam.
 
 - **Saves:** saves from Remastered 5.x cannot be loaded in 4.04, and 4.04's single quicksave slot
   and rotating autosaves delete 5.x quicksaves and autosaves in the same folder. Back up first.
@@ -366,7 +437,10 @@ project develops and tests 5.01; 4.04 is not tested with this repository's DLL.
 
 **The game does not enter VR.**
 - Connect the headset to WiVRn before you start the game, then check `status` for the runtime.
-- Check the launch options (run `launch-options` again).
+- Check the launch settings (run `launch-options` again):
+  - Steam: the launch options.
+  - Heroic: the environment variables and, with Flatpak Heroic, the sandbox override. Restart
+    Heroic after changing the override.
 - Make sure `[test] openxr_loader` in `witcher3vr.ini` is empty (`configure` clears it).
 
 **The mod does nothing, or `status` reports an `UNKNOWN build`.** The game was probably updated.
@@ -402,7 +476,7 @@ under Proton. Quit and load the save manually.
 **Logs.**
 - With `configure --diagnostics` (`[debug] logging_enabled=1` and `runtime_diagnostics=1`) the mod
   writes `bin/x64_dx12/witcher3vr.log`.
-- `PROTON_LOG=1` in the launch options writes `~/steam-292030.log`.
+- Steam: `PROTON_LOG=1` in the launch options writes `~/steam-292030.log`.
 - A successful start logs `OpenXR xrCreateSession(D3D12) result=XR_SUCCESS` and
   `OpenXR session state changed=5` (focused).
 - Developers: `linux/tools/camtrace.py witcher3vr.log` summarises the camera trace written with

@@ -622,3 +622,17 @@ were made on Linux/Proton with NVIDIA unless stated otherwise; our own results f
   legacy_only 0, shadow_only > 0 (extra hits, as expected); increment 32, no overflows,
   collisions or long waits. Smoke test with diagnostics passed; eye images correct.
   4.04 not checked yet.
+
+## 2026-10-24: first headset run on Linux
+
+- Setup: GOG 5.01 in Heroic 2.22 (Flatpak), GE-Proton 11, WiVRn 26.9 (per-user Flatpak) with a
+  Pico 4 over Wi-Fi, laptop with an AMD integrated GPU (Radeon 890M). Stereo, FXAA, 1280x1024 per
+  eye, diagnostics on. DLL built on Linux with clang-cl from this repository.
+- Heroic's Flatpak sandbox needed a `flatpak override` for the active-runtime file, the WiVRn
+  Flatpak and the WiVRn socket, plus `PRESSURE_VESSEL_IMPORT_OPENXR_1_RUNTIMES=1` in the game's
+  environment (setup in `LINUX.md`, "Heroic with WiVRn"). Proton's `wineopenxr` handled D3D12
+  without further setup in the prefix.
+- Result: `xrCreateSession(D3D12)` succeeded on the first try, session focused about 9 s after
+  start; full stereo 3D in the headset while walking around. WiVRn reports symmetric FOVs
+  (about +-52 degrees) and recommends 2592x2592 per eye for the Pico 4. The frame rate on the
+  integrated GPU was too low to play smoothly, but enough for compatibility tests.
