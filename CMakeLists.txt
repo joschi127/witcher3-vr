@@ -61,6 +61,9 @@ target_include_directories(witcher3vr_dxgi PRIVATE
     "${W3VR_DIRECTX_HEADERS_DIR}/include"
     "${W3VR_STREAMLINE_DIR}/external/ngx-sdk/include"
     "${W3VR_RENDERDOC_DIR}"
+    # Vendored AMD FidelityFX API declarations (MIT), see external/fidelityfx-api.
+    "${CMAKE_CURRENT_SOURCE_DIR}/external/fidelityfx-api/api/include"
+    "${CMAKE_CURRENT_SOURCE_DIR}/external/fidelityfx-api/upscalers/include"
 )
 target_link_libraries(witcher3vr_dxgi PRIVATE
     minhook
@@ -291,6 +294,15 @@ if(BUILD_TESTING)
     add_test(
         NAME prefix_hook
         COMMAND w3vr_prefix_hook_tests
+    )
+
+    add_executable(w3vr_call_site_hook_tests
+        tests/call_site_hook_tests.cpp
+    )
+    target_include_directories(w3vr_call_site_hook_tests PRIVATE src)
+    add_test(
+        NAME call_site_hook
+        COMMAND w3vr_call_site_hook_tests
     )
 
     add_executable(w3vr_camera_light_yaw_tests
