@@ -162,6 +162,60 @@ simpler.
 - Record in `docs/remaster-port-status.md` which commits a run covered and which checks are still
   open, the same as for single changes.
 
+## Test state and backups
+
+Tests change the game folder and the game's documents folder (Windows:
+`Documents\The Witcher 3`; Proton/Wine: `drive_c/users/<user>/Documents/The Witcher 3` inside the
+prefix). The maintainer may also have a real playthrough in that folder. So every test that touches
+them follows the same routine, on Windows and on Linux:
+
+1. Ask the maintainer first (see "Porting rules").
+2. Back up before changing anything, into a dated folder under `local/` with a `sha256.txt`
+   (`sha256sum` / `Get-FileHash` of every file):
+   - game folder `bin/x64_dx12`: `dxgi.dll`, `witcher3vr-mod-reference/dxgi.dll`,
+     `witcher3vr.ini` (and test scripts or loaders you add) -> `local/game-backups/<purpose>_<date>/`;
+   - documents folder: the settings files (`dx12user.settings` and its `.bak` copies,
+     `input.settings`, `profile.settings`) -> `local/settings-swap/<purpose>_<date>/`;
+   - `gamesaves`, before tests that load, create or change saves -> `local/saves/<purpose>_<date>/`.
+     Put test saves in only for the test and restore the previous folder afterwards. Never delete or
+     overwrite saves of a real playthrough.
+3. After the test, copy everything back and check it against `sha256.txt`. The game rewrites
+   `dx12user.settings` when it starts and exits: re-read it before editing it. Once the game has
+   run, put back only the keys the test changed instead of the old file, because the game may
+   have refreshed the account token in `[Galaxy]` on exit; compare the other keys afterwards.
+   Move logs, captures and test scripts the run left in the game folder to `local/runs/<run>/`.
+4. Keep a list of backups (what, when, why, whether it can go) in `local/BACKUPS.md`.
+
+Name runs `<date>_<id><number>_<description>` and keep each run's logs and captures in
+`local/runs/<run>/` with a short `README.txt` (setup, INI changes, result). `scripts/smoke-test.ps1`
+restores the INI it changes; the routine above covers everything else. `linux/w3vr-smoke.py` runs
+the routine itself for the game folder and the saves (backups in the run folder, restore checked
+against sha256, changed saves moved into the run folder) and only compares `dx12user.settings`.
+
+Pin the game to a supported build on development and test machines and turn off automatic updates:
+GOG Galaxy auto-update off (and roll back to the previous version where needed), Heroic "Keep game
+at specific version" (for example 5.01), Steam the matching branch and "Only update this game when I
+launch it". The build guard only knows the builds in `src/game_build.h`; after a silent update the
+mod stays inactive, which looks like a mod bug, and test results are only comparable with the same
+build on every machine. Install a new patch deliberately, together with checking or adding its
+addresses in `src/engine_addresses.h`.
+
+Turn off the game's cross-progression on development and test machines: `[Gameplay]
+CrossProgression=false` in `dx12user.settings` (also in the game's gameplay options). Check it before
+every game start, because the game rewrites the file (`linux/w3vr-smoke.py` refuses to start
+otherwise). The same goes for settings copies that are swapped into the documents folder, for
+example a 4.04 copy on a machine with both versions: the file itself, its `.bak` and the launcher's
+`.w3vr.bak` and `.w3vr-original.bak` (*Restore Original Settings* copies the latter back).
+Cross-progression syncs saves through the GOG/CD PROJEKT RED account, independently of the cloud
+sync of GOG Galaxy, Heroic or Steam: test saves (including autosaves of scripted runs) would
+otherwise show up on other machines as the newest save, also in a real playthrough. With 5.x saves
+in the cloud, 4.04 also lists them, and "Continue" then picks a save 4.04 cannot load. Move saves
+between machines only as files, with the backup routine.
+
+`dx12user.settings` contains a GOG account refresh token (`[Galaxy] tokenRefA`): never commit it and
+never sync it automatically. GOG cloud saves (Galaxy, or Heroic on Linux) stay off for
+test installs, so that test saves cannot reach a real playthrough through the cloud.
+
 ## Launcher behaviour worth knowing
 
 "Configure Settings for VR" (`ConfigureGameSettingsForVr`, `launcher/config.cpp`) replaces
