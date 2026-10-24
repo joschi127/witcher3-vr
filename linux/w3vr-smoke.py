@@ -279,6 +279,13 @@ def one_run(g, args, run_dir):
         failures.append('game did not exit within %d s (killed)' % args.timeout)
     if lines and not any('Test mode script loaded' in l for l in lines):
         failures.append('test mode script not loaded')
+    # The game must have reached gameplay: a run that never leaves the main menu (e.g. Continue picks a save
+    # the build cannot load) would otherwise pass. The engine's gameplay entry runs only in the world.
+    gameplay = next((l for l in lines if 'Engine gameplay entry present=' in l), None)
+    if gameplay:
+        notes.append('gameplay: reached at %s' % gameplay[1:13])
+    elif lines and not args.no_gameplay_check:
+        failures.append('game never reached gameplay (no "Engine gameplay entry" line; main menu or load failed?)')
     written = sum(1 for l in lines if 'Test mode capture written' in l)
     if written != expected_captures:
         failures.append('captures written %d, expected %d' % (written, expected_captures))
@@ -356,6 +363,8 @@ def main():
                         'e.g. 90000-216000 for linux-capture-remaster.txt')
     p.add_argument('--expect-self-exit', action='store_true',
                    help='fail when the script quit had to close the game (the script exits through the menu)')
+    p.add_argument('--no-gameplay-check', action='store_true',
+                   help='do not fail when the game never reaches gameplay (for scripts that stay in menus)')
     p.add_argument('--note', help='test conditions for the summary (e.g. "battery, parallel load")')
     p.add_argument('--keep-ini', action='store_true', help='keep the test INI after the run')
     p.add_argument('--no-keep-focus', action='store_true',

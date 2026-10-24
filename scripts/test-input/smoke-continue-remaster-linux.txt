@@ -36,18 +36,8 @@
 
 114000 tap BACK        # system menu, cursor on RESUME
 117000 capture
-124000 stick L 0 -1    # six flicks down: RESUME -> EXIT
+124000 stick L 0 1     # one flick up: RESUME wraps to EXIT (6 or 7 menu entries)
 124150 stick L 0 0
-124400 stick L 0 -1
-124550 stick L 0 0
-124800 stick L 0 -1
-124950 stick L 0 0
-125200 stick L 0 -1
-125350 stick L 0 0
-125600 stick L 0 -1
-125750 stick L 0 0
-126000 stick L 0 -1
-126150 stick L 0 0
 127000 tap A           # EXIT
 128500 tap A           # confirm
 

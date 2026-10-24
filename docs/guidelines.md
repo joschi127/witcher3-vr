@@ -110,6 +110,11 @@ game folder. Add Defender exclusions for the build directory and the installed `
   captures written, no hook failure, no timeout). Default script:
   `scripts/test-input/smoke-continue-remaster.txt` (5.01, ~90 s); 4.04 uses `smoke-continue.txt`.
   The run starts the real game, so it needs the maintainer's go-ahead like any game start.
+  Check in the captures that the run reached gameplay: on 4.04 with cloud saves from 5.x in the
+  load list, "Continue" picks a 5.x save that 4.04 cannot load, and `smoke-continue.txt` then
+  passes while the game stays in the main menu (use a script that picks the local save through
+  LOAD GAME). In unattended runs the game window is usually not in the foreground on Windows;
+  that is fine.
   `-IniSet 'openxr.enabled=1,openxr.hmd_roll_scale=0'` plus
   `-OpenXrRuntimeJson <SteamVR>\steamxr_win64.json` runs the full OpenXR/dual-render path
   without a headset through the SteamVR null driver (setup in `docs/remaster-port-status.md`,
@@ -126,7 +131,8 @@ game folder. Add Defender exclusions for the build directory and the installed `
   (sha256-checked; changed saves are moved into the run folder). `dx12user.settings` is only
   compared, never restored (the game may refresh the account token on exit). Default script:
   `scripts/test-input/smoke-continue-remaster-linux.txt` (5.01, ~130 s), checked for XR eye images
-  in gameplay and an exit through the menu. Same go-ahead rule as above.
+  in gameplay, the engine's gameplay entry (fails when the game never left the main menu) and an
+  exit through the menu. Same go-ahead rule as above.
 - In-game test mode (`[test]` in `witcher3vr.ini`, logic in `src/test_input_script.h`):
   `record_input=1` records the physical gamepad to `witcher3vr-input-recording.txt`,
   `input_script=<file>` replays a script (same format) through the XInput hook (4.04) or
