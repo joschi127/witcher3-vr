@@ -114,6 +114,23 @@ int main() {
             require(addresses::value(Build::Remaster501, static_cast<addresses::Value>(i)) != 0,
                 "every 5.01 value is known");
         }
+        {
+            // The 5.01 call bytes end at the return address and encode the factory.
+            const uint8_t* call = addresses::kRenderSceneFactoryCall501Bytes;
+            int32_t rel{};
+            std::memcpy(&rel, call + 1, sizeof(rel));
+            const auto return_rva = static_cast<int64_t>(addresses::value(
+                Build::Remaster501, addresses::Value::RenderSceneFactoryReturn));
+            require(call[0] == 0xE8 &&
+                    sizeof(addresses::kRenderSceneFactoryCall501Bytes) == 5 &&
+                    static_cast<uintptr_t>(return_rva + rel) ==
+                        addresses::rva(Build::Remaster501, Function::FrameDataFactory),
+                "5.01 RenderSceneSetup factory call reaches the frame factory");
+            require(addresses::rva(Build::NextGen404, Function::RenderFenceWait) == 0 &&
+                    addresses::value(Build::NextGen404,
+                        addresses::Value::RenderSceneFenceWaitReturn) == 0,
+                "pair enqueue after fence is 5.01 only");
+        }
         require(addresses::rva(Build::Unknown, Function::IsAnyMenu) == 0,
             "no engine addresses on unknown builds");
         require(addresses::signature(Build::NextGen404, Function::IsAnyMenu).size == 0,

@@ -664,3 +664,118 @@ were made on Linux/Proton with NVIDIA unless stated otherwise; our own results f
   forced as intended). Eye pairs from 53 s to 78 s; the one at 48 s comes right at the end of the
   load and has no pair, as before. The 57.5 s pair shows the same scene in both eyes with plausible
   parallax and correct colours. No failed, exception or device-removed lines in the log.
+
+## 2026-10-24: pair barrier run-ahead, taken over from kaarele/witcher3-remastered-vr
+
+From kaarele's port status log (state `e729bd9`, MIT), as in the 2026-10-23 sections. Parts that
+refer to features not yet taken over are marked; our own results follow.
+
+### Strict-Stereo pair barrier run-ahead (`[perf] pair_barrier_lag`)
+- Problem (null HMD, 5.01, Proton): after RenderSceneSetup queues both eyes of pair P, the game
+  (main) thread waits in `hook_engine_render_scene_setup` until P has rendered
+  (`wait_for_engine_pair_completion`). The next game tick therefore never overlaps rendering, and
+  the render thread idles in the engine's command-ring wait (0x141C69AE0, ~26% of its samples)
+  for a whole tick per pair.
+- `pair_barrier_lag=1` (5.01 only; other builds log it and keep 0) waits for the pair queued by
+  the previous tick instead, so tick P+1 runs while P renders: at most one pair of run-ahead.
+  The masks and floors of a pair are still settled by the same wait, one tick later; a pair is
+  never released on its first eye (that would drop its second completion, its captures and its
+  0x3 mask). A tick that queues no pair (menu, loading video, retry window) waits for the
+  pending pair; a pending pair from before a route reset (new capture generation) is dropped
+  without waiting, because it can no longer complete. Default 0: unchanged behaviour.
+- Audit of state that assumed one pair in flight:
+  - The right-eye scene descriptor copy was indexed by `present % 16`; with lag 1 every pair gets
+    its own slot of the 16 (a counter), since the next factory can run before the Present count
+    moves.
+  - Capture ring: a full ring drops the capture, it never overwrites a slot in use (fence and
+    `recording_pending` checks). With lag 1 the ring has 4 slots per eye instead of 3, because
+    the render thread no longer idles through the tick while the GPU still holds the oldest slot.
+    The census counts dropped captures (`ring_full`).
+  - Pair-frozen views, HMD pose snapshots, FOVs and frame tags travel with the frame data
+    (`g_engine_dual_frame_eyes`, pruned only 256 pairs back). The live HMD globals (`g_xr_views`,
+    `g_hmd_*`) are written and read on the game thread (pair factory, view rebuild); render-thread
+    hooks read the frame tag instead. kaarele's audit also covers his native-asymmetric,
+    shadow-cascade, temporal-matrix and world-marker camera rings, the world-marker hook and the
+    per-eye DLSS guards; those features are not in this fork yet.
+  - Pair pose lead: the pose was predicted 2 display periods after the last completed frame, which
+    assumes no run-ahead. Every pair now remembers the completed time its pose was located from,
+    and its first real publication measures how many periods passed (average over pairs). With
+    `pair_barrier_lag=1` and `pair_pose_lead_adaptive=1` the rounded average (1-6) replaces the 2
+    after 8 samples.
+- Census (VRS census log), one line per window: `PERF pair barrier lag= waits= waits_per_present=
+  ms_per_wait= ms_per_present= max_ms= long_waits= timeouts= drains= stale= masks= ring_slots=
+  ring_full= pose_lead= observed_lead= lead_samples=`. `ms_per_wait` is the game thread's wait per
+  pair (lag 0 expected about one pair's render time, lag 1 near 0 when the render thread keeps
+  up); `masks` (completion-mask backlog) must stay small; `timeouts` and `ring_full` should stay 0.
+  The pipeline flight recorder still times the wait as `EnginePairWait`.
+- kaarele's status: off by default; with lag 1 the game thread's wait per pair fell to near 0 with
+  no timeouts; CPU-limited headless runs gave about 15% more frames per second. With lag 1 the eye
+  rendered second showed moving characters one game tick ahead, fixed by
+  `pair_enqueue_after_fence` (next section); with the fix, lag 1 is used in his headset setup.
+
+### Same animation pose in both eyes with run-ahead (`[perf] pair_enqueue_after_fence`)
+- Symptom (run-ahead `pair_barrier_lag=1`): moving characters (Geralt running, NPCs walking) are
+  in different animation poses and positions per eye, while the camera and the static world stay
+  identical; the affected eye flips between the same tick and the next one, which shows as
+  stutter. (With kaarele's shadow reuse, not in this fork, the pose difference also turned into
+  dark/light patches.)
+- Cause: 5.01 sends skinning and relink updates (pose slot, localToWorld, bbox) through the batched
+  ParallelRenderCommands queue, not through the command ring: producers append (renderer vtable
+  +0x300), constructing any `CRenderCommand_RenderScene` or `CRenderCommand_Fence` publishes what
+  was appended (renderer vtable +0x2F8), and every frame build applies what is published at that
+  moment (`ParallelRenderCommands::FlushCommands` 0x01C1CA10, called by the frame builder, so once
+  per eye). RenderSceneSetup (0x0227D1F0) calls the frame factory (0x0227D97D), waits on the fence
+  that the previous tick's Fence command signals after that tick's primary eye (0x0227D9F4), then
+  commits the primary RenderScene and the next Fence command. The factory hook queued the duplicate
+  eye (rendered first) inside the factory call, before that wait. With lag 1 tick N+1 therefore
+  published its batch while pair N's second eye (the primary, left by default) was still queued, and
+  that eye applied it: tick N+1 poses and positions with tick N's camera.
+- Fix (`pair_enqueue_after_fence=1`, default): inside RenderSceneSetup the factory hook keeps the
+  duplicate and its reference in a per-thread slot instead of queuing it. A detour on the
+  CRenderFence wait (vtable +0x18, 0x01CABDE0) queues it as soon as the wait called from
+  RenderSceneSetup (return 0x0227D9F7) has returned, before the primary is committed. The duplicate
+  still renders first and the primary second, and both publishes of tick N+1 follow pair N's Fence
+  command, as with one eye. Barrier masks, pair/eye/generation tags, capture rings and DLSS slots
+  are unchanged; with lag 0 the order changes the same way (the wait returns almost at once there).
+- Checks: the wait's code (18 bytes, unique), the factory call and the fence wait call in
+  RenderSceneSetup (bytes ending at both return addresses), and per setup call that the renderer
+  already has a fence (+0x1D0) whose vtable wait is the hooked one. Otherwise the duplicate is queued
+  in the factory as before: other factory callers, the first setup call (it creates the fence and
+  does not wait), a mismatch. A duplicate still held when RenderSceneSetup returns is queued then,
+  after the primary, before any pair barrier. Each duplicate is queued and released exactly once.
+- `0` restores the old order. 5.01 only; other builds keep 0.
+- Census (VRS census log), one pair of lines per window:
+  `PERF pair enqueue after_fence= hooked= deferred= late= replaced= factory outside= other_caller=
+  no_fence= fence_class= unhooked=` (`deferred` should count one per pair, the others stay near 0)
+  and, from a probe on FlushCommands that sums the staged entries (count at +0x15C, 17 buckets of
+  12 bytes) before each flush, `PERF parallel flush first= first_entries= second= second_entries=
+  second_nonzero= second_max= second_eye= untagged= untagged_entries=`. The role comes from the frame
+  tag: the first flush of a pair id is the eye rendered first. Expected: `second_entries` about 0
+  with the fix; with `pair_enqueue_after_fence=0` and lag 1, tens to hundreds per pair at the second
+  eye while characters move. The probe reads the counts without the bucket locks.
+- kaarele's status: verified with the null OpenXR runtime (zero IPD, symmetric FOV, Geralt walking
+  and running past NPCs; the largest left/right difference on moving characters fell from about 110
+  to about 2-3) and confirmed in the headset.
+
+### This fork: results (2026-10-24)
+- AMD Radeon RX 7900 XTX, Windows, SteamVR null driver at 240 Hz, 1872x1572 per eye, FXAA. Build
+  and CTest 99/99 green (new address-table check: the RenderSceneSetup factory call bytes reach
+  FrameDataFactory).
+- Smoke run with `pair_barrier_lag=1`, diagnostics and census: PASSED, 14/14 captures, gameplay
+  reached, game closed itself; eye pairs correct. Census in gameplay: about one `deferred` per pair,
+  `late`, `replaced` and the factory reasons 0; `second_entries=0` (both eyes see the same tick);
+  `timeouts=0`, `ring_full=0`, `ring_slots=4`, `masks` 2-3.
+- Census benchmarks (about 70 s of gameplay): the game thread waited 6.8-7.3 ms per pair with lag 0
+  and about 0.001 ms with lag 1. Both runs held exactly 120 Presents/s (60 pairs/s): the windowed
+  desktop swapchain caps Present at the monitor rate, so this setup cannot show the throughput gain
+  kaarele measured. SteamVR application CPU time per frame is unchanged (10.2-10.3 ms in all
+  variants; run-ahead overlaps work, it does not remove it). With lag 0 the enqueue after fence is
+  also active: one `deferred` per pair, `second_entries=0`.
+- The measured pose lead in this setup is about 8 periods at 240 Hz (one pair takes about 33 ms);
+  the adaptive lead uses the maximum of 6. At 90 Hz in a headset it should be 2-3.
+- 4.04 (smoke with `pair_barrier_lag=1` requested, census): PASSED, gameplay reached; the log shows
+  `pair_barrier_lag=0 requested=1 build=next-gen-4.04` and `pair_enqueue_after_fence=0`, so 4.04
+  keeps the old order.
+- Not taken over: kaarele's pair rate limit (`[openxr] pair_rate_divisor`, measured by him as not
+  worth using) and the world-marker part of the audit (the world-marker hook is not in this fork).
+- Open: headset check (smoothness, latency, moving characters) with `pair_barrier_lag=1`.
