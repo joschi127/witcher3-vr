@@ -1785,8 +1785,7 @@ def build_parser():
                     help='game HUD frame scale (1.0 = vanilla; lower values pull panels toward the centre)')
     sp.add_argument('--hud-locked', type=int, default=1, choices=[0, 1], help='1 = HUD stays in front (F9 recentres)')
     sp.add_argument('--near-view', type=float, default=-1.0,
-                    help='start in Near view with this camera offset (negative = farther; '
-                         'Geralt is centred by [engine] camera_center)')
+                    help='start in Near view with this camera offset (negative = farther)')
     sp.add_argument('--no-near-view', dest='near_view', action='store_const', const=None, help='start in Standard view')
     sp.add_argument('--symmetric', action='store_true',
                     help='5.01: render the symmetric envelope and crop it (older projection) '

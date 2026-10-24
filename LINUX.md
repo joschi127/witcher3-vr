@@ -166,6 +166,31 @@ To play without the mod, remove `WINEDLLOVERRIDES` again or run `uninstall`.
 
 ## Commands
 
+### setup and remove
+
+```bash
+python3 linux/w3vr-linux.py setup [--payload DIR] [--force]
+python3 linux/w3vr-linux.py remove
+```
+
+One-step install and removal for a release package that ships the tool. kaarele's releases start
+them as *Install (Linux)* and *Uninstall (Linux)*. This repository's releases do not include the
+Linux tool yet; from a checkout use `install`, `configure` and `launch-options` instead.
+
+- `setup` installs from an extracted release folder (`--payload`, default: two folders above the
+  tool), which mirrors the game folder and must contain `bin/x64_dx12/dxgi.dll`. It refuses
+  builds other than 5.01 unless `--force` is given, backs up the saves, copies the files (files
+  it overwrites are backed up first), keeps the render size of an existing `witcher3vr.ini` and
+  runs `configure`.
+- It then sets the launch settings:
+  - Steam: writes the launch options into Steam's `localconfig.vdf` once Steam is closed (it asks
+    you to close it), with a backup; if you skip that, it prints the line and copies it to the
+    clipboard.
+  - Heroic: prints the settings as `launch-options` does; Heroic's settings are not changed.
+- `remove` undoes `setup`: it removes the Steam launch options it added, puts back the
+  `dx12user.settings` keys it changed and runs `uninstall`. Saves are never touched; the save
+  backups stay in `~/w3vr-backups/`.
+
 ### status
 
 Shows what the tool found, without changing anything:
