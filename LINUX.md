@@ -11,10 +11,11 @@ version of these steps.
 
 > **State in this repository.** This guide and the Linux tools come from
 > [kaarele/witcher3-remastered-vr](https://github.com/kaarele/witcher3-remastered-vr) (tested there with an NVIDIA GPU, Proton and WiVRn on a
-> Quest 3) and are being taken over feature by feature. Until the per-eye upscaler history is taken
-> over, Remastered 5.01 runs with FXAA here: `configure` uses `--aa none` on 5.01 and refuses
-> `--aa dlss` and `--aa fsr`, which would otherwise blend both eyes into one history. Keys that
-> `configure` writes for features not taken over yet are ignored by the mod. The tool installs the
+> Quest 3) and are being taken over feature by feature. On Remastered 5.01, `configure` offers
+> FXAA (`--aa none`, the default) or the game's FSR with one FSR history per eye (`--aa fsr`, the
+> Windows launcher's *FSR per eye (5.x)* switch). Per-eye DLSS is taken over but not verified
+> here yet (no NVIDIA test), so `--aa dlss` is refused on 5.01. Keys that `configure` writes for
+> features not taken over yet are ignored by the mod. The tool installs the
 > state-bridge variant of this repository's releases (`variants/remastered` or `variants/nextgen`),
 > as the Windows launcher does, and `install --sha256` also accepts this repository's release
 > checksum files (`sha256sum` format).
@@ -46,7 +47,8 @@ line in Steam, environment variables and a sandbox permission in Heroic (see
   [joschi127/witcher3-vr releases](https://github.com/joschi127/witcher3-vr/releases). It supplies
   `openxr_loader.dll` and the base script mods. Check it against its SHA-256 file with
   `sha256sum -c <name>-SHA256.txt`.
-- **For DLSS:** an NVIDIA RTX GPU. Other GPUs use FXAA (tested on an AMD integrated GPU).
+- **Anti-aliasing on 5.01:** FXAA or FSR per eye, on any GPU (FXAA tested on an AMD integrated
+  GPU). DLSS (4.04) needs an NVIDIA RTX GPU.
 - Mouse and keyboard, or a gamepad. VR motion controllers are not supported.
 
 ## Before you start
@@ -106,13 +108,13 @@ of each command; [Commands](#commands) describes them.
 
 Both launchers run the game inside Steam's runtime container (Heroic through umu). Proton's
 `wineopenxr` passes the game's OpenXR calls (D3D12) to the host runtime, so the container must
-import the host's runtime (`PRESSURE_VESSEL_IMPORT_OPENXR_1_RUNTIMES=1`). Nothing is needed inside the Wine
-prefix: Proton registers `wineopenxr` as the prefix's OpenXR runtime by itself.
+import the host's runtime (`PRESSURE_VESSEL_IMPORT_OPENXR_1_RUNTIMES=1`). Nothing is needed inside
+the Wine prefix: Proton registers `wineopenxr` as the prefix's OpenXR runtime by itself.
 
 ### Steam
 
-`launch-options` prints the line for
-*Steam > The Witcher 3 > Properties > General > Launch Options*. With WiVRn installed as a system-wide Flatpak:
+`launch-options` prints the line for *Steam > The Witcher 3 > Properties > General > Launch
+Options*. With WiVRn installed as a system-wide Flatpak:
 
 ```text
 PRESSURE_VESSEL_IMPORT_OPENXR_1_RUNTIMES=1 PRESSURE_VESSEL_FILESYSTEMS_RW=/var/lib/flatpak/app/io.github.wivrn.wivrn %command% --launcher-skip
@@ -247,7 +249,7 @@ existing `witcher3vr.ini` is updated and keeps your other keys; otherwise the to
 | Option | Default | What it does |
 |---|---|---|
 | `--mode stereo\|mono\|aer` | `stereo` | `stereo` = strict Stereo, both eyes from one game tick. `mono` = Mono. `aer` = AER+AFW (4.04 only; faster, but can shimmer). |
-| `--aa dlss\|none\|taau\|fsr` | `none` on 5.01; on 4.04 `dlss` on NVIDIA, otherwise `taau` | `none` = FXAA on 5.01. `dlss` = the game's DLSS with a separate history per eye. `taau` exists on 4.04 only. On 5.01 `dlss` and `fsr` are refused until the per-eye history is taken over. |
+| `--aa none\|fsr\|dlss\|taau` | `none` on 5.01; on 4.04 `dlss` on NVIDIA, otherwise `taau` | 5.01: `none` = FXAA; `fsr` = the game's FSR with one FSR history per eye (`AAMode=5`, `remaster_fsr_per_eye=1`; FSR quality Quality unless you picked one), as the launcher's *FSR per eye (5.x)* switch; `dlss` is refused until per-eye DLSS is verified. 4.04: `dlss` = the game's DLSS with a separate history per eye, `taau` = TAAU. |
 | `--dlss-quality 0-4` | `1` | `1` Quality, `2` Balanced, `3` Performance, `4` Ultra Performance, `0` DLAA. On 5.01 the in-game DLSS setting also changes it while playing. |
 | `--res WIDTHxHEIGHT\|runtime` | `2476x2594` | Per-eye render size. The default is WiVRn's recommended size for a Quest 3; for another headset pass your runtime's recommended per-eye size (WiVRn with a Pico 4: `2592x2592`), or `runtime` to use the runtime's recommendation at every start. |
 | `--hud-size` | `0.5` | Size of the VR HUD plane in Stereo (`0.5` = half size). |
@@ -331,6 +333,7 @@ Deleting `bin/x64_dx12/dxgi.dll` alone also switches the mod off: Proton loads t
 | `[openxr] hud_controller_locked` | `1` | `--hud-locked` |
 | `[engine] dual_render_probe`, `dual_render_start` | `1` | `0` in Mono |
 | `[engine] temporal_backend` | `dlss` or `none` | From `--aa` |
+| `[engine] remaster_fsr_per_eye` | `1` with `--aa fsr`, else `0` (5.01) | One FSR history per eye |
 | `[engine] dlss_dlaa` | `0` | `1` only on 4.04 with `--dlss-quality 0` |
 | `[engine] menu_state_probe` | `1` | |
 | `[engine] camera_mode`, `close_camera_offset` | `1`, `-1.000` | `--near-view`; `--no-near-view` writes `camera_mode=0` |
@@ -345,7 +348,8 @@ Deleting `bin/x64_dx12/dxgi.dll` alone also switches the mod off: Proton loads t
 | Key | Value |
 |---|---|
 | `[Viewport] Resolution` | `"WIDTHxHEIGHT"` from `--res` |
-| `[PostProcess] AAMode` | `6` = DLSS, `1` = FXAA on 5.01 (`0` = none, `3` = TAAU on 4.04) |
+| `[PostProcess] AAMode` | 5.01: `1` = FXAA, `5` = FSR. 4.04: `6` = DLSS, `3` = TAAU, `0` = none |
+| `[PostProcess] FSR2Quality` | 5.01 with `--aa fsr`: `2` (Quality) when it is `0` (automatic) or missing; your own choice is kept |
 | `[PostProcess] DLSSQuality` | 5.01: `1`-`4`, `5` = DLAA. 4.04: `1`-`4` (DLAA through `dlss_dlaa`) |
 | `[Rendering] AllowDLSS` | `true` with DLSS |
 | The Windows launcher's 5.x list (`REMASTER_VR_SETTINGS`, same as `kSettings` in `launcher/config.cpp`) | 5.01: ray and path tracing, ray reconstruction, frame generation, low-latency modes, VSync, FPS limit, HDR and editor preset detection off; light shafts, motion blur, blur, depth of field, lens effects, vignette, chromatic aberration, screen-space reflections and HairWorks off |
@@ -384,6 +388,13 @@ start the game once and run `configure` again.
 - **DLSS under Proton.** The game skips its Streamline (DLSS) setup when it detects Wine. With
   `[engine] temporal_backend=dlss` the mod patches that check in memory at startup (exact 5.01
   build only; it changes nothing on Windows). `[engine] remaster_sl_wine_bypass=0` turns it off.
+- **FSR per eye.** In strict Stereo both eyes would share one FSR history and blend into each
+  other. With `[engine] remaster_fsr_per_eye=1` (written by `configure --aa fsr`) the mod gives each
+  eye its own FSR context, through the game's FidelityFX loader or the built-in FSR 2. It only acts
+  while the game uses FSR (`AAMode=5`).
+- **DLSS per eye** (taken over, not verified here yet). Each eye gets its own Streamline viewport,
+  and with it its own DLSS history and motion-vector camera history. `configure` refuses
+  `--aa dlss` on 5.01 until it has been tested on an NVIDIA GPU. 5.01 has no TAAU and no AER mode.
 - **Camera.** The 5.01 default exploration camera (*Modern*) re-frames while walking. With the game
   pitch locked for VR only the camera translation remains, so the view seems to zoom in and out.
   The *Close* preset (*Options > Gameplay > Exploration camera*), which `configure` selects, does
@@ -392,9 +403,6 @@ start the game once and run `configure` again.
 **Not taken over yet.** kaarele's project has these as well; in this repository the keys are
 ignored until they are taken over (see the note at the top):
 
-- **DLSS per eye.** In strict Stereo both eyes go through one DLSS state. The mod gives each eye
-  its own Streamline viewport, and with it its own DLSS history and motion-vector camera history;
-  otherwise DLSS would blend the two eyes. 5.01 has no TAAU and no AER mode.
 - **Projection.** With `[engine] remaster_asymmetric_ndc=1` each eye is rendered with its own
   off-centre field of view (through a projection offset that the 5.01 engine applies itself), and
   the whole image goes to the headset. Without it, 5.01 renders a wider centred image per eye and

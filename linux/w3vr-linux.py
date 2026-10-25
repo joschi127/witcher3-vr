@@ -862,11 +862,11 @@ def cmd_configure(args):
                 'use --force to apply the 4.04 preset anyway.' % build_description)
         print('warning: unknown witcher3.exe build; using the 4.04 preset')
     fix_state_bridge(g, build, args.dry_run)
-    # joschi127/witcher3-vr: the per-eye DLSS and FSR histories on 5.01 are not taken over yet. Without them both
-    # eyes share one upscaler history (ghosting), so 5.01 uses FXAA until they are.
-    if remaster and args.aa in ('dlss', 'fsr'):
-        die('--aa %s on Remastered 5.01 needs the per-eye upscaler history, which this build does not have yet; '
-            'use --aa none (FXAA)' % args.aa)
+    # joschi127/witcher3-vr: per-eye DLSS on 5.01 is not verified in this repository yet (no NVIDIA test), and the
+    # Windows launcher has no switch for it either, so 5.01 offers FXAA or the game's FSR with one history per eye.
+    if remaster and args.aa == 'dlss':
+        die('--aa dlss on Remastered 5.01 is not verified in this repository yet; use --aa none (FXAA) or '
+            '--aa fsr (FSR per eye)')
     aa = args.aa or ('none' if remaster else ('dlss' if nvidia_gpu() else 'taau'))
     mode_name = '%s_%s' % (args.mode, {'none': 'noaa'}.get(aa, aa))
     modes = MODES_501 if remaster else MODES
@@ -904,8 +904,8 @@ def cmd_configure(args):
     ini.set('openxr', 'native_stereo', '0' if remaster else '1')
     if remaster:
         ini.set('engine', 'remaster_asymmetric_ndc', '0' if args.symmetric else '1')
-        # Per-eye FSR only acts while the game uses FSR, so it is safe to leave on with DLSS or FXAA.
-        ini.set('engine', 'remaster_fsr_per_eye', '1')
+        # As the Windows launcher's "FSR per eye (5.x)" switch: on with the game's FSR, off otherwise.
+        ini.set('engine', 'remaster_fsr_per_eye', '1' if aa == 'fsr' else '0')
         # Tested 0.1.3 defaults; a value the user already set is kept.
         for section, key, value in REMASTER_DEFAULTS:
             if ini.get(section, key) in (None, ''):
@@ -974,6 +974,11 @@ def cmd_configure(args):
     doc.set('W3VRSettings', 'HideStaticHudOutsideCombat', 'false')
     doc.set('Viewport', 'Resolution', '"%dx%d"' % (w, h))
     doc.set('PostProcess', 'AAMode', str(aa_mode))
+    if remaster and aa == 'fsr':
+        # Keep the player's FSR quality; 0 (automatic) or missing becomes Quality (2), as the launcher does.
+        fsr_quality = (doc.get('PostProcess', 'FSR2Quality') or '').strip()
+        if not fsr_quality.lstrip('-').isdigit() or int(fsr_quality) <= 0:
+            doc.set('PostProcess', 'FSR2Quality', '2')
     if remaster:
         # 5.01 DLSSQuality: 1 Quality, 2 Balanced, 3 Performance, 4 Ultra Performance, 5 DLAA (0 = Auto).
         doc.set('PostProcess', 'DLSSQuality', str(5 if quality == 0 else max(1, min(4, quality))))
@@ -1000,7 +1005,7 @@ def cmd_configure(args):
     doc.set('Hidden', 'uiHorizontalFrameScale', '%g' % args.hud_frame)
     doc.set('Hidden', 'uiVerticalFrameScale', '%g' % args.hud_frame)
     if aa == 'fsr':
-        print('dx12user.settings (AAMode=%d, FSR; pick its quality in the game\'s graphics menu):' % aa_mode)
+        print('dx12user.settings (AAMode=%d, FSR per eye; change its quality in the game\'s graphics menu):' % aa_mode)
     else:
         print('dx12user.settings (AAMode=%d, DLSS %s):' % (aa_mode, DLSS_QUALITY_NAMES.get(quality, quality)))
     write_with_backup(settings_path, doc.text().encode('ascii'), args.dry_run)
@@ -1697,6 +1702,9 @@ def cmd_setup(args):
         current = Ini.load(settings_path)
         before = current.snapshot(SETTINGS_SKIP)
         conf = ['configure'] + (['--res', keep_res] if keep_res else []) + (['--force'] if args.force else [])
+        if keep_res and build == '501' and current.get('PostProcess', 'AAMode') == '5':
+            # Updating: keep FSR per eye if the player turned it on.
+            conf += ['--aa', 'fsr']
         if keep_res and current.get('PostProcess', 'AAMode') == '6':
             # Updating: keep the DLSS mode the player picked in the game (5 = DLAA, 0 = Auto).
             q = {'5': '0', '1': '1', '2': '2', '3': '3', '4': '4'}.get(current.get('PostProcess', 'DLSSQuality'))
@@ -1770,8 +1778,8 @@ def build_parser():
     sp.add_argument('--mode', choices=['stereo', 'aer', 'mono'], default='stereo',
                     help='stereo = both eyes from one game tick (default, cleanest); aer = AER+AFW (faster, can shimmer)')
     sp.add_argument('--aa', choices=['dlss', 'taau', 'fsr', 'none'],
-                    help='default: dlss on NVIDIA, otherwise taau (4.04) or none = FXAA (5.01, which has no TAAU); '
-                         'fsr = the game\'s FSR with one FSR history per eye (5.01, experimental)')
+                    help='5.01: none = FXAA (default) or fsr = the game\'s FSR with one FSR history per eye (the '
+                         'launcher\'s "FSR per eye (5.x)" switch); 4.04: dlss (default on NVIDIA) or taau')
     sp.add_argument('--dlss-quality', type=int, default=1, choices=range(0, 5),
                     help='0 DLAA, 1 Quality (default), 2 Balanced, 3 Performance, 4 Ultra Performance')
     sp.add_argument('--res', default='2476x2594',

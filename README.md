@@ -175,8 +175,8 @@ Back up any files you have edited manually before installing a new release.
 On Linux the Windows launcher is replaced by `linux/w3vr-linux.py` (Python 3, standard library only),
 and `dxgi.dll` is built with clang-cl ([linux/BUILD-LINUX.md](linux/BUILD-LINUX.md)). Both come from
 [kaarele/witcher3-remastered-vr](https://github.com/kaarele/witcher3-remastered-vr) and are being taken
-over feature by feature; until the per-eye upscaler history is taken over, Remastered 5.01 runs with
-FXAA here. Steam and Heroic (GOG) are supported. Short version, from a checkout of this repository
+over feature by feature; on Remastered 5.01 `configure` offers FXAA or FSR per eye (`--aa fsr`).
+Steam and Heroic (GOG) are supported. Short version, from a checkout of this repository
 with the headset connected to the OpenXR runtime (WiVRn is tested):
 
 ```bash
