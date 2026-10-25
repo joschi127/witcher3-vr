@@ -69,7 +69,8 @@ Procedure when the maintainer asks for a release:
    maintainer's go-ahead for game-directory changes.
 5. With the maintainer's go-ahead: tag the commit and create the GitHub release with
    `gh release create <name> --target <commit> --title ... --notes-file docs/releases/<name>.md`
-   plus the zip and SHA256 file, marked as pre-release.
+   plus the zip and SHA256 file. `.1` and `.2` were pre-releases; since `.3` releases are regular
+   (shown as "Latest" on GitHub) unless the maintainer asks for a pre-release.
 
 When the original project publishes a new release, update `-UpstreamTag`, `-UpstreamAsset` and
 `-UpstreamSha256` defaults in the script (asset digest from `gh release view <tag> -R
