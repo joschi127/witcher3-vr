@@ -985,3 +985,86 @@ RTX 3080 and a Meta Quest 3 through WiVRn unless stated otherwise; our own resul
   null driver and the defaults passed (gameplay reached, game closed itself).
 - Open: per-eye DLSS on NVIDIA (kaarele's test only); a possible sweet spot for this hardware is
   FSR per eye with VD Ultra and a slightly reduced FOV, not measured yet.
+
+## 2026-10-25: characters outside the game camera keep animating, taken over from kaarele/witcher3-remastered-vr
+
+From kaarele's port status log (state `e729bd9`, MIT); our own results follow.
+
+### People outside the game camera's view keep animating (`animated_component_visible`, 5.01)
+- Symptom (5.01, in a town): many people stood in a T-pose or frozen (one man's axe moved,
+  his arms and body did not); they animated once Geralt got close. Raising the in-game background
+  characters setting made it less noticeable.
+- Cause: a 4.04 hook that was never ported. Every frame the animated-component visibility update
+  (CAnimatedComponent vtable slot 67; 4.04 0x015E1750, 5.01 0x02437970, shared by the mimic,
+  moving-agent and background-root components) tests the component's world bounds against the
+  game camera's frustum and stores the result at +0xF74. While that byte is set, the update skips
+  the skinned attachments: the body keeps its last pose (the bind pose if it was never updated),
+  and only plain child transforms such as a held weapon follow. In VR the head looks around
+  freely, so the headset shows people that are outside the game camera's frustum. On 4.04
+  `animated_component_visible=1` (default) hooks the frustum test (0x0031E050) and, only for the
+  call from that update (return 0x015E186C) and only while the HMD view is active, reports the box
+  as visible. On 5.01 the installer returned early (4.04-only addresses).
+- 5.01: the frustum test is 0x0099B2B0, an AVX rewrite over a structure-of-arrays frustum with
+  the same arguments and result (al = 1 when the box is fully outside a plane). Its only caller
+  is the same update (call 0x02437A8B, return 0x02437A90, followed by the store to +0xF74). MinHook
+  cannot patch the test (VEX instruction at byte 4) and its first 13 bytes are too short for
+  prefix_hook (RIP-relative instruction at byte 13), so the mod redirects that one call instead:
+  its rel32 now points at a 14-byte absolute jump to the existing detour, allocated within reach
+  of the call (`src/call_site_hook.h`). The test itself stays unpatched and is called as the
+  original. Checks before the patch: the test's 16 leading bytes, the call bytes (their rel32
+  encodes the test), the store after the call, and that the decoded destination is the verified
+  test. Any mismatch leaves the game unchanged and logs why.
+- Same gates as 4.04: `hmd_freelook`, a valid HMD pose, no menu (needs `menu_state_probe=1`), not
+  in cinema mode, and the HMD camera route active within the last 8 Presents.
+- Log: `Animated component visibility hooked build=remaster-5.01 call_site=1 ...` at startup and
+  `Animated component visibility forced full count=1` the first time a component is forced.
+  Census (VRS census log): `PERF anim visibility call_site= tests= culled= forced=` per window
+  (`culled` = tests that found the component outside the game camera's frustum, `forced` = those
+  reported visible).
+- Not covered (both builds): CAsyncAnimTickManager (5.01 tick 0x0265D900, run from
+  RenderSceneSetup) culls its registered entities (animated entities, background NPCs) against
+  the game camera's frustum on its own and skips their tick outside it. Work freezing in
+  `gameplay.ini [Work]` (UseWorkFreezing, 7 m radius for "invisible" actors) may also stop work
+  animations. If people outside the game camera's view still stand still with this fix, those
+  are the next candidates.
+- Status: verified with the null OpenXR runtime (the redirect is installed, `forced` equals `culled`,
+  no regressions) and in the headset in a town, together with `UseWorkFreezing=false` in
+  `bin/config/r4game/legacy/base/gameplay.ini`: people kept animating; a frozen character was seen
+  once, in a cutscene.
+
+### Async animation tick outside the game camera's view (`async_anim_tick_visible`, 5.01, experimental)
+- The CAsyncAnimTickManager cull named above. Its tick (0x0265D900) loops over the registered
+  entities (CAnimatedEntity, CBgCutsceneEntity, CBgNpc) and tests each cached box against a
+  frustum inline (0x0265DA49..0x0265DAC5: n.c + d + |n|.e < 0 on any of 6 lanes = outside). An
+  entity outside is neither ticked nor gets its box refreshed, so it stays culled until the game
+  camera turns to it. The sync step (0x0265E870) builds that frustum each time from the game
+  camera's world-to-clip matrix with FrustumFromMatrix (0x026EE940, call 0x0265E9E4, return
+  0x0265E9E9) and copies it to manager+0x40.
+- `[engine] async_anim_tick_visible=1` (default 0) redirects that one call (`src/call_site_hook.h`;
+  other callers keep the original). After the original builds the frustum, and only while the HMD
+  view is active (same gates as `animated_component_visible`), the detour zeroes the plane normals
+  and sets a huge plane distance in the structure-of-arrays part the tick reads, so every box
+  passes. The tick still sorts its entities by distance to the camera and splits them into bucket
+  jobs as before. Checks before the patch: the call bytes and their decoded destination, the copy
+  after the call, the builder's entry, and the tick's whole plane test (which pins the plane
+  offsets). Any mismatch leaves the game unchanged and logs why.
+- Log: `Async animation tick visibility hooked build=remaster-5.01 ...` at startup and
+  `Async animation tick frustum opened count=1` the first time. Census: `PERF anim tick frustum
+  builds= opened=` per window.
+- Status (2026-10-22, 0.1.3): on in the release ini; played in the headset, background people kept moving. Still to measure: CPU cost in a busy town (census presents/s with the key on
+  and off) and whether background people beside or behind the game camera keep moving.
+
+### This fork: results (2026-10-25)
+- Seen in the headset on 5.01 (Ransacked Village): people at the edge of the view, for example a
+  running child, moved through the view without animation.
+- Both switches default to on in this fork (`async_anim_tick_visible` defaults to 0 in kaarele's
+  code and is on in his release settings). `menu_state_probe` is off by default here, so the menu
+  gate never closes; that only matters in menus with a world view and is harmless.
+- 5.01 smoke run with the SteamVR null driver and the census: both redirects installed
+  (`call_site=1`), about 15,600 culled components per 5 s window, all forced; the async tick
+  frustum opened 300 of 300 times. Passed, no errors.
+- CPU (SteamVR null driver, 240 Hz, benchmark script, diagnostics off, alternating runs): 11.16 /
+  11.16 ms application CPU time per frame with both switches off, 11.01 / 11.14 ms with both on; no
+  measurable cost. GPU unchanged.
+- 4.04 with the null driver: the existing hook at the fixed 4.04 address, passed, no errors.
+- Open: headset check (people at the edge of the view animate; a busy town).

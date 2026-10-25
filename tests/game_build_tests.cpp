@@ -137,6 +137,23 @@ int main() {
                 addresses::value(Build::Remaster501, addresses::Value::FsrStateResetFlag) == 0x26 &&
                 addresses::value(Build::NextGen404, addresses::Value::FsrStateContext) == 0,
             "per-eye FSR is 5.01 only");
+        require(addresses::rva(Build::NextGen404, Function::FrustumAabbTest) == 0x0031E050 &&
+                addresses::value(Build::NextGen404,
+                    addresses::Value::AnimatedComponentVisibilityReturn) == 0x015E186C,
+            "4.04 animated-component visibility keeps its original RVAs");
+        {
+            // The 5.01 call bytes end at the return address and encode the test.
+            const uint8_t* call = addresses::kAnimatedComponentFrustumCall501Bytes;
+            int32_t rel{};
+            std::memcpy(&rel, call + 1, sizeof(rel));
+            const auto return_rva = static_cast<int64_t>(addresses::value(
+                Build::Remaster501, addresses::Value::AnimatedComponentVisibilityReturn));
+            require(call[0] == 0xE8 &&
+                    sizeof(addresses::kAnimatedComponentFrustumCall501Bytes) == 5 &&
+                    static_cast<uintptr_t>(return_rva + rel) ==
+                        addresses::rva(Build::Remaster501, Function::FrustumAabbTest),
+                "5.01 visibility call reaches the frustum test");
+        }
         require(addresses::rva(Build::Unknown, Function::IsAnyMenu) == 0,
             "no engine addresses on unknown builds");
         require(addresses::signature(Build::NextGen404, Function::IsAnyMenu).size == 0,

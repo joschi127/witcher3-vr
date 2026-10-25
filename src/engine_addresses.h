@@ -39,6 +39,7 @@ enum class Function : size_t {
     TemporalCameraBuild,   // builds the 0xB0 temporal camera record (motion-vector camera)
     DlssMipBias,           // (frame_data, _, float* bias): texture LOD bias for the frame's samplers
     FsrUpscaleDispatch,    // FSR upscale dispatch (state, frame_data, params, index, ...)
+    FrustumAabbTest,       // (frustum, world box {min, max}): 1 = box fully outside the frustum
     Count,
 };
 
@@ -309,6 +310,67 @@ inline constexpr uint8_t kRenderTargetCreate501Bytes[] = {
 inline constexpr uint8_t kRenderTargetIdStore501Bytes[] = {
     0x41, 0x83, 0x7D, 0x14, 0x09, 0x49, 0x8D, 0x4D, 0x08, 0x44, 0x89, 0x31};
 
+// [FIX:REMASTER-ANIMATED-VISIBILITY 1/8] Frustum AABB test (frustum, world
+// box {min at +0, max at +0x10}). Both builds return al = 1 when the box is
+// fully outside one of the six planes and 0 when it is inside or
+// intersecting. 5.01 rewrote it with AVX over a structure-of-arrays frustum
+// (planes at +0x80..+0x140). In each build its only caller is the
+// animated-component visibility update (AnimatedComponentVisibilityReturn).
+// The 5.01 code has a VEX instruction at byte 4 (MinHook cannot relocate it)
+// and a RIP-relative one at byte 13 (too short for prefix_hook), so on 5.01
+// the mod redirects that one call (src/call_site_hook.h) and leaves the
+// function itself unpatched.
+inline constexpr uint8_t kFrustumAabbTest501Bytes[] = {
+    0x48, 0x83, 0xEC, 0x18, 0xC5, 0xF8, 0x10, 0x52, 0x10, 0xC5, 0xE8, 0x58,
+    0x02, 0xC5, 0xF8, 0x59};
+// The visibility update's call of the test (call rel32, ending at the return
+// address; the rel32 encodes FrustumAabbTest) and the code right after it:
+// lea rcx,[r15+0xF50]; mov [r15+0xF74],al (the "outside" byte the update
+// branches on).
+inline constexpr uint8_t kAnimatedComponentFrustumCall501Bytes[] = {
+    0xE8, 0x20, 0x38, 0x56, 0xFE};
+inline constexpr uint8_t kAnimatedComponentFrustumStore501Bytes[] = {
+    0x49, 0x8D, 0x8F, 0x50, 0x0F, 0x00, 0x00, 0x41, 0x88, 0x87, 0x74, 0x0F,
+    0x00, 0x00};
+
+// [FIX:REMASTER-ASYNC-ANIM-TICK-VISIBILITY 1/5] 5.01 only. The async
+// animation tick (CAsyncAnimTickManager, tick 0x14265D900) skips every
+// registered entity (CAnimatedEntity, CBgCutsceneEntity, CBgNpc) whose cached
+// box lies outside its frustum: such an entity is neither ticked nor gets its
+// box refreshed. Its sync step (0x14265E870) builds that frustum from the GAME
+// camera's world-to-clip matrix with FrustumFromMatrix and copies it to
+// manager+0x40. The frustum's structure-of-arrays planes (8 lanes, 6 used):
+// nx +0x60, ny +0x80, nz +0xA0, d +0xC0, |nx| +0xE0, |ny| +0x100, |nz| +0x120;
+// the array-of-planes copy at +0x00..+0x5F is not read by the tick.
+inline constexpr uintptr_t kFrustumFromMatrix501Rva = 0x026EE940;
+// mov rax,rsp; sub rsp,0x118 (the next instruction is RIP-relative).
+inline constexpr uint8_t kFrustumFromMatrix501Bytes[] = {
+    0x48, 0x8B, 0xC4, 0x48, 0x81, 0xEC, 0x18, 0x01, 0x00, 0x00};
+// The sync step's call of FrustumFromMatrix (call rel32 ending at the return
+// address) and the copy loop setup after it: lea rax,[r13+0x40]; mov edx,2.
+inline constexpr uintptr_t kAsyncAnimTickFrustumReturn501Rva = 0x0265E9E9;
+inline constexpr uint8_t kAsyncAnimTickFrustumCall501Bytes[] = {
+    0xE8, 0x57, 0xFF, 0x08, 0x00};
+inline constexpr uint8_t kAsyncAnimTickFrustumCopy501Bytes[] = {
+    0x49, 0x8D, 0x45, 0x40, 0xBA, 0x02, 0x00, 0x00, 0x00};
+// The tick's inline plane test, from the nx multiply to the skip: the
+// manager+0xA0..+0x160 operands pin the plane layout above, and the box is
+// outside when any of the 6 lanes of n.c + d + |n|.e is negative
+// (vcmpltps; vmovmskps; test al,0x3F; jne skip).
+inline constexpr uintptr_t kAsyncAnimTickCull501Rva = 0x0265DA49;
+inline constexpr uint8_t kAsyncAnimTickCull501Bytes[] = {
+    0xC5, 0xFC, 0x59, 0x8F, 0xA0, 0x00, 0x00, 0x00, 0xC5, 0xF4, 0x58, 0x9F,
+    0x00, 0x01, 0x00, 0x00, 0xC4, 0xE3, 0x7D, 0x04, 0xD5, 0x55, 0xC5, 0xEC,
+    0x59, 0x87, 0xC0, 0x00, 0x00, 0x00, 0xC5, 0xE4, 0x58, 0xE0, 0xC4, 0xE3,
+    0x7D, 0x04, 0xCD, 0xAA, 0xC5, 0xF4, 0x59, 0x97, 0xE0, 0x00, 0x00, 0x00,
+    0xC5, 0xDC, 0x58, 0xEA, 0xC4, 0xE3, 0x7D, 0x04, 0xC6, 0x00, 0xC5, 0xFC,
+    0x59, 0x9F, 0x20, 0x01, 0x00, 0x00, 0xC4, 0xE3, 0x7D, 0x04, 0xCE, 0x55,
+    0xC5, 0xF4, 0x59, 0x97, 0x40, 0x01, 0x00, 0x00, 0xC4, 0xE3, 0x7D, 0x04,
+    0xC6, 0xAA, 0xC5, 0xFC, 0x59, 0x8F, 0x60, 0x01, 0x00, 0x00, 0xC5, 0xE4,
+    0x58, 0xE2, 0xC5, 0xDC, 0x58, 0xD1, 0xC5, 0xD4, 0x58, 0xDA, 0xC4, 0xC1,
+    0x64, 0xC2, 0xC4, 0x11, 0xC5, 0xFC, 0x50, 0xC0, 0xA8, 0x3F, 0x0F, 0x85,
+    0x18, 0x01, 0x00, 0x00};
+
 inline constexpr Entry kEntries[] = {
     {"IsAnyMenu", 0x01F3C5C0, 0x01DF41A0, {kIsAnyMenuBytes, sizeof(kIsAnyMenuBytes)}},
     {"IsLoadingScreenVideoPlaying", 0x0154EED0, 0x0227A0F0,
@@ -357,6 +419,8 @@ inline constexpr Entry kEntries[] = {
         {kDlssMipBias501Bytes, sizeof(kDlssMipBias501Bytes)}},
     {"FsrUpscaleDispatch", 0, 0x01C665B0,
         {kFsrUpscaleDispatch501Bytes, sizeof(kFsrUpscaleDispatch501Bytes)}},
+    {"FrustumAabbTest", 0x0031E050, 0x0099B2B0,
+        {kFrustumAabbTest501Bytes, sizeof(kFrustumAabbTest501Bytes)}},
 };
 static_assert(sizeof(kEntries) / sizeof(kEntries[0]) ==
     static_cast<size_t>(Function::Count));
@@ -420,6 +484,8 @@ enum class Value : size_t {
     RenderTargetIdStoreSite,      // RVA: slot 2's store of the new texture id
     RenderTargetTexture,          // CRenderTarget: GpuApi texture id
     RenderTargetObjectSize,       // CRenderTarget: object size
+    AnimatedComponentVisibilityReturn,  // return address of the frustum test call in the
+                                        // animated-component visibility update
     Count,
 };
 
@@ -509,6 +575,14 @@ inline constexpr ValueEntry kValues[] = {
     {"RenderTargetIdStoreSite", 0, 0x01BEF8B2},
     {"RenderTargetTexture", 0, 0x8},
     {"RenderTargetObjectSize", 0, 0x50},
+    // [FIX:REMASTER-ANIMATED-VISIBILITY 2/8] CAnimatedComponent vtable slot 67
+    // (4.04 0x015E1750, 5.01 0x02437970; shared by the mimic, moving-agent
+    // and background-root components) tests the component's world bounds
+    // against the game camera's frustum and stores the result at +0xF74.
+    // While it is set, the update skips the skinned attachments (the body
+    // keeps its last pose, or the bind pose if it was never updated) and only
+    // moves plain child transforms such as a held weapon.
+    {"AnimatedComponentVisibilityReturn", 0x015E186C, 0x02437A90},
 };
 static_assert(sizeof(kValues) / sizeof(kValues[0]) == static_cast<size_t>(Value::Count));
 
