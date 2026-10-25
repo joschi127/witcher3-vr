@@ -98,8 +98,10 @@ REMASTER_DEFAULTS = (
 # follow from the chosen mode instead. Ray/path tracing, frame generation, low-latency modes, HDR and the editor
 # preset detection are off; so are effects that look detached in VR (motion blur, blur, depth of field, lens
 # effects, vignette, chromatic aberration), screen-space reflections, HairWorks and the light shafts that veil
-# the whole image whenever the sun is in view.
+# the whole image whenever the sun is in view. The exploration and combat cameras are the close ones, as on 4.04.
 REMASTER_VR_SETTINGS = (
+    ('Gameplay', 'EnableAlternateExplorationCamera', '1'),
+    ('Gameplay', 'EnableAlternateCombatCamera', '1'),
     ('PostProcess', 'AllowShafts', 'false'),
     ('Rendering/RT', 'EnableRT', 'false'),
     ('Rendering/RT', 'RTAOEnabled', 'false'),

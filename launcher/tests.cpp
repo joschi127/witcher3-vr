@@ -1848,7 +1848,9 @@ void TestRemasteredVrSettingsAndRestore(const w3vr::ConfigPaths& paths) {
         configured->Get("PostProcess", "AllowShafts") == "false" &&
         configured->Get("Rendering/RT", "EnableRT") == "false" &&
         configured->Get("Rendering/RT/PathTracer", "PTEnable") == "false" &&
-        configured->Get("Visuals", "HdrEnabled") == "false",
+        configured->Get("Visuals", "HdrEnabled") == "false" &&
+        configured->Get("Gameplay", "EnableAlternateExplorationCamera") == "1" &&
+        configured->Get("Gameplay", "EnableAlternateCombatCamera") == "1",
         "Remastered VR settings were not applied");
     Require(configured->Get("PostProcess", "GTAOQuality") == "3" &&
         configured->Get("Galaxy", "tokenRefA") == "user-secret" &&

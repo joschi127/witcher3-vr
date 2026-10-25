@@ -327,6 +327,10 @@ same). The material they were derived from is not.
     (`[Rendering] ShouldDetectEditorGraphicsPreset=false`), the game's DLSS off
     (`[Rendering] AllowDLSS=false`, until per-eye upscaling exists), no V-Sync or frame limit
     (`[Viewport] VSync=false`, `[Engine] LimitFPS=0`; the OpenXR runtime paces the frames).
+  - Close exploration and combat cameras, as on 4.04 (`[Gameplay]
+    EnableAlternateExplorationCamera=1`, `EnableAlternateCombatCamera=1`): the 5.x defaults (Modern,
+    Dynamic) re-frame while walking, and with the game pitch locked for VR only the back-and-forth
+    translation remains, which reads as the camera zooming in and out.
   - Effects that look detached or uncomfortable in VR off, as in the 4.04 profile:
     `[PostProcess] AllowMotionBlur=false`, `AllowBlur=false`, `AllowDOF=false`,
     `AllowLensEffects=false`, `AllowVignette=false`, `AllowChromaticAberration=false`;

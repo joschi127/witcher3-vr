@@ -2250,6 +2250,11 @@ bool ConfigureRemasteredGameSettingsForVr(
         // FXAA; the launcher's per-eye FSR switch is applied when the caller
         // saves the launcher state right afterwards.
         {"PostProcess", "AAMode", "1"},
+        // Close exploration and combat cameras, as on 4.04. The 5.x defaults
+        // (Modern, Dynamic) re-frame while walking; with the game pitch locked
+        // for VR only the translation remains, which reads as zooming.
+        {"Gameplay", "EnableAlternateExplorationCamera", "1"},
+        {"Gameplay", "EnableAlternateCombatCamera", "1"},
         // Light shafts veil the whole image whenever the sun is in view.
         {"PostProcess", "AllowShafts", "false"},
         // Ray and path tracing, ray reconstruction.
