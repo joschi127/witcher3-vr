@@ -1587,6 +1587,8 @@ LoadResult LoadConfiguration(const ConfigPaths& paths, bool remastered) {
     const bool dlss_dlaa = ReadBool(*vr, "engine", "dlss_dlaa", false);
     int aa_mode = ReadInt(*game, "PostProcess", "AAMode", 0);
     bool allow_dlss = ReadBool(*game, "Rendering", "AllowDLSS", false);
+    // 5.x AAMode 5 = FSR: the launcher's per-eye FSR switch.
+    result.state.fsr_per_eye = remastered && aa_mode == 5;
     const int launcher_xr_mode = legacy_aer_mode
         ? 3
         : (legacy_mono_mode ? 1 : xr_mode);
@@ -1896,10 +1898,21 @@ bool BuildUpdatedDocuments(const ConfigPaths& paths, const LauncherState& state,
     game_settings.Set("Viewport", "Resolution", "\"" +
         std::to_string(state.width) + "x" + std::to_string(state.height) + "\"");
     if (state.remastered) {
-        // Remastered 5.x: the mod runs the No-AA route with the game's FXAA
-        // (5.x AAMode values: 0 off, 1 FXAA, 5 FSR, 6 DLSS, 7 XeSS). The Fast
+        // Remastered 5.x: the mod runs the No-AA route with the game's FXAA,
+        // or with the game's FSR and one FSR history per eye (5.x AAMode
+        // values: 0 off, 1 FXAA, 5 FSR, 6 DLSS, 7 XeSS). The Fast
         // Transitions DLC modifies 4.04 behavior data and stays disabled.
-        game_settings.Set("PostProcess", "AAMode", "1");
+        if (state.fsr_per_eye) {
+            game_settings.Set("PostProcess", "AAMode", "5");
+            // Keep the player's FSR quality; 0 (automatic) becomes Quality.
+            if (ReadInt(game_settings, "PostProcess", "FSR2Quality", 0) <= 0) {
+                game_settings.Set("PostProcess", "FSR2Quality", "2");
+            }
+        } else {
+            game_settings.Set("PostProcess", "AAMode", "1");
+        }
+        vr_ini.Set("engine", "remaster_fsr_per_eye",
+            state.fsr_per_eye ? "1" : "0");
         game_settings.Set("Rendering", "AllowDLSS", "false");
         game_settings.Set("DLC", "DlcEnabled_movementinputfix", "0");
         // The native asymmetric projection is not ported to 5.x yet.
@@ -2234,7 +2247,8 @@ bool ConfigureRemasteredGameSettingsForVr(
         const char* value;
     };
     static constexpr Setting kSettings[] = {
-        // No temporal AA route on 5.x yet: FXAA.
+        // FXAA; the launcher's per-eye FSR switch is applied when the caller
+        // saves the launcher state right afterwards.
         {"PostProcess", "AAMode", "1"},
         // Light shafts veil the whole image whenever the sun is in view.
         {"PostProcess", "AllowShafts", "false"},

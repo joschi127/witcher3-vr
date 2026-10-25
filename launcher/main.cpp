@@ -84,6 +84,7 @@ enum ControlId {
     IdHideStaticHudOutsideCombat,
     IdHudControllerLocked,
     IdFastMovementTransitions,
+    IdFsrPerEye,
     IdCinemaFullVr,
     IdSteadyIcons,
     IdDiagnosticLogging,
@@ -603,6 +604,8 @@ bool CaptureState(LauncherState& state, std::wstring& error,
         Item(IdSteadyIcons), BM_GETCHECK, 0, 0) == BST_CHECKED;
     state.fullscreen_projection = g_app.fullscreen_projection;
     state.remastered = Remastered();
+    state.fsr_per_eye = state.remastered && SendMessageW(
+        Item(IdFsrPerEye), BM_GETCHECK, 0, 0) == BST_CHECKED;
     if (const auto reason = w3vr::RenderModeUnavailableReason(
             state, g_app.afw_plugin_present);
         !reason.empty()) {
@@ -850,6 +853,9 @@ void ConfigureRemasteredSettingsForVr() {
     SetStatus(auto_unavailable
         ? L"Remastered VR settings applied. Headset not reachable: the AUTO "
           L"resolution is read on Save & Launch with the headset connected."
+        : state.fsr_per_eye
+        ? L"Remastered VR settings applied (FSR per eye; ray tracing, light "
+          L"shafts, frame generation and HDR off). Press Save & Launch to play."
         : L"Remastered VR settings applied (FXAA; ray tracing, light shafts, "
           L"frame generation and HDR off). Press Save & Launch to play.");
 }
@@ -1062,6 +1068,8 @@ void RestoreLauncherDefaults() {
         defaults.hud_controller_locked ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(Item(IdFastMovementTransitions), BM_SETCHECK,
         defaults.fast_movement_transitions ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(Item(IdFsrPerEye), BM_SETCHECK,
+        defaults.fsr_per_eye ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(Item(IdCinemaFullVr), BM_SETCHECK,
         defaults.cinema_full_vr ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(Item(IdSteadyIcons), BM_SETCHECK,
@@ -1330,6 +1338,10 @@ void PopulateControls() {
     SendMessageW(Item(IdFastMovementTransitions), BM_SETCHECK,
         loaded.state.fast_movement_transitions
             ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(Item(IdFsrPerEye), BM_SETCHECK,
+        loaded.state.fsr_per_eye ? BST_CHECKED : BST_UNCHECKED, 0);
+    // Per-eye FSR exists on Remastered 5.x only.
+    EnableWindow(Item(IdFsrPerEye), Remastered());
     SendMessageW(Item(IdCinemaFullVr), BM_SETCHECK,
         loaded.state.cinema_full_vr ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(Item(IdSteadyIcons), BM_SETCHECK,
@@ -1432,6 +1444,9 @@ void CreateInterface(HWND window) {
         L"Select Off, OptiScaler, ReShade or both. OptiScaler requires a DLSS render route and uses the custom VR build. Only the NVIDIA NR DLL is required in the DLSS5 reference.",
         {AddLabel(L"Integration", 38, 116, 95, 22),
          AddCombo(135, 108, 230, IdIntegrationMode)});
+    AddTooltip(AddControl(L"BUTTON", L"FSR per eye (5.x)",
+        BS_AUTOCHECKBOX | WS_TABSTOP, 375, 110, 183, 26, IdFsrPerEye),
+        L"Remastered 5.x only. Uses the game's FSR instead of FXAA, with one FSR history per eye so the eyes do not ghost into each other. Sharper edges, slightly softer image, up to about 180 MB more VRAM. Off = FXAA.");
     AddTooltip(AddControl(L"BUTTON", L"Comfort and interface", BS_GROUPBOX,
         20, 174, 560, 448),
         L"Tune headset presentation, HUD, cinema framing, and comfort options. Hover any setting name or control for details.");

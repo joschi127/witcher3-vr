@@ -246,6 +246,48 @@ void TestRemasteredAndOptionalAfw(const w3vr::ConfigPaths& paths) {
         "Remastered disables DLSS");
     Require(game.Get("DLC", "DlcEnabled_movementinputfix") == "0",
         "Remastered keeps the 4.04 movement DLC off");
+    Require(vr.Get("engine", "remaster_fsr_per_eye") == "0",
+        "Remastered FXAA turns per-eye FSR off");
+
+    // Per-eye FSR switch: AAMode 5, the per-eye key, and Quality only when
+    // the game's FSR quality is automatic (0 or missing).
+    state.fsr_per_eye = true;
+    Require(w3vr::BuildUpdatedDocuments(paths, state, vr, game, error),
+        "Remastered per-eye FSR documents build");
+    Require(game.Get("PostProcess", "AAMode") == "5" &&
+            game.Get("PostProcess", "FSR2Quality") == "2" &&
+            vr.Get("engine", "remaster_fsr_per_eye") == "1",
+        "Per-eye FSR writes AAMode 5, FSR2Quality 2 and remaster_fsr_per_eye=1");
+    auto fixture = w3vr::IniDocument::Load(paths.game_settings, error);
+    Require(fixture.has_value(), "game fixture load failed");
+    fixture->Set("PostProcess", "FSR2Quality", "3");
+    Write(paths.game_settings, fixture->Serialize());
+    Require(w3vr::BuildUpdatedDocuments(paths, state, vr, game, error) &&
+            game.Get("PostProcess", "FSR2Quality") == "3",
+        "Per-eye FSR keeps the player's FSR quality");
+
+    // Loading: AAMode 5 on 5.x is the switch, without an inconsistency
+    // warning; 4.04 has no such switch.
+    auto loaded_vr = w3vr::IniDocument::Load(paths.vr_ini, error);
+    Require(loaded_vr.has_value(), "VR fixture load failed");
+    loaded_vr->Set("openxr", "mode", "3");
+    loaded_vr->Set("openxr", "mode3_aer_presentation", "0");
+    loaded_vr->Set("engine", "dual_render_probe", "1");
+    loaded_vr->Set("engine", "dual_render_start", "1");
+    loaded_vr->Set("engine", "temporal_backend", "none");
+    Write(paths.vr_ini, loaded_vr->Serialize());
+    fixture->Set("PostProcess", "AAMode", "5");
+    Write(paths.game_settings, fixture->Serialize());
+    const auto remastered = w3vr::LoadConfiguration(paths, true);
+    Require(remastered.state.fsr_per_eye && remastered.warning.empty() &&
+            remastered.state.mode == w3vr::RenderMode::StereoNone,
+        "5.x AAMode 5 loads as Stereo No AA with per-eye FSR");
+    Require(!w3vr::LoadConfiguration(paths).state.fsr_per_eye,
+        "4.04 has no per-eye FSR switch");
+    fixture->Set("PostProcess", "AAMode", "1");
+    Write(paths.game_settings, fixture->Serialize());
+    Require(!w3vr::LoadConfiguration(paths, true).state.fsr_per_eye,
+        "5.x FXAA loads with per-eye FSR off");
 }
 
 void TestAllModes(const w3vr::ConfigPaths& paths) {

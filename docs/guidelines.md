@@ -312,8 +312,10 @@ same). The material they were derived from is not.
   `docs/remaster-port-status.md`):
   - `[PostProcess] AAMode=1` (FXAA; 5.x values: 0 off, 1 FXAA, 5 FSR, 6 DLSS, 7 XeSS). The mod
     runs the No-AA route on 5.x; TAAU does not exist there. FSR (5) and DLSS (6) are usable only
-    with the mod's per-eye histories (`remaster_fsr_per_eye=1`, `temporal_backend=dlss`), which the
-    button does not set yet; XeSS keeps one history for both eyes.
+    with the mod's per-eye histories (`remaster_fsr_per_eye=1`, `temporal_backend=dlss`). The
+    launcher's "FSR per eye (5.x)" switch writes `AAMode=5`, `remaster_fsr_per_eye=1` and, when
+    the game's `FSR2Quality` is automatic (0), Quality (2); off writes `AAMode=1`. DLSS per eye has
+    no launcher switch yet; XeSS keeps one history for both eyes.
   - `[PostProcess] AllowShafts=false`: 5.x light shafts veil the whole image whenever the sun is
     in view, which the wide VR field of view makes almost permanent (washed-out colours).
   - Ray tracing off (`[Rendering/RT] EnableRT`, `RTAOEnabled`, `RTGIPreset`, `Shadows`,

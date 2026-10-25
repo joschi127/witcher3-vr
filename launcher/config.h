@@ -132,13 +132,16 @@ struct LauncherState {
     CameraFollowPolicy camera_follow_policy{CameraFollowPolicy::HorseBoatOnly};
     bool hide_static_hud_outside_combat{};
     bool fast_movement_transitions{true};
+    // Remastered 5.x only: the game's FSR (AAMode 5) with one FSR history per
+    // eye ([engine] remaster_fsr_per_eye=1) instead of FXAA (AAMode 1).
+    bool fsr_per_eye{};
     bool fullscreen_projection{};
     bool diagnostic_logging{};
     bool route_logging{};
     bool performance_logging{};
     bool renderdoc_enabled{};
-    // Detected game edition (not stored in the INI). Remastered 5.x only
-    // supports Stereo/Mono with FXAA so far and uses different AAMode values.
+    // Detected game edition (not stored in the INI). Remastered 5.x supports
+    // Stereo/Mono with FXAA or per-eye FSR and uses different AAMode values.
     bool remastered{};
 };
 
