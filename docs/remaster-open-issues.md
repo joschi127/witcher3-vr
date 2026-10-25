@@ -52,10 +52,13 @@ black, with or without the mod (see `remaster-port-status.md`, 2026-10-17).
   `hud_controller_locked=1` (HUD stays in place when turning the head) works well on 5.01 and is
   much better to read (2026-10-16). Kept open until it is a default or a launcher setting.
 
-### Anti-aliasing (FXAA only on 5.01)
+### Anti-aliasing on 5.01
 - Edges looked rough at Virtual Desktop "High" (1748x1468 per eye). Rendering at the runtime's
-  "Ultra" recommendation (1872x1572) was much better (2026-10-16). The render size is fixed in the
-  INI; the launcher's `resolution_auto` is not yet usable on 5.01.
+  "Ultra" recommendation (1872x1572) was much better (2026-10-16).
+- Since 2026-10-25 FSR per eye is available (launcher switch, checked in the headset): smoother
+  edges and less GPU load than FXAA, a little softer. Full FOV at VD "Ultra" (2880x2872 per eye) is
+  not quite 90 fps on an RX 7900 XTX even with FSR; a slightly reduced FOV is the likely sweet spot
+  (not measured yet). DLSS per eye is untested in this fork (no NVIDIA GPU).
 
 ## Untested in the headset
 - Aiming (crossbow).
@@ -63,8 +66,8 @@ black, with or without the mod (see `remaster-port-status.md`, 2026-10-17).
 ## Not ported yet
 - Foliage native snapshot (V1521) on 5.01.
 - Native asymmetric projection (symmetric runtimes only so far).
-- TAAU/DLSS/RT backends (5.01 forces `temporal_backend=none`, No-AA route).
-- Build-aware launcher "Configure Settings for VR" (list of 5.x settings in `guidelines.md`).
+- TAAU and RT backends (5.01 keeps the No-AA route; the game's own FSR and DLSS run per eye
+  instead, see above).
 
 ## Verified in the headset (for reference)
 - Third-person gameplay with correct 3D depth in both eyes, intro, menus, loading screens, HUD,
