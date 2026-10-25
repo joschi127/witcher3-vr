@@ -40,8 +40,13 @@ an AMD GPU with a Pico 4 over Virtual Desktop. What works and what does not:
 
 - Third-person gameplay in Stereo mode with correct 3D depth, HUD, menus, loading screens, combat,
   horse riding and cutscenes.
-- Anti-aliasing: No AA route with the game's FXAA only. TAAU does not exist in 5.x; DLSS, ray
-  tracing, OptiScaler, OFXR and the other integrations are not ported yet.
+- Anti-aliasing: the game's FXAA, or the game's FSR with one history per eye (launcher switch
+  **FSR per eye (5.x)**; smoother edges and less GPU load at high resolutions). Per-eye DLSS exists
+  (`temporal_backend=dlss`) but is not tested in this fork. TAAU does not exist in 5.x; ray tracing,
+  OptiScaler, OFXR and the other integrations are not ported yet.
+- Camera: use the game's **close** exploration and combat cameras (**Configure Settings for VR** sets
+  them). The 5.x default "Modern" camera re-frames while walking; in VR, where the camera pitch is
+  locked, that shows as the camera jumping between far and near when you start or stop walking.
 - Unknown or newer game builds are detected and the game hooks stay disabled, so an update of the
   game does not break it blindly, but the mod then does nothing.
 - Release packages are on [this fork's releases page](https://github.com/joschi127/witcher3-vr/releases)
@@ -107,7 +112,7 @@ The table describes Next-Gen 4.04. For Remastered 5.x see [Remastered (5.x) stat
 | Feature | Status |
 | --- | --- |
 | The Witcher 3 Next-Gen 4.04 | Supported |
-| The Witcher 3 Remastered 5.x | Experimental (Stereo, No AA / FXAA) |
+| The Witcher 3 Remastered 5.x | Experimental (Stereo, FXAA or FSR per eye) |
 | OpenXR | Supported |
 | VDXR | Supported and recommended for Quest headsets |
 | SteamVR OpenXR | Supported; standard Presentation Size |
@@ -195,9 +200,11 @@ The full guide, requirements and troubleshooting are in [LINUX.md](LINUX.md).
 Press **Configure Settings for VR** at least once before playing. It applies the tested game profile and creates a backup that can be restored later with **Restore Original Settings**.
 
 On Remastered 5.x the button applies the 5.x VR settings to your existing game settings instead of
-the 4.04 profile: anti-aliasing **FXAA**; ray tracing, path tracing, light shafts (they veil the image
-whenever the sun is in view), frame generation, low-latency modes, HDR and motion blur/lens effects
-**off**. Everything else, such as texture quality, language and camera inversion, stays as you set it.
+the 4.04 profile: anti-aliasing **FXAA** (or FSR with **FSR per eye (5.x)** ticked); the **close**
+exploration and combat cameras (recommended for VR, see above); ray tracing, path tracing, light shafts
+(they veil the image whenever the sun is in view), frame generation, low-latency modes, HDR and motion
+blur/lens effects **off**. Everything else, such as texture quality, language and camera inversion,
+stays as you set it.
 
 The launcher starts in **Stereo - No AA / FXAA** with **AUTO** resolution on both game versions. A
 fresh installation therefore only needs: start the launcher, press **Configure Settings for VR** once,
