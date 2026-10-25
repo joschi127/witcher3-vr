@@ -290,6 +290,38 @@ void TestRemasteredAndOptionalAfw(const w3vr::ConfigPaths& paths) {
         "5.x FXAA loads with per-eye FSR off");
 }
 
+void TestRecenterKey(const w3vr::ConfigPaths& paths) {
+    WriteBaseFixtures(paths);
+    std::wstring error;
+    Require(w3vr::LoadConfiguration(paths).state.recenter_key == "F9",
+        "missing recenter_key loads as F9");
+
+    w3vr::LauncherState state;
+    state.mode = w3vr::RenderMode::StereoNone;
+    state.recenter_key = "NumpadDivide";
+    w3vr::IniDocument vr;
+    w3vr::IniDocument game;
+    Require(w3vr::BuildUpdatedDocuments(paths, state, vr, game, error) &&
+            vr.Get("openxr", "recenter_key") == "NumpadDivide",
+        "the selected recenter key is written to [openxr] recenter_key");
+
+    auto loaded_vr = w3vr::IniDocument::Load(paths.vr_ini, error);
+    Require(loaded_vr.has_value(), "VR fixture load failed");
+    loaded_vr->Set("openxr", "recenter_key", "Space");
+    Write(paths.vr_ini, loaded_vr->Serialize());
+    Require(w3vr::LoadConfiguration(paths).state.recenter_key == "space",
+        "recenter_key loads from the INI");
+
+    // A key the launcher does not offer is kept on save.
+    loaded_vr->Set("openxr", "recenter_key", "0x74");
+    Write(paths.vr_ini, loaded_vr->Serialize());
+    state = w3vr::LoadConfiguration(paths).state;
+    Require(state.recenter_key == "0x74" &&
+            w3vr::BuildUpdatedDocuments(paths, state, vr, game, error) &&
+            vr.Get("openxr", "recenter_key") == "0x74",
+        "an unknown recenter key survives load and save");
+}
+
 void TestAllModes(const w3vr::ConfigPaths& paths) {
     for (int index = 0;
         index < static_cast<int>(w3vr::RenderMode::Count); ++index) {
@@ -2154,6 +2186,7 @@ int main() {
         TestEditionScripts(temporary.path);
         TestAllModes(paths);
         TestRemasteredAndOptionalAfw(paths);
+        TestRecenterKey(paths);
         TestOptiscalerAndAlwaysAsym(paths);
         TestDlssLabelsAndLegacyAuto(paths);
         TestFallbackAndAtomicSave(paths);

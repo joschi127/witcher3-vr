@@ -124,6 +124,9 @@ struct LauncherState {
     bool vertical_pitch_enabled{};
     bool cinema_full_vr{true};
     bool steady_icons{};
+    // [openxr] recenter_key as written in the INI ("F9", "Space",
+    // "NumpadDivide", or any other value the DLL accepts, which is kept).
+    std::string recenter_key{"F9"};
     bool first_person_gamepad_head_follow{};
     int first_person_snap_turn_degrees{45};
     bool first_person_combat_exit{false};

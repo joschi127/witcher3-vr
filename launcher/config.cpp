@@ -1698,6 +1698,8 @@ LoadResult LoadConfiguration(const ConfigPaths& paths, bool remastered) {
         *vr, "openxr", "cinema_full_vr", true);
     result.state.steady_icons = ReadBool(
         *vr, "openxr", "steady_icons", false);
+    result.state.recenter_key = ReadString(*vr, "openxr", "recenter_key", "F9");
+    if (result.state.recenter_key.empty()) result.state.recenter_key = "F9";
     result.state.first_person_gamepad_head_follow =
         ReadBool(*vr, "engine", "first_person_snap_turn", false) &&
         ReadBool(*vr, "engine", "first_person_hmd_body_follow", false);
@@ -1826,6 +1828,8 @@ bool BuildUpdatedDocuments(const ConfigPaths& paths, const LauncherState& state,
     vr_ini.Set("openxr", "cinema_full_vr",
         state.cinema_full_vr ? "1" : "0");
     vr_ini.Set("openxr", "steady_icons", state.steady_icons ? "1" : "0");
+    vr_ini.Set("openxr", "recenter_key",
+        state.recenter_key.empty() ? std::string{"F9"} : state.recenter_key);
     vr_ini.Set("engine", "close_camera_offset", FloatString(state.near_view));
     vr_ini.Set("engine", "dual_render_probe", mode.dual_render ? "1" : "0");
     vr_ini.Set("engine", "dual_render_start", mode.dual_render ? "1" : "0");

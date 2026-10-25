@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
 #include <cstdlib>
 #include <initializer_list>
@@ -81,6 +82,7 @@ enum ControlId {
     IdFirstPersonStrafe,
     IdFirstPersonAnchorSmoothing,
     IdCameraFollow,
+    IdRecenterKey,
     IdHideStaticHudOutsideCombat,
     IdHudControllerLocked,
     IdFastMovementTransitions,
@@ -115,6 +117,9 @@ struct App {
     // Advanced INI-only option. Keep the loaded value across launcher saves
     // without exposing a UI control or silently disabling a manual opt-in.
     bool fullscreen_projection{};
+    // A recenter_key from the INI that is not one of the offered keys; kept
+    // as an extra choice so a save does not replace it silently.
+    std::string custom_recenter_key;
     // Detected from witcher3.exe; PDAFWPlugin.dll is optional (not shipped).
     w3vr::GameEdition edition{w3vr::GameEdition::Unknown};
     bool afw_plugin_present{};
@@ -125,6 +130,27 @@ App g_app;
 
 bool Remastered() {
     return g_app.edition == w3vr::GameEdition::Remastered;
+}
+
+// Recenter keys offered in the launcher, in combo order, as the DLL reads
+// them from [openxr] recenter_key. None of them is bound by the mod or the
+// game; NumpadDivide is the recenter key of Luke Ross's R.E.A.L. VR mods.
+constexpr std::array<const char*, 3> kRecenterKeys{"F9", "Space", "NumpadDivide"};
+constexpr std::array<const wchar_t*, 3> kRecenterKeyLabels{L"F9", L"Space", L"Numpad /"};
+
+int RecenterKeyIndex(const std::string& value) {
+    std::string lower = value;
+    for (char& c : lower) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    for (size_t i = 0; i < kRecenterKeys.size(); ++i) {
+        std::string key = kRecenterKeys[i];
+        for (char& c : key) {
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+        if (lower == key) return static_cast<int>(i);
+    }
+    return -1;
 }
 
 HWND Item(int id) {
@@ -592,6 +618,13 @@ bool CaptureState(LauncherState& state, std::wstring& error,
     state.camera_follow_policy = static_cast<CameraFollowPolicy>(std::clamp(
         static_cast<int>(SendMessageW(
             Item(IdCameraFollow), CB_GETCURSEL, 0, 0)), 0, 2));
+    const int recenter_index = static_cast<int>(SendMessageW(
+        Item(IdRecenterKey), CB_GETCURSEL, 0, 0));
+    state.recenter_key =
+        recenter_index >= 0 && recenter_index < static_cast<int>(kRecenterKeys.size())
+        ? std::string{kRecenterKeys[static_cast<size_t>(recenter_index)]}
+        : (g_app.custom_recenter_key.empty()
+            ? std::string{"F9"} : g_app.custom_recenter_key);
     state.hide_static_hud_outside_combat = SendMessageW(
         Item(IdHideStaticHudOutsideCombat), BM_GETCHECK, 0, 0) == BST_CHECKED;
     state.hud_controller_locked = SendMessageW(
@@ -1061,6 +1094,8 @@ void RestoreLauncherDefaults() {
         defaults.first_person_anchor_smoothing ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(Item(IdCameraFollow), CB_SETCURSEL,
         static_cast<int>(defaults.camera_follow_policy), 0);
+    SendMessageW(Item(IdRecenterKey), CB_SETCURSEL,
+        std::max(0, RecenterKeyIndex(defaults.recenter_key)), 0);
     SendMessageW(Item(IdHideStaticHudOutsideCombat), BM_SETCHECK,
         defaults.hide_static_hud_outside_combat
             ? BST_CHECKED : BST_UNCHECKED, 0);
@@ -1260,6 +1295,9 @@ void PopulateControls() {
     ComboAdd(camera_follow, L"Only Horse/Boat");
     ComboAdd(camera_follow, L"Always Off");
 
+    HWND recenter_key = Item(IdRecenterKey);
+    for (const auto* label : kRecenterKeyLabels) ComboAdd(recenter_key, label);
+
     const auto loaded = w3vr::LoadConfiguration(g_app.paths, Remastered());
     g_app.loaded = loaded.state;
     g_app.fullscreen_projection = loaded.state.fullscreen_projection;
@@ -1330,6 +1368,16 @@ void PopulateControls() {
             ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(camera_follow, CB_SETCURSEL,
         static_cast<int>(loaded.state.camera_follow_policy), 0);
+    // A recenter key the launcher does not offer stays selectable as it is.
+    int recenter_index = RecenterKeyIndex(loaded.state.recenter_key);
+    if (recenter_index < 0) {
+        g_app.custom_recenter_key = loaded.state.recenter_key;
+        const std::wstring label(g_app.custom_recenter_key.begin(),
+            g_app.custom_recenter_key.end());
+        ComboAdd(recenter_key, (label + L" (INI)").c_str());
+        recenter_index = static_cast<int>(kRecenterKeys.size());
+    }
+    SendMessageW(recenter_key, CB_SETCURSEL, recenter_index, 0);
     SendMessageW(Item(IdHideStaticHudOutsideCombat), BM_SETCHECK,
         loaded.state.hide_static_hud_outside_combat
             ? BST_CHECKED : BST_UNCHECKED, 0);
@@ -1545,7 +1593,7 @@ void CreateInterface(HWND window) {
     AddTooltip(AddControl(L"BUTTON", L"Controller-locked HUD (Experimental)",
         BS_AUTOCHECKBOX | WS_TABSTOP, 304, 582, 256, 26,
         IdHudControllerLocked),
-        L"In gameplay, the HUD follows mouse or gamepad camera turns but stays in its F9-calibrated direction as the headset rotates. The reticle, menus and Cinema HUD are unchanged. Press F9 to recenter the HUD direction.");
+        L"In gameplay, the HUD follows mouse or gamepad camera turns but stays in its recentered direction as the headset rotates. The reticle, menus and Cinema HUD are unchanged. Press the recenter key (Recenter, default F9) to recenter the HUD direction.");
 
     AddTooltip(AddControl(L"BUTTON", L"First Person and camera", BS_GROUPBOX,
         600, 18, 560, 178),
@@ -1574,7 +1622,11 @@ void CreateInterface(HWND window) {
     AddTooltips(
         L"Controls REDengine camera follow dynamically. Always On is disabled while on foot in First Person, but remains enabled on a horse or boat. Only Horse/Boat disables it everywhere else. Always Off never enables it.",
         {AddLabel(L"Camera Follow", 618, 148, 130, 22),
-         AddCombo(755, 140, 260, IdCameraFollow)});
+         AddCombo(755, 140, 170, IdCameraFollow)});
+    AddTooltips(
+        L"Key that recenters the headset view and the HUD direction in game: F9 (default), Space, or Numpad / (as in Luke Ross's R.E.A.L. VR mods). None of them is used by the mod's other shortcuts.",
+        {AddLabel(L"Recenter", 940, 148, 80, 22),
+         AddCombo(1022, 140, 120, IdRecenterKey)});
 
     AddTooltip(AddControl(L"BUTTON", L"OFXR VR Framegen", BS_GROUPBOX,
         600, 210, 560, 100),

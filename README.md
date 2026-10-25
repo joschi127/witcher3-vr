@@ -261,7 +261,7 @@ The integration dropdown offers Off, OptiScaler, ReShade and OptiScaler + ReShad
 
 ReShade is installed as a plain runtime. Its add-ons and their configuration are entirely user-managed: the launcher does not copy, modify or remove them. Existing unrelated add-ons and ReShade settings are preserved. OptiScaler settings use Delete; ReShade uses F4. AFW debug uses Ctrl+F6.
 
-Disable DLSS Override before enabling OptiScaler. OptiScaler selections need a DLSS/DLAA render route. The INI `config_version` is a settings-format migration marker, not a required mod build version; a different value does not block launch. The experimental controller-locked HUD option holds the gameplay HUD in the F9-recentered front direction instead of following headset turns.
+Disable DLSS Override before enabling OptiScaler. OptiScaler selections need a DLSS/DLAA render route. The INI `config_version` is a settings-format migration marker, not a required mod build version; a different value does not block launch. The experimental controller-locked HUD option holds the gameplay HUD in the recentered front direction (recenter key, default F9) instead of following headset turns.
 
 ### Cinema
 
@@ -311,7 +311,7 @@ Suggested values:
 | `F3` | Write the recent Route Log and Performance Log events |
 | `F7` | Switch between the VR and Cinema3D HUD layouts |
 | `F8` | Toggle Standard and Near views |
-| `F9` | Recenter the VR view (configurable: `[openxr] recenter_key`, e.g. `F5` or `Space`) |
+| `F9` | Recenter the VR view (launcher: **Recenter** with F9, Space or Numpad /; `[openxr] recenter_key` also takes other F keys or a virtual-key code) |
 | `F10` | Toggle Cinema Mode |
 | `F11` | Toggle First Person |
 
