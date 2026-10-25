@@ -967,3 +967,21 @@ RTX 3080 and a Meta Quest 3 through WiVRn unless stated otherwise; our own resul
   `temporal_backend` keeps its value (the launcher writes `none` on 5.x).
 - Smoke run with these defaults, FXAA, SteamVR null driver: passed, every hook installed, no errors.
   Merge after the headset check of the run-ahead and per-eye upscaler PRs.
+
+## 2026-10-25: headset check of run-ahead and per-eye FSR, merged as 17ba81f
+
+- Headset check with 68a7f33 (#15-#18): Pico 4 over Virtual Desktop (VDXR), 90 Hz, VD Ultra with
+  full FOV (launcher AUTO 2880x2880, rendered 2880x2872 per eye), AMD Radeon RX 7900 XTX, Windows,
+  diagnostics off, the 5.01 defaults above active.
+  - FXAA: no bugs, no per-eye differences on moving characters; GPU-limited at this size
+    (not fully smooth at 90 fps), slightly stair-stepped edges.
+  - FSR per eye through the launcher switch (`AAMode=5`, `FSR2Quality=2`): clearly smoother
+    (subjectively about 90 % smooth), smoother edges, image a little softer; no ghosting between
+    the eyes, no smearing on moving characters, no flicker. The launcher wrote the expected keys.
+- Linux (Witcher-Linux session, AMD Radeon 890M, GE-Proton, null runtime): smoke runs with the
+  defaults (FXAA) and with FSR per eye passed; under Proton the game uses the built-in FSR 2 path
+  (five right-eye twin targets), so both FSR paths are exercised.
+- Merged #15-#19 into `remaster` (17ba81f). Build and CTest 100/100; smoke run with the SteamVR
+  null driver and the defaults passed (gameplay reached, game closed itself).
+- Open: per-eye DLSS on NVIDIA (kaarele's test only); a possible sweet spot for this hardware is
+  FSR per eye with VD Ultra and a slightly reduced FOV, not measured yet.
