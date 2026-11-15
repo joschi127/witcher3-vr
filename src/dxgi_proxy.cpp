@@ -577,6 +577,10 @@ struct Config {
     float hud_vertical_scale{0.7f};
     int hud_stereo_shift_px{-16};
     float hud_size{1.0f};
+    // [openxr] hud_filtered_sampling: the projection HUD averages the source
+    // texels under each target pixel (premultiplied bilinear taps) instead of
+    // one nearest Load, so a shrunk HUD keeps its glyph strokes.
+    bool hud_filtered_sampling{true};
     bool hud_controller_locked{};
     int recenter_virtual_key{VK_F9};
     float menu_scale{0.7f};
@@ -16878,6 +16882,12 @@ void load_config() {
             read_ini_int("openxr", "hud_stereo_shift_px", -16), -256, 256);
         g_config.hud_size = std::clamp(
             read_ini_float("openxr", "hud_size", 1.0f), 0.5f, 1.5f);
+        // Default on for 5.x only, so 4.04 keeps its validated HUD look
+        // unless the key is set.
+        g_config.hud_filtered_sampling =
+            read_ini_bool("openxr", "hud_filtered_sampling",
+                running_game_build() ==
+                    w3vr::game_build::Build::Remaster501);
         g_config.hud_controller_locked =
             read_ini_bool("openxr", "hud_controller_locked", false);
         {
@@ -53060,7 +53070,7 @@ cbuffer HudSamplingParameters : register(b1) {
     uint geometry_owns_hud_transform;
     uint reticle_pass;
     float reticle_half_extent_fraction;
-    uint sampling_padding;
+    uint filtered_sampling;
 };
 struct PixelInput {
     float4 position : SV_Position;
@@ -53075,11 +53085,32 @@ float3 srgb_to_linear(float3 value) {
         high, low,
         step(value, float3(0.04045, 0.04045, 0.04045)));
 }
+// Linear-light, alpha-premultiplied HUD texel; out-of-range Loads return 0
+// (transparent), so the HUD edges fade instead of smearing.
+float4 load_premultiplied(int2 coordinate) {
+    float4 texel = hud_texture.Load(int3(coordinate, 0));
+    texel.rgb = srgb_to_linear(texel.rgb) * texel.a;
+    return texel;
+}
+float4 bilinear_premultiplied(float2 position) {
+    float2 q = position - 0.5;
+    int2 base = int2(floor(q));
+    float2 f = q - float2(base);
+    float4 top = lerp(load_premultiplied(base),
+        load_premultiplied(base + int2(1, 0)), f.x);
+    float4 bottom = lerp(load_premultiplied(base + int2(0, 1)),
+        load_premultiplied(base + int2(1, 1)), f.x);
+    return lerp(top, bottom, f.y);
+}
 float4 ps_main(PixelInput input) : SV_Target0 {
     uint source_width, source_height;
     hud_texture.GetDimensions(source_width, source_height);
     float2 source_size = float2(source_width, source_height);
     float2 source_position = input.uv * source_size;
+    // Source texels covered by one target pixel (the HUD plane is usually
+    // minified, e.g. 2:1 at hud_size 0.5). Taken before any branch.
+    float2 footprint_x = ddx(source_position);
+    float2 footprint_y = ddy(source_position);
     int2 coordinate;
     if (geometry_owns_hud_transform != 0u) {
         // UVs are perspective-correct across the physical cyclopean plane.
@@ -53114,6 +53145,25 @@ float4 ps_main(PixelInput input) : SV_Target0 {
     if ((reticle_pass == 1u && inside_reticle) ||
         (reticle_pass == 2u && !inside_reticle)) {
         return float4(0.0, 0.0, 0.0, 0.0);
+    }
+    if (filtered_sampling != 0u && geometry_owns_hud_transform != 0u) {
+        // Box-filter the pixel footprint with up to 4x4 bilinear taps in
+        // premultiplied linear light. A single nearest Load drops 3 of 4 HUD
+        // texels at 2:1, which breaks glyph strokes and crawls with the head.
+        float footprint = max(length(footprint_x), length(footprint_y));
+        int taps = int(clamp(ceil(footprint - 0.01), 1.0, 4.0));
+        float4 sum = float4(0.0, 0.0, 0.0, 0.0);
+        for (int y = 0; y < taps; ++y) {
+            for (int x = 0; x < taps; ++x) {
+                float2 offset = (float2(x, y) + 0.5) / float(taps) - 0.5;
+                sum += bilinear_premultiplied(source_position +
+                    offset.x * footprint_x + offset.y * footprint_y);
+            }
+        }
+        sum /= float(taps * taps);
+        return sum.a > (1.0 / 1024.0)
+            ? float4(sum.rgb / sum.a, sum.a)
+            : float4(0.0, 0.0, 0.0, 0.0);
     }
     // [FIX:MODE3-HUD-SRGB 1/1] REDengine stores display-encoded HUD RGB in an
     // UNORM t1 view. Decode it before blending into the OpenXR sRGB projection
@@ -53276,8 +53326,9 @@ float4 ps_main(PixelInput input) : SV_Target0 {
     g_xr_hud_srv_increment =
         g_d3d12_device->GetDescriptorHandleIncrementSize(heap_desc.Type);
     log_line(
-        "Mode 3 projection HUD pipeline ready descriptors=%u format=%u",
-        descriptor_count, static_cast<unsigned>(target_format));
+        "Mode 3 projection HUD pipeline ready descriptors=%u format=%u filtered_sampling=%d",
+        descriptor_count, static_cast<unsigned>(target_format),
+        g_config.hud_filtered_sampling ? 1 : 0);
     return true;
 }
 
@@ -53882,7 +53933,8 @@ bool composite_mode3_hud_into_projection_image(
             0,
             headset_projection ? 1u : 0u,
             distance_converged_reticle ? 1u : 0u,
-            0, 0};
+            0,
+            g_config.hud_filtered_sampling ? 1u : 0u};
         memcpy(&sampling_constants[2], &hud_scale_x, sizeof(hud_scale_x));
         memcpy(&sampling_constants[3], &hud_scale_y, sizeof(hud_scale_y));
         memcpy(

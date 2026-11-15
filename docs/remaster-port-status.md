@@ -1068,3 +1068,19 @@ From kaarele's port status log (state `e729bd9`, MIT); our own results follow.
   measurable cost. GPU unchanged.
 - 4.04 with the null driver: the existing hook at the fixed 4.04 address, passed, no errors.
 - Open: headset check (people at the edge of the view animate; a busy town).
+
+## 2026-11-15: HUD fixes taken over from kaarele/witcher3-remastered-vr
+
+From kaarele's port status log (state `e729bd9`, MIT); our own results follow.
+
+### Filtered HUD sampling (`hud_filtered_sampling`, default on 5.x)
+- The projection HUD shader sampled the native HUD texture with one nearest `Load` per target
+  pixel; with a shrunk HUD (`hud_size` 0.5) it dropped 3 of 4 texels, which broke glyph strokes
+  and made text crawl with the head.
+- Now (`[openxr] hud_filtered_sampling=1`, default on 5.x; 4.04 keeps the old sampling unless
+  the key is set to 1) the shader averages up to 4x4 bilinear taps
+  over the pixel's footprint in premultiplied linear light. Only the headset-projection HUD
+  plane uses it; the Cinema panel and the legacy fallback keep the nearest `Load`. 0 restores
+  the old sampling.
+- Status: kaarele tested it in the headset. This fork: build and CTest only so far; open:
+  headset check on 5.01 (text sharpness at `hud_size` 0.85) and a 4.04 smoke run.
