@@ -61869,8 +61869,8 @@ void render_openxr_test_frame(
     menu_layer.subImage.imageRect = menu_image_rect;
     menu_layer.subImage.imageArrayIndex = 0;
     // The frontend can report a formally valid LOCAL pose at floor height
-    // before REDengine's gameplay camera is active. Keep only that startup
-    // menu in VIEW space; pause/inventory menus remain LOCAL world-locked.
+    // before REDengine's gameplay camera is active. On 4.04 that startup menu
+    // stays in VIEW space; pause/inventory menus remain LOCAL world-locked.
     // Clean Mono never enables dual rendering, so its first HMD gameplay
     // camera is the readiness edge for switching later menus to LOCAL space.
     const bool clean_mono_gameplay_camera_seen =
@@ -61880,29 +61880,53 @@ void render_openxr_test_frame(
         !g_engine_dual_render_active.load(std::memory_order_relaxed) &&
         (!clean_mono_transport_active() ||
             !clean_mono_gameplay_camera_seen);
+    // [FIX:WORLD-LOCKED-STARTUP-PANEL] On 5.01 the startup menu and the first
+    // loading screen after it are world-locked too (kind 3). They stayed in
+    // VIEW space for the whole frontend, so the loading screen followed every
+    // head turn. Against the early floor-height pose this kind re-anchors once
+    // the head is more than 0.5 m away from where it was anchored.
     const int spatial_panel_kind = startup_frontend_panel
-        ? 0
+        ? (running_game_build() == w3vr::game_build::Build::Remaster501
+            ? 3 : 0)
         : (fullscreen_menu ? 1
         : (cinema_panel ? 2 : 0));
     static int anchored_panel_kind{};
     static bool anchored_panel_pose_valid{};
     static XrPosef anchored_panel_pose{};
+    static XrVector3f anchored_panel_head_position{};
     const XrViewStateFlags required_panel_pose_flags =
         XR_VIEW_STATE_ORIENTATION_VALID_BIT |
         XR_VIEW_STATE_POSITION_VALID_BIT;
     const bool panel_tracking_pose_valid = views_valid &&
         (located_view_state_flags & required_panel_pose_flags) ==
             required_panel_pose_flags;
+    const XrView* anchor_views =
+        isolate_publication_pose && !frame_was_prepared
+        ? publication_views.data()
+        : g_xr_views.data();
+    bool startup_panel_head_moved = false;
+    if (spatial_panel_kind == 3 && anchored_panel_pose_valid &&
+        anchored_panel_kind == 3 && panel_tracking_pose_valid) {
+        const float dx = (anchor_views[0].pose.position.x +
+            anchor_views[1].pose.position.x) * 0.5f -
+            anchored_panel_head_position.x;
+        const float dy = (anchor_views[0].pose.position.y +
+            anchor_views[1].pose.position.y) * 0.5f -
+            anchored_panel_head_position.y;
+        const float dz = (anchor_views[0].pose.position.z +
+            anchor_views[1].pose.position.z) * 0.5f -
+            anchored_panel_head_position.z;
+        constexpr float kStartupPanelReanchorMeters = 0.5f;
+        startup_panel_head_moved = dx * dx + dy * dy + dz * dz >
+            kStartupPanelReanchorMeters * kStartupPanelReanchorMeters;
+    }
     if (spatial_panel_kind == 0) {
         anchored_panel_kind = 0;
         anchored_panel_pose_valid = false;
     } else if (panel_tracking_pose_valid &&
         (!anchored_panel_pose_valid ||
-            anchored_panel_kind != spatial_panel_kind)) {
-        const XrView* anchor_views =
-            isolate_publication_pose && !frame_was_prepared
-            ? publication_views.data()
-            : g_xr_views.data();
+            anchored_panel_kind != spatial_panel_kind ||
+            startup_panel_head_moved)) {
         const auto& tracked_orientation =
             anchor_views[0].pose.orientation;
         // [FIX:LEVEL-SPATIAL-PANEL 1/1] Keep panels upright in the LOCAL
@@ -61932,12 +61956,14 @@ void render_openxr_test_frame(
             head_position.x + panel_offset.x,
             head_position.y + panel_offset.y,
             head_position.z + panel_offset.z};
+        anchored_panel_head_position = head_position;
         anchored_panel_kind = spatial_panel_kind;
         anchored_panel_pose_valid = true;
         log_taau_trace_line(
             "OpenXR spatial panel anchored kind=%s present=%llu "
             "position=%.4f,%.4f,%.4f orientation=%.5f,%.5f,%.5f,%.5f",
-            fullscreen_menu ? "menu" : "cinema",
+            spatial_panel_kind == 3 ? "startup"
+                : (fullscreen_menu ? "menu" : "cinema"),
             static_cast<unsigned long long>(current_present),
             anchored_panel_pose.position.x,
             anchored_panel_pose.position.y,
