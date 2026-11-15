@@ -769,6 +769,10 @@ struct Config {
     // optimized DLL follows the normal low-overhead gaming path.
     bool logging_enabled{false};
     bool runtime_diagnostics{false};
+    // [debug] history_event_log: only the rare per-eye history events
+    // (resets, Full VR camera cuts) go to witcher3vr.log, for a headset run
+    // without the cost of runtime_diagnostics (which logging_enabled needs).
+    bool history_event_log{false};
     // [DIAG:SHADER-FINGERPRINT-CENSUS] Also write every distinct shader's
     // bytecode to witcher3vr_shaders\ for offline matching between builds.
     bool shader_inventory_dump{false};
@@ -11335,6 +11339,28 @@ void log_vrs_line(const char* fmt, ...) {
     va_end(args);
 }
 
+// Rare per-eye history events (resets, camera cuts): with full diagnostics
+// through log_line's writer, otherwise only with [debug] history_event_log=1,
+// so a headset run can record them without the cost of runtime_diagnostics.
+bool history_event_log_active() {
+    return g_config.history_event_log ||
+        (g_config.logging_enabled && g_config.runtime_diagnostics);
+}
+
+void log_history_event_line(const char* fmt, ...) {
+    if (!history_event_log_active()) {
+        return;
+    }
+    va_list args{};
+    va_start(args, fmt);
+    if (g_config.logging_enabled && g_config.runtime_diagnostics) {
+        write_log_line_v(fmt, args);
+    } else {
+        append_log_file_line_v(fmt, args);
+    }
+    va_end(args);
+}
+
 // [PERF:DESCRIPTOR-SHADOW-STORE 6/14] The descriptor store's startup and
 // warning lines: in the census log during a measurement run (diagnostics
 // off), otherwise through log_line; never twice.
@@ -17236,6 +17262,8 @@ void load_config() {
         g_config.logging_enabled = read_ini_bool(
             "debug", "logging_enabled", false);
         g_config.runtime_diagnostics = read_ini_bool("debug", "runtime_diagnostics", false);
+        g_config.history_event_log =
+            read_ini_bool("debug", "history_event_log", false);
         g_config.shader_inventory_dump =
             read_ini_bool("debug", "shader_inventory_dump", false);
         g_config.test_record_input = read_ini_bool("test", "record_input", false);
@@ -42456,6 +42484,26 @@ void __fastcall hook_engine_view_rebuild(float* view) {
                     (automatic_full_vr_cutscene ? "full_vr_entry" :
                         "full_vr_exit"));
         }
+        // 5.x per-eye FSR/DLSS: log Full VR camera cuts with the eye whose
+        // view is being built, to line them up with the per-eye resets.
+        if ((remaster_engine_fsr_stereo_active() ||
+                remaster_engine_dlss_stereo_active()) &&
+            (previous_full_vr != automatic_full_vr_cutscene ||
+                native_camera_changed) &&
+            history_event_log_active()) {
+            static std::atomic<uint32_t> cut_logs{};
+            if (cut_logs.fetch_add(1, std::memory_order_relaxed) < 2000) {
+                log_history_event_line("5.x Full VR camera change present=%llu "
+                    "factory_eye=%d reason=%s camera=%p previous=%p",
+                    static_cast<unsigned long long>(present),
+                    g_engine_factory_eye,
+                    native_camera_changed ? "native_camera_change" :
+                        (automatic_full_vr_cutscene ? "full_vr_entry" :
+                            "full_vr_exit"),
+                    reinterpret_cast<void*>(current_native_camera),
+                    reinterpret_cast<void*>(previous_native_camera));
+            }
+        }
     }
     const bool hmd_scene_camera = !native_loading_video &&
         (world_camera || automatic_full_vr_cutscene);
@@ -45991,6 +46039,7 @@ std::atomic<uint64_t> g_remaster_fsr_passthrough_calls{};
 std::atomic<uint64_t> g_remaster_fsr_forced_resets{};
 std::atomic<uint64_t> g_remaster_fsr_last_tagged_present{UINT64_MAX};
 std::atomic<uint32_t> g_remaster_fsr_log_count{};
+std::atomic<uint32_t> g_remaster_fsr_reset_log_count{};
 std::atomic<uint8_t> g_remaster_fsr_first_eye_logged{};
 
 bool remaster_engine_fsr_per_eye_running() {
@@ -46191,6 +46240,20 @@ void remaster_fsr_end_dispatch_locked(const RemasterFsrDispatch& d,
             g_remaster_fsr_reset_pending = true;
             g_remaster_fsr_reset_frame = d.frame_index;
             g_remaster_fsr_reset_source = d.slot;
+        }
+        // Every history reset, the game's and ours, with the pair position, so
+        // a one-eye artefact at a camera cut can be traced in a headset run.
+        if (history_event_log_active() &&
+            (d.game_reset != 0 || d.force_reset) &&
+            g_remaster_fsr_reset_log_count.fetch_add(
+                1, std::memory_order_relaxed) < 4000) {
+            log_history_event_line("FSR per-eye reset slot=%zu eye=%d frame_index=%u "
+                "game=%d forced=%d first_eye_of_pair=%d other_last=%u "
+                "present=%llu",
+                d.slot, d.eye, d.frame_index, d.game_reset != 0 ? 1 : 0,
+                d.force_reset ? 1 : 0, first_eye_of_pair ? 1 : 0,
+                other_guards.last_frame_index,
+                static_cast<unsigned long long>(g_present_count.load()));
         }
         guards.last_frame_index = d.frame_index;
         guards.valid = true;
