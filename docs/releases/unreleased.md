@@ -25,3 +25,9 @@ Collected on `remaster` since v0.9.8v2-remastered.3; this file becomes the next 
   `[engine] temporal_backend=dlss`, which before had to be set by hand. Confirmed working on an
   NVIDIA RTX 5090 by a user (#23); not testable on the AMD test machine of this fork. The Linux tool
   accepts `configure --aa dlss` on 5.01 as well.
+- **No flash at cutscene camera cuts with FSR or DLSS per eye (5.x):** the game never restarts the
+  upscaler history at a camera cut, so after a cut in a dialogue or cutscene both eyes briefly
+  blended in the previous shot. The mod now restarts both eye histories at every Full VR camera
+  cut (`[engine] remaster_cut_history_reset`, on by default), as it already did for TAAU on 4.04.
+  Tested in the headset on 5.01. For test runs, `[debug] history_event_log=1` writes only these
+  history events to `witcher3vr.log`.
