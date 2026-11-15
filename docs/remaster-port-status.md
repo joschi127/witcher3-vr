@@ -1170,3 +1170,17 @@ Open: a 4.04 headset check of #30 (the menu panel change is not limited to 5.01)
   each other (half IPD on a distant landscape); after, no shift. FSR resets during the menu: one per
   frame before, none after (eye 1 restarts once when the menu closes). D3D12 debug layer: no errors.
 - Open: headset check (no double image, AA behind the menu, no artefact when the menu closes).
+
+## 2026-11-16: sun shadows once per eye pair, taken over from kaarele/witcher3-remastered-vr
+
+- `[FEATURE:REMASTER-SHADOW-PAIR-REUSE]` (kaarele, 7 parts): on 5.01 both renders of a pair run
+  the whole sun-shadow job; the second render now skips the cascade fit/caster cull and the cascade
+  depth passes and samples the first render's map with its cascade constants. Every hook checks the
+  game's code bytes first; a hash of the cascade set before the skip and a fail-safe
+  (`shadow_cascade_authority_policy.h`, with kaarele's unit test) turn it off after mismatches.
+  `[perf] shadow_profile=1` (with the VRS census log) times the stages per eye.
+- Null driver (latest save, horse on a hill, 2292x1884, FSR per eye): 185 of 186 pairs reused, no
+  fallback except menu/untagged frames (`gate`, `no_tag`); shadow work per pair: right eye
+  (seed) ~3.6 ms in the shadow passes, left eye ~0.1 ms. Shadows match between the eye images;
+  mean brightness of the eyes equal. D3D12 debug layer: no errors.
+- Open: headset check (shadows identical in both eyes, no shimmer at cascade borders, GPU headroom).
