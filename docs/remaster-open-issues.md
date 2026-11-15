@@ -51,6 +51,8 @@ black, with or without the mod (see `remaster-port-status.md`, 2026-10-17).
 - `hud_size=0.8` was clearly better to read than 1.0 (2026-10-15). `hud_size=0.85` with
   `hud_controller_locked=1` (HUD stays in place when turning the head) works well on 5.01 and is
   much better to read (2026-10-16). Kept open until it is a default or a launcher setting.
+- With `hud_controller_locked=1`, Full VR cutscenes and dialogues kept a head-locked HUD, so
+  subtitles followed the head. Since 2026-11-15 the lock also applies there (headset check open).
 
 ### Anti-aliasing on 5.01
 - Edges looked rough at Virtual Desktop "High" (1748x1468 per eye). Rendering at the runtime's

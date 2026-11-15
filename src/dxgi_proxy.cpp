@@ -53594,10 +53594,15 @@ bool composite_mode3_hud_into_projection_image(
     // [TRIAL:STATIC-HUD-MARKER-POSE V1570] The experimental HUD always faces
     // the no-headset game front calibrated by F9. Neither a game-camera turn
     // nor headset rotation may re-anchor it to the user's current gaze.
-    // Reticle, Cinema, Full VR and menu geometry keep their validated route.
+    // Reticle, Cinema and menu geometry keep their validated route.
+    // [FEATURE:LOCKED-HUD-FULL-VR-CUTSCENES] Full VR cutscenes and dialogues
+    // follow the same lock, so their subtitles and dialogue choices stay in
+    // the recentred direction instead of following the head.
     auto hud_plane_geometry = hud_eye_geometry;
     const bool controller_locked_hud_active = headset_projection &&
-        fixed_gameplay_hud_requested() && !automatic_full_vr_cutscene;
+        (automatic_full_vr_cutscene
+            ? g_config.hud_controller_locked
+            : fixed_gameplay_hud_requested());
     bool controller_hud_visible = true;
     if (controller_locked_hud_active) {
         XrQuaternionf center_orientation{};
