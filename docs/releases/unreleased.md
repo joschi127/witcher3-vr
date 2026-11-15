@@ -15,3 +15,8 @@ Collected on `remaster` since v0.9.8v2-remastered.4; this file becomes the next 
   menu is open, and FSR/DLSS keep one history for the menu view. The workaround of .4 (every
   second frame held) is removed, so the scene behind the menu runs at the full frame rate and is
   anti-aliased again. Taken over from kaarele's fork (`MENU-MONO-CAMERA`), plus the FSR part.
+- **Sun shadows once per eye pair (5.x):** the game computed the sun shadow cascades for each eye
+  separately, although both eyes of a pair see the same sun shadows. The second eye now reuses the
+  first eye's shadow map (`[engine] remaster_shadow_pair_reuse=1`, default; `0` turns it off). It
+  checks that nothing changed in between and switches itself off after repeated mismatches. Saves
+  about 3.5 ms of shadow work per eye pair in the test scene. Taken over from kaarele's fork.

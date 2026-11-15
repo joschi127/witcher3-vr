@@ -684,6 +684,14 @@ struct Config {
     // cut, as the 4.04 TAAU route does; the game's own reset is not reliable
     // once the mod drives the cutscene camera.
     bool remaster_cut_history_reset{true};
+    // 5.01 only: render the sun shadow cascades once per stereo pair. 1 = the
+    // second render of an exact pair skips the cascade fit/cull and the
+    // cascade depth passes and samples the first render's map with the same
+    // cascade set; 9 = measurement only (skips the depth passes, keeps each
+    // eye's own fit, so the second eye's shadows are misregistered).
+    // [perf] shadow_profile times the shadow stages per eye in the VRS census.
+    int remaster_shadow_pair_reuse{};
+    bool perf_shadow_profile{false};
     // 5.01 strict Stereo: _pair_jitter gives both eye renders of a pair the
     // same temporal jitter sample, advancing once per pair, so each eye's own
     // DLSS history sees the whole Halton sequence; _pair_noise does the same
@@ -16209,6 +16217,8 @@ void log_vrs_census_locked(uint64_t present);
 void log_job_wait_profile_locked(uint64_t window_presents, int64_t qpc_frequency);
 void log_pair_barrier_census_locked(uint64_t window_presents, int64_t qpc_frequency);
 void log_pair_enqueue_census_locked(uint64_t window_presents);
+void log_shadow_census_locked(uint64_t window_presents, int64_t qpc_frequency);
+void record_shadow_profile_draw();
 void log_descriptor_shadow_census_locked();
 void log_pair_temporal_census_locked(uint64_t window_presents);
 void log_animated_visibility_census_locked(uint64_t window_presents);
@@ -16304,6 +16314,7 @@ void log_vrs_census_locked(uint64_t present) {
     log_pair_barrier_census_locked(window_presents, frequency.QuadPart);
     // [FIX:PAIR-ENQUEUE-AFTER-FENCE 4/11]
     log_pair_enqueue_census_locked(window_presents);
+    log_shadow_census_locked(window_presents, frequency.QuadPart);
     log_descriptor_shadow_census_locked();
     log_pair_temporal_census_locked(window_presents);
     // [FIX:REMASTER-ANIMATED-VISIBILITY 5/8]
@@ -17506,6 +17517,25 @@ void load_config() {
         g_config.remaster_cut_history_reset =
             running_game_build() == w3vr::game_build::Build::Remaster501 &&
             read_ini_bool("engine", "remaster_cut_history_reset", true);
+        // [FEATURE:REMASTER-SHADOW-PAIR-REUSE 1/7] Sun shadow cascades once
+        // per stereo pair (0 off, 1 reuse, 9 depth-pass skip only; this fork:
+        // 1 by default on 5.01, as in kaarele's release ini). The
+        // profile follows the other [perf] switches and needs the census log.
+        g_config.remaster_shadow_pair_reuse = 0;
+        g_config.perf_shadow_profile = false;
+        if (running_game_build() == w3vr::game_build::Build::Remaster501) {
+            const int shadow_pair_reuse =
+                read_ini_int("engine", "remaster_shadow_pair_reuse", 1);
+            g_config.remaster_shadow_pair_reuse =
+                shadow_pair_reuse == 1 || shadow_pair_reuse == 9
+                    ? shadow_pair_reuse : 0;
+            if (g_config.remaster_shadow_pair_reuse != shadow_pair_reuse) {
+                log_line("Shadow pair reuse mode=%d is unknown; off",
+                    shadow_pair_reuse);
+            }
+            g_config.perf_shadow_profile = g_config.vrs_log_file &&
+                read_ini_bool("perf", "shadow_profile", false);
+        }
         // [FIX:REMASTER-PAIR-JITTER 2/6] [FIX:REMASTER-PAIR-NOISE 2/4]
         // Default on (this fork, as in kaarele's release settings).
         g_config.remaster_pair_jitter = false;
@@ -27989,6 +28019,9 @@ void STDMETHODCALLTYPE hook_draw_indexed_instanced(
             start_instance_location);
         return;
     }
+    if (g_config.perf_shadow_profile) {
+        record_shadow_profile_draw();
+    }
     // [PERF:NOAA-PIPELINE-LOOKUP V1441 1/3] Foliage, smoke and focus inspect
     // the same currently bound PSO. Publish one nonblocking snapshot for the
     // draw instead of probing the command-list table up to three times.
@@ -29364,6 +29397,9 @@ void STDMETHODCALLTYPE hook_draw_instanced(
             command_list, vertex_count_per_instance, instance_count,
             start_vertex_location, start_instance_location);
         return;
+    }
+    if (g_config.perf_shadow_profile) {
+        record_shadow_profile_draw();
     }
     auto* draw_pipeline =
         load_command_list_pipeline_effect_nonblocking(command_list);
@@ -45994,6 +46030,1414 @@ uintptr_t __fastcall hook_remaster_dlss_sr_apply(
         "apply", state, frame_data, params, pass, fifth);
 }
 
+// [FEATURE:REMASTER-SHADOW-PAIR-REUSE 2/7] Sun shadow cascades once per
+// stereo pair. On 5.01 both eyes run the whole sun-shadow job inside the frame
+// builder, one after the other on the render thread, and overwrite the same
+// persistent state: the cascade set at collector+0x100, the SpeedTree cascade
+// frusta at [collector+0x4EE8]+0x1C0 and one D16 shadow map array
+// (renderer+0x418). The lighting constants are rebuilt from the set on every
+// render. So the second render of an exact pair can skip the cascade fit and
+// caster cull (0x141BF39B0) and the cascade depth passes (0x141D1EBF0): its
+// lighting then samples the first render's map with the first render's
+// cascade constants. The frame builder's end-of-render cleanup 0x141BF7F10
+// zeroes the set header (set+0 = collector, set+0x8 = cascade count) and the
+// sixteen draw-list counts after every render; the views, caster frusta,
+// texel constants and parity stay. The reuser's SpeedTree cascade views
+// (0x141CEBC30) and lighting constants (0x141C704B0, from the lighting stage
+// 0x141C2A860 and from 0x141D34AE0) read the count, so the seed keeps the
+// header and a skipped fit writes it back. The draw lists stay empty: only
+// the depth passes read them, and a skipped fit always skips those. A hash of
+// the persistent fit bytes, taken after the seed's fit and checked before the
+// skip, shows that nothing else touched the set in between.
+constexpr uintptr_t kRemaster501ShadowCascadeFitRva = 0x1BF39B0;
+constexpr uintptr_t kRemaster501ShadowCascadeRenderRva = 0x1D1EBF0;
+constexpr uintptr_t kRemaster501SpeedTreeShadowViewsRva = 0x1CEBC30;
+constexpr uintptr_t kRemaster501RenderShadowsRva = 0x1C34E90;
+
+struct EngineCodeBytes {
+    uintptr_t rva;
+    const uint8_t* bytes;
+    size_t size;
+};
+
+// Fit and cull (collector): the prologue through lea rbx,[rcx+0x100] (the
+// set); after the fit, set+0 = collector, the frame+0xF5E4 and set+0x8 count
+// tests and the copy of the caster frusta to [collector+0x4EE8]+0x1C0 with the
+// count at +0x6C0. The fit 0x141CD7500 toggles the parity byte set+0x4CA0.
+constexpr uint8_t kShadowFitPrologue[] = {
+    0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x74, 0x24, 0x10, 0x48, 0x89,
+    0x7C, 0x24, 0x18, 0x4C, 0x89, 0x74, 0x24, 0x20, 0x55, 0x48, 0x81, 0xEC,
+    0x60, 0x05, 0x00, 0x00, 0x48, 0x8D, 0x6C, 0x24, 0x40, 0x48, 0x83, 0xE5,
+    0xE0, 0x48, 0x8B, 0x51, 0x10, 0x48, 0x8D, 0x99, 0x00, 0x01, 0x00, 0x00};
+constexpr uint8_t kShadowFitStore[] = {
+    0x48, 0x89, 0x3B, 0x48, 0x8B, 0x47, 0x10, 0x44, 0x38, 0xB0, 0xE4, 0xF5,
+    0x00, 0x00, 0x0F, 0x84, 0x26, 0x02, 0x00, 0x00, 0x0F, 0xB7, 0x87, 0x08,
+    0x01, 0x00, 0x00, 0x66, 0x85, 0xC0, 0x0F, 0x84, 0x16, 0x02, 0x00, 0x00,
+    0x4C, 0x8B, 0x8F, 0xE8, 0x4E, 0x00, 0x00, 0x4D, 0x85, 0xC9, 0x0F, 0x84,
+    0xD2, 0x00, 0x00, 0x00, 0x41, 0x89, 0x81, 0xC0, 0x06, 0x00, 0x00};
+constexpr uint8_t kShadowFitFrusta[] = {0x49, 0x8D, 0x81, 0xC0, 0x01, 0x00, 0x00};
+constexpr uint8_t kShadowFitParity[] = {0x41, 0x2A, 0x87, 0xA0, 0x4C, 0x00, 0x00};
+constexpr EngineCodeBytes kShadowFitCode[] = {
+    {0x1BF39B0, kShadowFitPrologue, sizeof(kShadowFitPrologue)},
+    {0x1BF3A74, kShadowFitStore, sizeof(kShadowFitStore)},
+    {0x1BF3AC0, kShadowFitFrusta, sizeof(kShadowFitFrusta)},
+    {0x1CD8531, kShadowFitParity, sizeof(kShadowFitParity)},
+};
+// Cascade depth passes (renderer, frame, set, smap): the prologue; the loads
+// of frame+0xF5E4 and the set count; and their early exit, which jumps
+// straight to the epilogue (nothing recorded: no clear, no barrier, no draw).
+constexpr uint8_t kShadowRenderPrologue[] = {
+    0x4C, 0x89, 0x4C, 0x24, 0x20, 0x4C, 0x89, 0x44, 0x24, 0x18, 0x48, 0x89,
+    0x54, 0x24, 0x10, 0x48, 0x89, 0x4C, 0x24, 0x08, 0x55, 0x53, 0x56, 0x57,
+    0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57, 0x48, 0x8D, 0xAC, 0x24,
+    0x08, 0xF2, 0xFF, 0xFF};
+constexpr uint8_t kShadowRenderLoads[] = {
+    0x0F, 0xB6, 0xB2, 0xE4, 0xF5, 0x00, 0x00, 0x4D, 0x8B, 0xF8, 0x41, 0x0F,
+    0xB7, 0x78, 0x08};
+constexpr uint8_t kShadowRenderEarlyExit[] = {
+    0x40, 0x84, 0xF6, 0x0F, 0x84, 0x90, 0x0A, 0x00, 0x00, 0x66, 0x85, 0xFF,
+    0x0F, 0x84, 0x87, 0x0A, 0x00, 0x00};
+constexpr uint8_t kShadowRenderEpilogue[] = {
+    0x48, 0x81, 0xC4, 0xF8, 0x0E, 0x00, 0x00, 0x41, 0x5F, 0x41, 0x5E, 0x41,
+    0x5D, 0x41, 0x5C, 0x5F, 0x5E, 0x5B, 0x5D, 0xC3};
+constexpr EngineCodeBytes kShadowRenderCode[] = {
+    {0x1D1EBF0, kShadowRenderPrologue, sizeof(kShadowRenderPrologue)},
+    {0x1D1EC29, kShadowRenderLoads, sizeof(kShadowRenderLoads)},
+    {0x1D1ECC2, kShadowRenderEarlyExit, sizeof(kShadowRenderEarlyExit)},
+    {0x1D1F75B, kShadowRenderEpilogue, sizeof(kShadowRenderEpilogue)},
+};
+// End-of-render cleanup 0x141BF7F10(collector), called by the frame builder at
+// 0x141C1BD29 after the recording step (0x141C1BCD1) on every render. It joins
+// the render's SpeedTree shadow job ([collector+8] scene, [scene+0x188]
+// SpeedTree, 0x141CED670), so a skipped depth pass needs no join of its own,
+// and it zeroes set+0 and the set count, which a skipped fit writes back.
+constexpr uint8_t kShadowCleanupSpeedTreeJoin[] = {
+    0x48, 0x8B, 0x7B, 0x08, 0x48, 0x85, 0xFF, 0x74, 0x34, 0x48, 0x8B, 0xBF,
+    0x88, 0x01, 0x00, 0x00, 0x48, 0x85, 0xFF, 0x74, 0x28, 0x48, 0x8B, 0xCF,
+    0xE8, 0xF0, 0x56, 0x0F, 0x00};
+constexpr uint8_t kShadowCleanupSetHeader[] = {
+    0x33, 0xF6, 0xC6, 0x83, 0xC2, 0x4D, 0x00, 0x00, 0x00, 0x48, 0x89, 0xB3,
+    0x00, 0x01, 0x00, 0x00, 0xBF, 0xFF, 0xFF, 0xFF, 0xFF, 0x66, 0x89, 0xB3,
+    0x08, 0x01, 0x00, 0x00};
+constexpr uint8_t kShadowFrameBuilderRecord[] = {0xE8, 0xCA, 0x69, 0x11, 0x00};
+constexpr uint8_t kShadowFrameBuilderCleanup[] = {
+    0x48, 0x8D, 0x8E, 0x40, 0x07, 0x00, 0x00, 0xE8, 0xE2, 0xC1, 0xFD, 0xFF};
+constexpr EngineCodeBytes kShadowCleanupCode[] = {
+    {0x1BF7F63, kShadowCleanupSpeedTreeJoin,
+        sizeof(kShadowCleanupSpeedTreeJoin)},
+    {0x1BF7FB1, kShadowCleanupSetHeader, sizeof(kShadowCleanupSetHeader)},
+    {0x1C1BCD1, kShadowFrameBuilderRecord, sizeof(kShadowFrameBuilderRecord)},
+    {0x1C1BD22, kShadowFrameBuilderCleanup,
+        sizeof(kShadowFrameBuilderCleanup)},
+};
+// Timers only: SpeedTree cascade views (speedtree, collector) and the
+// RenderShadows stage (renderer, collector) around the depth passes.
+constexpr uint8_t kSpeedTreeShadowViewsPrologue[] = {
+    0x40, 0x55, 0x53, 0x41, 0x55, 0x41, 0x56, 0x48, 0x8D, 0x6C, 0x24, 0x88,
+    0x48, 0x81, 0xEC, 0x78, 0x01, 0x00, 0x00, 0x83, 0xB9, 0xE0, 0x39, 0x00};
+constexpr uint8_t kRenderShadowsPrologue[] = {
+    0x48, 0x8B, 0xC4, 0x41, 0x55, 0x41, 0x57, 0x48, 0x83, 0xEC, 0x68, 0x4C,
+    0x8B, 0x7A, 0x10, 0x48, 0x89, 0x58, 0x10, 0x48, 0x89, 0x68, 0x18, 0x48};
+constexpr EngineCodeBytes kSpeedTreeShadowViewsCode[] = {
+    {0x1CEBC30, kSpeedTreeShadowViewsPrologue,
+        sizeof(kSpeedTreeShadowViewsPrologue)},
+};
+constexpr EngineCodeBytes kRenderShadowsCode[] = {
+    {0x1C34E90, kRenderShadowsPrologue, sizeof(kRenderShadowsPrologue)},
+};
+
+constexpr size_t kShadowCollectorFrameOffset = 0x10;
+constexpr size_t kShadowCollectorActiveOffset = 0xCA;
+constexpr size_t kShadowCollectorSetOffset = 0x100;
+constexpr size_t kShadowCollectorSceneObjectOffset = 0x4EE8;
+constexpr size_t kShadowSetCountOffset = 0x8;
+constexpr size_t kShadowSetFrustaOffset = 0x20;
+constexpr size_t kShadowSetFrustumBytes = 0x140;
+constexpr size_t kShadowSetEntryOffset = 0x520;
+constexpr size_t kShadowSetEntryStride = 0x11E0;
+// Views A, B and C and the texel constants of an entry; its four draw lists
+// come first and are what the depth passes consume.
+constexpr size_t kShadowSetEntryFitOffset = 0x30;
+constexpr size_t kShadowSetParityOffset = 0x4CA0;
+constexpr size_t kShadowSceneObjectFrustaOffset = 0x1C0;
+constexpr size_t kShadowSceneObjectCountOffset = 0x6C0;
+constexpr size_t kShadowFrameFarOffset = 0x44;
+constexpr size_t kShadowFrameSunOffset = 0xEFB0;
+// Split count, split distances, constant/bias parameters and the per-cascade
+// parameters at +0xF59C.
+constexpr size_t kShadowFrameSplitOffset = 0xF548;
+constexpr size_t kShadowFrameSplitBytes = 0x64;
+constexpr size_t kShadowFrameCascadeParamsOffset = 0xF59C;
+// Sun shadows on (+0xF5E4) through SpeedTree on (+0xF5E8); terrain and
+// SpeedTree shadows (+0xF628/+0xF629).
+constexpr size_t kShadowFrameEnabledOffset = 0xF5E4;
+constexpr size_t kShadowFrameEnabledBytes = 5;
+constexpr size_t kShadowFrameCasterFlagsOffset = 0xF628;
+constexpr uint16_t kShadowMaxCascades = 4;
+// Off for the session after this many mismatching pairs in a row, or more
+// than kShadowPairFailSafeWindowMismatches in kShadowPairFailSafeWindow
+// reuse attempts.
+constexpr uint32_t kShadowPairFailSafeConsecutive = 8;
+constexpr uint32_t kShadowPairFailSafeWindow = 256;
+constexpr uint32_t kShadowPairFailSafeWindowMismatches = 32;
+constexpr uint64_t kShadowPairLogPresentInterval = 1200;
+
+using EngineShadowCascadeFitFn = void(__fastcall*)(void*);
+using EngineShadowCascadeRenderFn = void(__fastcall*)(void*, void*, void*, void*);
+using EngineShadowStageFn = void(__fastcall*)(void*, void*);
+EngineShadowCascadeFitFn g_engine_shadow_cascade_fit{};
+EngineShadowCascadeRenderFn g_engine_shadow_cascade_render{};
+EngineShadowStageFn g_engine_speedtree_shadow_views{};
+EngineShadowStageFn g_engine_render_shadows{};
+
+// Startup, fail-safe and counter lines: in the census log during a
+// measurement run, otherwise through log_line; never twice.
+void log_shadow_pair_line(const char* fmt, ...) {
+    va_list args{};
+    va_start(args, fmt);
+    if (g_config.vrs_log_file) {
+        append_log_file_line_v(fmt, args);
+    } else if (g_config.logging_enabled) {
+        write_log_line_v(fmt, args);
+    }
+    va_end(args);
+}
+
+struct ShadowPairTag {
+    bool valid{};
+    uint64_t pair_id{};
+    uint32_t generation{};
+    uint32_t eye{};
+};
+
+// The exact frame-data tag the gameplay entry set for this render.
+ShadowPairTag current_shadow_pair_tag() {
+    ShadowPairTag tag{};
+    tag.pair_id = g_engine_render_pair_id;
+    tag.generation = g_engine_render_generation;
+    tag.eye = static_cast<uint32_t>(g_engine_render_eye);
+    tag.valid = g_engine_render_tag_frame_lookup_exact &&
+        g_engine_render_eye >= 0 && g_engine_render_eye <= 1 &&
+        tag.pair_id != 0 && tag.pair_id != UINT64_MAX &&
+        tag.generation ==
+            g_streamline_capture_generation.load(std::memory_order_acquire);
+    return tag;
+}
+
+uint64_t shadow_hash_words(uint64_t hash, const uint8_t* bytes, size_t size) {
+    for (size_t offset = 0; offset + sizeof(uint64_t) <= size;
+         offset += sizeof(uint64_t)) {
+        uint64_t word{};
+        memcpy(&word, bytes + offset, sizeof(word));
+        hash = (hash ^ word) * 1099511628211ull;
+    }
+    return hash;
+}
+
+// The set header: set+0 (the collector, stored by the fit) and the cascade
+// count at set+0x8. The end-of-render cleanup zeroes both.
+struct ShadowSetHeader {
+    const uint8_t* collector{};
+    uint16_t cascades{};
+};
+
+bool read_shadow_set_header(const uint8_t* set, ShadowSetHeader& out) {
+    __try {
+        memcpy(&out.collector, set, sizeof(out.collector));
+        memcpy(&out.cascades, set + kShadowSetCountOffset,
+            sizeof(out.cascades));
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+bool write_shadow_set_header(uint8_t* set, const ShadowSetHeader& header) {
+    __try {
+        memcpy(set, &header.collector, sizeof(header.collector));
+        memcpy(set + kShadowSetCountOffset, &header.cascades,
+            sizeof(header.cascades));
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+// The set's fit bytes that survive the cleanup, for |cascades| cascades:
+// caster frusta, each cascade's views and texel constants, parity. The count
+// is an input because the cleanup zeroes set+0x8 between the renders. About
+// 19 KB with four cascades, a few microseconds.
+bool hash_shadow_cascade_set(
+    const uint8_t* set, uint16_t cascades, uint64_t& hash, uint8_t& parity) {
+    __try {
+        uint64_t value =
+            (14695981039346656037ull ^ cascades) * 1099511628211ull;
+        value = shadow_hash_words(value, set + kShadowSetFrustaOffset,
+            kShadowSetFrustumBytes * kShadowMaxCascades);
+        for (uint16_t index = 0;
+             index < cascades && index < kShadowMaxCascades; ++index) {
+            value = shadow_hash_words(value,
+                set + kShadowSetEntryOffset + index * kShadowSetEntryStride +
+                    kShadowSetEntryFitOffset,
+                kShadowSetEntryStride - kShadowSetEntryFitOffset);
+        }
+        parity = set[kShadowSetParityOffset];
+        hash = (value ^ parity) * 1099511628211ull;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+// Frame inputs of the fit, the cascade constants and the depth passes. Both
+// eyes of a pair share them; only the eye camera differs.
+bool hash_shadow_frame_inputs(
+    const uint8_t* collector, uint64_t& hash, bool& shadows_on) {
+    __try {
+        const uint8_t* frame{};
+        memcpy(&frame, collector + kShadowCollectorFrameOffset, sizeof(frame));
+        if (frame == nullptr) {
+            return false;
+        }
+        uint8_t inputs[4 + 16 + kShadowFrameSplitBytes +
+            kShadowFrameEnabledBytes + 2]{};
+        uint8_t* cursor = inputs;
+        memcpy(cursor, frame + kShadowFrameFarOffset, 4);
+        cursor += 4;
+        memcpy(cursor, frame + kShadowFrameSunOffset, 16);
+        cursor += 16;
+        memcpy(cursor, frame + kShadowFrameSplitOffset, kShadowFrameSplitBytes);
+        cursor += kShadowFrameSplitBytes;
+        memcpy(cursor, frame + kShadowFrameEnabledOffset,
+            kShadowFrameEnabledBytes);
+        cursor += kShadowFrameEnabledBytes;
+        memcpy(cursor, frame + kShadowFrameCasterFlagsOffset, 2);
+        hash = fnv1a64(inputs, sizeof(inputs));
+        shadows_on = frame[kShadowFrameEnabledOffset] != 0;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+// The SpeedTree cascade frusta the fit copies into [collector+0x4EE8].
+struct ShadowSceneObjectFrusta {
+    uint8_t* object{};
+    uint32_t count{};
+    uint8_t frusta[kShadowSetFrustumBytes * kShadowMaxCascades]{};
+};
+
+bool read_shadow_scene_object(
+    const uint8_t* collector, ShadowSceneObjectFrusta& out) {
+    __try {
+        memcpy(&out.object, collector + kShadowCollectorSceneObjectOffset,
+            sizeof(out.object));
+        if (out.object != nullptr) {
+            memcpy(&out.count, out.object + kShadowSceneObjectCountOffset,
+                sizeof(out.count));
+            memcpy(out.frusta, out.object + kShadowSceneObjectFrustaOffset,
+                sizeof(out.frusta));
+        }
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+// Rewrites the seed's block if anything changed it; |restored| tells.
+bool restore_shadow_scene_object(
+    const ShadowSceneObjectFrusta& seed, bool& restored) {
+    restored = false;
+    if (seed.object == nullptr) {
+        return true;
+    }
+    const size_t bytes = kShadowSetFrustumBytes *
+        std::min<uint32_t>(seed.count, kShadowMaxCascades);
+    __try {
+        uint32_t count{};
+        memcpy(&count, seed.object + kShadowSceneObjectCountOffset,
+            sizeof(count));
+        if (count != seed.count || memcmp(
+                seed.object + kShadowSceneObjectFrustaOffset,
+                seed.frusta, bytes) != 0) {
+            memcpy(seed.object + kShadowSceneObjectFrustaOffset,
+                seed.frusta, bytes);
+            memcpy(seed.object + kShadowSceneObjectCountOffset, &seed.count,
+                sizeof(seed.count));
+            restored = true;
+        }
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+// The depth passes' own early-exit test: they draw only with sun shadows on
+// in the frame and a non-empty set.
+bool shadow_cascade_render_draws(const uint8_t* frame, const uint8_t* set) {
+    __try {
+        uint16_t count{};
+        memcpy(&count, set + kShadowSetCountOffset, sizeof(count));
+        return frame[kShadowFrameEnabledOffset] != 0 && count != 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+// [FEATURE:REMASTER-SHADOW-PAIR-REUSE 3/7] Pair ledger. One slot: both renders
+// of a pair run back to back on the render thread. The busy flag keeps an
+// unexpected second thread out instead of making it wait; it runs the
+// original code, the set hash catches a fit it ran and the map-write count
+// catches its depth passes.
+enum class ShadowPairAction : uint8_t { Full, Seed, Skip };
+enum class ShadowPairFallback : size_t {
+    Gate,
+    NoTag,
+    SameEye,
+    SeedNotRendered,
+    Busy,
+    ForeignRender,
+    // Mismatches of an exact pair whose seed rendered; they feed the
+    // fail-safe.
+    Thread,
+    Collector,
+    Cascades,
+    Frame,
+    SetHash,
+    SceneObject,
+    ReadFault,
+    Count,
+};
+constexpr const char* kShadowPairFallbackNames[] = {
+    "gate", "no_tag", "same_eye", "seed_not_rendered", "busy",
+    "foreign_render", "thread", "collector", "cascades", "frame", "set_hash",
+    "scene_object", "read_fault"};
+static_assert(std::size(kShadowPairFallbackNames) ==
+    static_cast<size_t>(ShadowPairFallback::Count));
+
+struct ShadowPairSlot {
+    bool valid{};
+    bool seed_rendered{};
+    uint64_t pair_id{};
+    uint32_t generation{};
+    uint32_t seed_eye{};
+    uint32_t thread_id{};
+    const uint8_t* collector{};
+    const uint8_t* set{};
+    // The header the seed's fit left; a skipped fit writes it back.
+    ShadowSetHeader header{};
+    uint64_t set_hash{};
+    uint64_t frame_hash{};
+    // g_shadow_map_writes after the seed's depth passes.
+    uint64_t map_writes{};
+    ShadowSceneObjectFrusta scene_object{};
+};
+
+// What the fit hook decided for the render now running on this thread. The
+// depth-pass hook of the same render follows it as one decision: a skipped
+// fit always skips the depth passes, and a fit that ran always draws them.
+struct ShadowPairRender {
+    bool fit_skipped{};
+    bool seeded{};
+    uint64_t pair_id{};
+    uint32_t generation{};
+    uint32_t eye{};
+    const uint8_t* set{};
+};
+
+std::atomic<bool> g_runtime_shadow_pair_reuse{};
+std::atomic<bool> g_shadow_pair_busy{};
+ShadowPairSlot g_shadow_pair_slot{};
+w3vr::shadow_cascade::ReuseFailSafe g_shadow_pair_fail_safe{};
+thread_local ShadowPairRender t_shadow_pair_render{};
+std::atomic<uint64_t> g_shadow_pair_seeded{};
+std::atomic<uint64_t> g_shadow_pair_fit_skips{};
+std::atomic<uint64_t> g_shadow_pair_render_skips{};
+std::atomic<uint64_t> g_shadow_pair_frusta_restored{};
+// Depth passes that ran, any render and mode. A value other than the seed's
+// at the reuser means another render drew into the shadow map in between.
+std::atomic<uint64_t> g_shadow_map_writes{};
+std::array<std::atomic<uint64_t>,
+    static_cast<size_t>(ShadowPairFallback::Count)> g_shadow_pair_fallbacks{};
+
+bool shadow_pair_reuse_active() {
+    return g_config.remaster_shadow_pair_reuse != 0 &&
+        g_runtime_shadow_pair_reuse.load(std::memory_order_acquire);
+}
+
+constexpr bool shadow_pair_mismatch(ShadowPairFallback reason) {
+    return reason >= ShadowPairFallback::Thread &&
+        reason < ShadowPairFallback::Count;
+}
+
+void count_shadow_pair_fallback(ShadowPairFallback reason) {
+    if (reason != ShadowPairFallback::Count) {
+        g_shadow_pair_fallbacks[static_cast<size_t>(reason)].fetch_add(
+            1, std::memory_order_relaxed);
+    }
+}
+
+// Under g_shadow_pair_busy: one call per reuse attempt that got as far as
+// comparing (the other eye of a pair whose seed rendered, with no other
+// depth passes since); Count means it succeeded.
+void note_shadow_pair_attempt(ShadowPairFallback reason) {
+    const bool trip = w3vr::shadow_cascade::note_reuse_attempt(
+        g_shadow_pair_fail_safe, shadow_pair_mismatch(reason),
+        kShadowPairFailSafeConsecutive, kShadowPairFailSafeWindow,
+        kShadowPairFailSafeWindowMismatches);
+    if (trip && g_runtime_shadow_pair_reuse.exchange(
+            false, std::memory_order_acq_rel)) {
+        g_shadow_pair_slot.valid = false;
+        log_shadow_pair_line(
+            "Shadow pair reuse disabled for the session: consecutive=%u "
+            "last=%s present=%llu",
+            g_shadow_pair_fail_safe.consecutive,
+            kShadowPairFallbackNames[static_cast<size_t>(reason)],
+            static_cast<unsigned long long>(
+                g_present_count.load(std::memory_order_relaxed)));
+    }
+}
+
+// The reuser's checks, then the write-back: the SpeedTree frusta (only if
+// something changed them) and the set header the seed's end-of-render cleanup
+// zeroed. The set itself is compared by its persistent fit bytes for the
+// seed's cascade count; its header must be cleared or still the seed's.
+ShadowPairFallback verify_shadow_pair_fit_reuse(
+    const ShadowPairSlot& slot, uint8_t* collector) {
+    if (!slot.seed_rendered) {
+        return ShadowPairFallback::SeedNotRendered;
+    }
+    if (g_shadow_map_writes.load(std::memory_order_acquire) !=
+        slot.map_writes) {
+        return ShadowPairFallback::ForeignRender;
+    }
+    if (slot.thread_id != GetCurrentThreadId()) {
+        return ShadowPairFallback::Thread;
+    }
+    if (slot.collector != collector) {
+        return ShadowPairFallback::Collector;
+    }
+    uint8_t* set = collector + kShadowCollectorSetOffset;
+    uint64_t frame_hash{};
+    bool shadows_on{};
+    ShadowSetHeader header{};
+    uint64_t set_hash{};
+    uint8_t parity{};
+    ShadowSceneObjectFrusta scene_object{};
+    if (!hash_shadow_frame_inputs(collector, frame_hash, shadows_on) ||
+        !read_shadow_set_header(set, header) ||
+        !hash_shadow_cascade_set(
+            set, slot.header.cascades, set_hash, parity) ||
+        !read_shadow_scene_object(collector, scene_object)) {
+        return ShadowPairFallback::ReadFault;
+    }
+    const bool cleared = header.collector == nullptr && header.cascades == 0;
+    if (!cleared && (header.collector != slot.header.collector ||
+            header.cascades != slot.header.cascades)) {
+        return ShadowPairFallback::Cascades;
+    }
+    if (frame_hash != slot.frame_hash || !shadows_on) {
+        return ShadowPairFallback::Frame;
+    }
+    if (set_hash != slot.set_hash) {
+        return ShadowPairFallback::SetHash;
+    }
+    if (scene_object.object != slot.scene_object.object) {
+        return ShadowPairFallback::SceneObject;
+    }
+    bool restored{};
+    if (!restore_shadow_scene_object(slot.scene_object, restored) ||
+        !write_shadow_set_header(set, slot.header)) {
+        return ShadowPairFallback::ReadFault;
+    }
+    if (restored) {
+        g_shadow_pair_frusta_restored.fetch_add(1, std::memory_order_relaxed);
+    }
+    return ShadowPairFallback::Count;
+}
+
+// Fit hook, mode 1. Seed: the first exact render of a pair (either eye; the
+// order is not stable) runs the fit and is snapshotted after it. Skip: the
+// other eye of a pair whose seed rendered, with the set, the frame inputs and
+// the SpeedTree object unchanged and no depth passes since; the set header is
+// written back. Anything else runs the fit and drops the slot, because the
+// fit rewrites the set.
+ShadowPairAction decide_shadow_pair_fit(
+    uint8_t* collector, const ShadowPairTag& tag) {
+    if (g_shadow_pair_busy.exchange(true, std::memory_order_acquire)) {
+        count_shadow_pair_fallback(ShadowPairFallback::Busy);
+        return ShadowPairAction::Full;
+    }
+    auto& slot = g_shadow_pair_slot;
+    ShadowPairAction action = ShadowPairAction::Full;
+    ShadowPairFallback reason = ShadowPairFallback::Count;
+    if (!shadow_cascade_shared_view_active()) {
+        reason = ShadowPairFallback::Gate;
+    } else if (!tag.valid) {
+        reason = ShadowPairFallback::NoTag;
+    } else {
+        switch (w3vr::shadow_cascade::decide_authority(
+            slot.valid, slot.pair_id, slot.generation, slot.seed_eye,
+            tag.pair_id, tag.generation, tag.eye)) {
+        case w3vr::shadow_cascade::AuthorityAction::Seed:
+            action = ShadowPairAction::Seed;
+            break;
+        case w3vr::shadow_cascade::AuthorityAction::SameEye:
+            reason = ShadowPairFallback::SameEye;
+            break;
+        case w3vr::shadow_cascade::AuthorityAction::Reuse:
+            reason = verify_shadow_pair_fit_reuse(slot, collector);
+            if (reason == ShadowPairFallback::Count) {
+                action = ShadowPairAction::Skip;
+            }
+            if (reason == ShadowPairFallback::Count ||
+                shadow_pair_mismatch(reason)) {
+                note_shadow_pair_attempt(reason);
+            }
+            break;
+        }
+    }
+    if (action != ShadowPairAction::Skip) {
+        slot.valid = false;
+    }
+    g_shadow_pair_busy.store(false, std::memory_order_release);
+    count_shadow_pair_fallback(reason);
+    return action;
+}
+
+// After the seed's fit: the header, the set hash and everything the reuser
+// must find unchanged. A seed with shadows off or an empty set is not kept.
+void seed_shadow_pair_fit(const uint8_t* collector, const ShadowPairTag& tag,
+    const ShadowSetHeader& header, uint64_t set_hash) {
+    ShadowPairSlot seed{};
+    bool shadows_on{};
+    if (header.collector != collector || header.cascades == 0 ||
+        header.cascades > kShadowMaxCascades ||
+        !hash_shadow_frame_inputs(collector, seed.frame_hash, shadows_on) ||
+        !shadows_on ||
+        !read_shadow_scene_object(collector, seed.scene_object)) {
+        return;
+    }
+    seed.valid = true;
+    seed.pair_id = tag.pair_id;
+    seed.generation = tag.generation;
+    seed.seed_eye = tag.eye;
+    seed.thread_id = GetCurrentThreadId();
+    seed.collector = collector;
+    seed.set = collector + kShadowCollectorSetOffset;
+    seed.header = header;
+    seed.set_hash = set_hash;
+    if (g_shadow_pair_busy.exchange(true, std::memory_order_acquire)) {
+        count_shadow_pair_fallback(ShadowPairFallback::Busy);
+        return;
+    }
+    g_shadow_pair_slot = seed;
+    g_shadow_pair_busy.store(false, std::memory_order_release);
+    g_shadow_pair_seeded.fetch_add(1, std::memory_order_relaxed);
+    t_shadow_pair_render = {false, true, tag.pair_id, tag.generation, tag.eye,
+        seed.set};
+}
+
+// Depth-pass hook, for renders whose fit was not skipped (those skip their
+// depth passes without asking). Mode 1: the seed's own depth passes draw and
+// then make the slot usable; any other depth passes draw too and drop the
+// slot, because they overwrite the map. Mode 9 (measurement) decides here
+// alone and has no set guard: the reuser keeps its own fit, so its lighting
+// is misregistered by design.
+ShadowPairAction decide_shadow_pair_render(const uint8_t* set,
+    const ShadowPairTag& tag, const ShadowPairRender& render) {
+    const bool this_render = tag.valid && render.set == set &&
+        render.pair_id == tag.pair_id &&
+        render.generation == tag.generation && render.eye == tag.eye;
+    if (g_shadow_pair_busy.exchange(true, std::memory_order_acquire)) {
+        count_shadow_pair_fallback(ShadowPairFallback::Busy);
+        return ShadowPairAction::Full;
+    }
+    auto& slot = g_shadow_pair_slot;
+    ShadowPairAction action = ShadowPairAction::Full;
+    ShadowPairFallback reason = ShadowPairFallback::Count;
+    if (g_config.remaster_shadow_pair_reuse == 9) {
+        if (!shadow_cascade_shared_view_active()) {
+            reason = ShadowPairFallback::Gate;
+        } else if (!tag.valid) {
+            reason = ShadowPairFallback::NoTag;
+        } else {
+            switch (w3vr::shadow_cascade::decide_authority(
+                slot.valid, slot.pair_id, slot.generation, slot.seed_eye,
+                tag.pair_id, tag.generation, tag.eye)) {
+            case w3vr::shadow_cascade::AuthorityAction::Seed:
+                action = ShadowPairAction::Seed;
+                break;
+            case w3vr::shadow_cascade::AuthorityAction::SameEye:
+                reason = ShadowPairFallback::SameEye;
+                break;
+            case w3vr::shadow_cascade::AuthorityAction::Reuse:
+                if (!slot.seed_rendered) {
+                    reason = ShadowPairFallback::SeedNotRendered;
+                } else if (g_shadow_map_writes.load(
+                               std::memory_order_acquire) != slot.map_writes) {
+                    reason = ShadowPairFallback::ForeignRender;
+                } else if (slot.thread_id != GetCurrentThreadId()) {
+                    reason = ShadowPairFallback::Thread;
+                } else if (slot.set != set) {
+                    reason = ShadowPairFallback::Collector;
+                } else {
+                    action = ShadowPairAction::Skip;
+                }
+                if (reason == ShadowPairFallback::Count ||
+                    shadow_pair_mismatch(reason)) {
+                    note_shadow_pair_attempt(reason);
+                }
+                break;
+            }
+        }
+    } else if (this_render && render.seeded) {
+        // The slot still holds this render's seed and its depth passes have
+        // not run yet. The reuser compares the set with the seed's fit.
+        if (slot.valid && slot.pair_id == tag.pair_id &&
+            slot.generation == tag.generation && slot.seed_eye == tag.eye &&
+            slot.set == set && !slot.seed_rendered) {
+            action = ShadowPairAction::Seed;
+        } else {
+            reason = ShadowPairFallback::ForeignRender;
+        }
+    } else if (slot.valid) {
+        // A render the fit hook did not seed writes the shadow map, so the
+        // slot no longer describes it.
+        reason = ShadowPairFallback::ForeignRender;
+    }
+    if (action == ShadowPairAction::Full) {
+        slot.valid = false;
+    }
+    g_shadow_pair_busy.store(false, std::memory_order_release);
+    count_shadow_pair_fallback(reason);
+    return action;
+}
+
+// After the seed's depth passes, with the map-write count they produced.
+// Mode 1 marks the slot its fit seeded; mode 9 seeds here.
+void finish_shadow_pair_seed_render(const ShadowPairTag& tag,
+    const uint8_t* set, bool drew, uint64_t map_writes) {
+    if (g_shadow_pair_busy.exchange(true, std::memory_order_acquire)) {
+        count_shadow_pair_fallback(ShadowPairFallback::Busy);
+        return;
+    }
+    auto& slot = g_shadow_pair_slot;
+    bool seeded{};
+    if (g_config.remaster_shadow_pair_reuse == 9) {
+        slot = {};
+        slot.valid = drew;
+        slot.seed_rendered = drew;
+        slot.pair_id = tag.pair_id;
+        slot.generation = tag.generation;
+        slot.seed_eye = tag.eye;
+        slot.thread_id = GetCurrentThreadId();
+        slot.set = set;
+        slot.collector = set - kShadowCollectorSetOffset;
+        slot.map_writes = map_writes;
+        seeded = drew;
+    } else if (slot.valid && slot.pair_id == tag.pair_id &&
+        slot.generation == tag.generation && slot.seed_eye == tag.eye) {
+        slot.seed_rendered = drew;
+        slot.valid = drew;
+        slot.map_writes = map_writes;
+    }
+    g_shadow_pair_busy.store(false, std::memory_order_release);
+    if (seeded) {
+        g_shadow_pair_seeded.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
+// [FEATURE:REMASTER-SHADOW-PAIR-REUSE 4/7] [perf] shadow_profile: QPC time
+// per call of the four shadow stages per eye (0 left, 1 right, 2 untagged),
+// the set hash between the eyes of a pair, and the draws recorded inside the
+// depth passes against all draws. Calls are per render, not per draw; the
+// draw counters are per thread, one cache line each, so the draw hooks never
+// share a cache line.
+enum class ShadowStage : size_t { Fit, SpeedTreeViews, RenderShadows, Cascades, Count };
+constexpr size_t kShadowStageCount = static_cast<size_t>(ShadowStage::Count);
+
+struct ShadowProfileEye {
+    std::array<std::atomic<uint64_t>, kShadowStageCount> calls{};
+    std::array<std::atomic<uint64_t>, kShadowStageCount> ticks{};
+    std::atomic<uint64_t> skipped_fits{};
+    std::atomic<uint64_t> skipped_renders{};
+    // Fits whose set could be read, and the sums of its count and parity.
+    std::atomic<uint64_t> hashed_fits{};
+    std::atomic<uint64_t> cascades{};
+    std::atomic<uint64_t> parity{};
+    // RenderShadows calls with sun shadows on ([collector+0xCA]).
+    std::atomic<uint64_t> active{};
+    std::atomic<uint64_t> cascade_draws{};
+    std::atomic<uint64_t> set_hash{};
+    std::atomic<uint32_t> smap_size{};
+    std::atomic<uint32_t> smap_count{};
+    std::atomic<uint32_t> smap_handle{};
+};
+std::array<ShadowProfileEye, 3> g_shadow_profile_eyes{};
+// Fits whose previous fit was the other eye of the same pair; of those, the
+// ones that found the set's fit bytes as the other eye left them (the header
+// the cleanup zeroes aside), and the ones that produced the same set.
+std::atomic<uint64_t> g_shadow_profile_pair_fits{};
+std::atomic<uint64_t> g_shadow_profile_set_untouched{};
+std::atomic<uint64_t> g_shadow_profile_same_fit{};
+std::atomic<uint64_t> g_shadow_profile_smap_changes{};
+std::atomic<bool> g_shadow_profile_frame_claimed{};
+std::atomic<bool> g_shadow_profile_frame_ready{};
+// Split count, four split distances, four per-cascade parameters, far plane.
+std::array<float, 10> g_shadow_profile_frame{};
+
+// The last fit on this thread: its set hash for its cascade count.
+struct ShadowProfileFit {
+    bool valid{};
+    uint64_t pair_id{};
+    uint32_t generation{};
+    uint32_t eye{};
+    uint64_t hash{};
+    uint16_t cascades{};
+};
+thread_local ShadowProfileFit t_shadow_profile_last_fit{};
+thread_local uint32_t t_shadow_profile_last_smap_handle{UINT32_MAX};
+
+struct alignas(64) ShadowProfileDrawSlot {
+    std::atomic<uint32_t> thread_id{};
+    std::atomic<uint64_t> draws{};
+};
+std::array<ShadowProfileDrawSlot, 32> g_shadow_profile_draw_slots{};
+std::atomic<uint64_t> g_shadow_profile_draw_overflow{};
+thread_local ShadowProfileDrawSlot* t_shadow_profile_draw_slot{};
+thread_local bool t_shadow_profile_draw_slot_failed{};
+thread_local bool t_shadow_profile_in_cascades{};
+thread_local uint64_t t_shadow_profile_cascade_draws{};
+
+void record_shadow_profile_draw() {
+    if (t_shadow_profile_in_cascades) {
+        ++t_shadow_profile_cascade_draws;
+    }
+    auto* slot = t_shadow_profile_draw_slot;
+    if (slot == nullptr) {
+        if (!t_shadow_profile_draw_slot_failed) {
+            const uint32_t thread_id = GetCurrentThreadId();
+            for (auto& candidate : g_shadow_profile_draw_slots) {
+                uint32_t expected{};
+                if (candidate.thread_id.compare_exchange_strong(
+                        expected, thread_id, std::memory_order_acq_rel)) {
+                    slot = &candidate;
+                    break;
+                }
+            }
+            t_shadow_profile_draw_slot = slot;
+            t_shadow_profile_draw_slot_failed = slot == nullptr;
+        }
+        if (slot == nullptr) {
+            g_shadow_profile_draw_overflow.fetch_add(
+                1, std::memory_order_relaxed);
+            return;
+        }
+    }
+    slot->draws.store(slot->draws.load(std::memory_order_relaxed) + 1,
+        std::memory_order_relaxed);
+}
+
+size_t shadow_profile_eye_index() {
+    return g_engine_render_tag_frame_lookup_exact &&
+            g_engine_render_eye >= 0 && g_engine_render_eye <= 1
+        ? static_cast<size_t>(g_engine_render_eye) : 2;
+}
+
+int64_t shadow_profile_ticks() {
+    LARGE_INTEGER now{};
+    QueryPerformanceCounter(&now);
+    return now.QuadPart;
+}
+
+void record_shadow_profile_stage(size_t eye, ShadowStage stage, int64_t begin) {
+    auto& stats = g_shadow_profile_eyes[eye];
+    const auto index = static_cast<size_t>(stage);
+    stats.calls[index].fetch_add(1, std::memory_order_relaxed);
+    stats.ticks[index].fetch_add(
+        static_cast<uint64_t>(shadow_profile_ticks() - begin),
+        std::memory_order_relaxed);
+}
+
+bool read_shadow_profile_frame(const uint8_t* collector,
+    std::array<float, 10>& values) {
+    __try {
+        const uint8_t* frame{};
+        memcpy(&frame, collector + kShadowCollectorFrameOffset, sizeof(frame));
+        if (frame == nullptr) {
+            return false;
+        }
+        uint32_t splits{};
+        memcpy(&splits, frame + kShadowFrameSplitOffset, sizeof(splits));
+        values[0] = static_cast<float>(splits);
+        memcpy(&values[1], frame + kShadowFrameSplitOffset + 4,
+            4 * sizeof(float));
+        memcpy(&values[5], frame + kShadowFrameCascadeParamsOffset,
+            4 * sizeof(float));
+        memcpy(&values[9], frame + kShadowFrameFarOffset, sizeof(float));
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+void record_shadow_profile_fit(const uint8_t* collector, size_t eye,
+    const ShadowPairTag& tag, bool pre_valid, uint64_t pre_hash,
+    bool post_valid, uint64_t post_hash, uint16_t cascades, uint8_t parity) {
+    auto& stats = g_shadow_profile_eyes[eye];
+    if (post_valid) {
+        stats.hashed_fits.fetch_add(1, std::memory_order_relaxed);
+        stats.cascades.fetch_add(cascades, std::memory_order_relaxed);
+        stats.parity.fetch_add(parity, std::memory_order_relaxed);
+        stats.set_hash.store(post_hash, std::memory_order_relaxed);
+    }
+    auto& last = t_shadow_profile_last_fit;
+    if (tag.valid && last.valid && last.pair_id == tag.pair_id &&
+        last.generation == tag.generation && last.eye != tag.eye) {
+        g_shadow_profile_pair_fits.fetch_add(1, std::memory_order_relaxed);
+        if (pre_valid && pre_hash == last.hash) {
+            g_shadow_profile_set_untouched.fetch_add(
+                1, std::memory_order_relaxed);
+        }
+        if (post_valid && post_hash == last.hash) {
+            g_shadow_profile_same_fit.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+    last = {tag.valid && post_valid, tag.pair_id, tag.generation, tag.eye,
+        post_hash, cascades};
+    if (!g_shadow_profile_frame_claimed.load(std::memory_order_relaxed) &&
+        !g_shadow_profile_frame_claimed.exchange(
+            true, std::memory_order_acq_rel)) {
+        if (read_shadow_profile_frame(collector, g_shadow_profile_frame)) {
+            g_shadow_profile_frame_ready.store(true, std::memory_order_release);
+        } else {
+            g_shadow_profile_frame_claimed.store(
+                false, std::memory_order_release);
+        }
+    }
+}
+
+bool read_shadow_map_info(
+    const uint8_t* smap, uint32_t& size, uint32_t& count, uint32_t& handle) {
+    __try {
+        uint16_t cascades{};
+        memcpy(&size, smap, sizeof(size));
+        memcpy(&cascades, smap + 4, sizeof(cascades));
+        memcpy(&handle, smap + 8, sizeof(handle));
+        count = cascades;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+void record_shadow_profile_map(size_t eye, const void* smap) {
+    uint32_t size{};
+    uint32_t count{};
+    uint32_t handle{};
+    if (smap == nullptr || !read_shadow_map_info(
+            static_cast<const uint8_t*>(smap), size, count, handle)) {
+        return;
+    }
+    auto& stats = g_shadow_profile_eyes[eye];
+    stats.smap_size.store(size, std::memory_order_relaxed);
+    stats.smap_count.store(count, std::memory_order_relaxed);
+    stats.smap_handle.store(handle, std::memory_order_relaxed);
+    if (t_shadow_profile_last_smap_handle != UINT32_MAX &&
+        t_shadow_profile_last_smap_handle != handle) {
+        g_shadow_profile_smap_changes.fetch_add(1, std::memory_order_relaxed);
+    }
+    t_shadow_profile_last_smap_handle = handle;
+}
+
+void log_shadow_pair_counters(void (*write_line)(const char*, ...)) {
+    // Previous totals; one writer (the census or the render thread).
+    static uint64_t previous_seeded{};
+    static uint64_t previous_fit_skips{};
+    static uint64_t previous_render_skips{};
+    static uint64_t previous_restored{};
+    static std::array<uint64_t,
+        static_cast<size_t>(ShadowPairFallback::Count)> previous_fallbacks{};
+    const auto window = [](const std::atomic<uint64_t>& counter,
+                            uint64_t& previous, unsigned long long& total) {
+        const uint64_t value = counter.load(std::memory_order_relaxed);
+        const auto delta = static_cast<unsigned long long>(value - previous);
+        previous = value;
+        total = static_cast<unsigned long long>(value);
+        return delta;
+    };
+    unsigned long long seeded{};
+    unsigned long long fit_skips{};
+    unsigned long long render_skips{};
+    unsigned long long restored{};
+    const auto seeded_window =
+        window(g_shadow_pair_seeded, previous_seeded, seeded);
+    const auto fit_window =
+        window(g_shadow_pair_fit_skips, previous_fit_skips, fit_skips);
+    const auto render_window = window(
+        g_shadow_pair_render_skips, previous_render_skips, render_skips);
+    const auto restored_window = window(
+        g_shadow_pair_frusta_restored, previous_restored, restored);
+    char fallbacks[512]{};
+    size_t used{};
+    for (size_t index = 0; index < previous_fallbacks.size(); ++index) {
+        unsigned long long total{};
+        const auto delta = window(
+            g_shadow_pair_fallbacks[index], previous_fallbacks[index], total);
+        if (total == 0 || used >= sizeof(fallbacks)) {
+            continue;
+        }
+        const int written = snprintf(fallbacks + used,
+            sizeof(fallbacks) - used, " %s=+%llu/%llu",
+            kShadowPairFallbackNames[index], delta, total);
+        if (written > 0) {
+            used += static_cast<size_t>(written);
+        }
+    }
+    write_line("Shadow pair reuse mode=%d active=%d seeded=+%llu/%llu "
+        "fit_skipped=+%llu/%llu render_skipped=+%llu/%llu "
+        "frusta_restored=+%llu/%llu fallbacks:%s",
+        g_config.remaster_shadow_pair_reuse,
+        g_runtime_shadow_pair_reuse.load(std::memory_order_relaxed) ? 1 : 0,
+        seeded_window, seeded, fit_window, fit_skips, render_window,
+        render_skips, restored_window, restored,
+        used != 0 ? fallbacks : " none");
+}
+
+// Outside a measurement run the counters go to the diagnostic log.
+void maybe_log_shadow_pair_counters() {
+    if (g_config.vrs_log_file || !g_config.logging_enabled ||
+        !g_config.runtime_diagnostics) {
+        return;
+    }
+    static std::atomic<uint64_t> next_present{kShadowPairLogPresentInterval};
+    const uint64_t present = g_present_count.load(std::memory_order_relaxed);
+    uint64_t next = next_present.load(std::memory_order_relaxed);
+    if (present < next || !next_present.compare_exchange_strong(
+            next, present + kShadowPairLogPresentInterval,
+            std::memory_order_relaxed)) {
+        return;
+    }
+    log_shadow_pair_counters(&log_line);
+}
+
+// [FEATURE:REMASTER-SHADOW-PAIR-REUSE 5/7] The hooks. All four run on the
+// render thread inside the frame builder, so the exact eye/pair tag of the
+// gameplay entry is set.
+void __fastcall hook_engine_shadow_cascade_fit(void* collector) {
+    const bool profile = g_config.perf_shadow_profile;
+    const int64_t begin = profile ? shadow_profile_ticks() : 0;
+    const size_t profile_eye = profile ? shadow_profile_eye_index() : 2;
+    auto* collector_bytes = static_cast<uint8_t*>(collector);
+    const uint8_t* set = collector_bytes + kShadowCollectorSetOffset;
+    const ShadowPairTag tag = current_shadow_pair_tag();
+    t_shadow_pair_render = {};
+    ShadowPairAction action = ShadowPairAction::Full;
+    if (g_config.remaster_shadow_pair_reuse == 1 && collector != nullptr &&
+        shadow_pair_reuse_active()) {
+        action = decide_shadow_pair_fit(collector_bytes, tag);
+    }
+    if (action == ShadowPairAction::Skip) {
+        // The set holds the seed's fit again, header included, and the
+        // SpeedTree frusta are the seed's. This render's depth passes skip.
+        t_shadow_pair_render = {true, false, tag.pair_id, tag.generation,
+            tag.eye, set};
+        g_shadow_pair_fit_skips.fetch_add(1, std::memory_order_relaxed);
+    } else {
+        // The profile hashes the set before the fit for the cascade count of
+        // the previous fit on this thread, which the cleanup has zeroed.
+        const ShadowProfileFit& last = t_shadow_profile_last_fit;
+        uint64_t pre_hash{};
+        uint8_t parity{};
+        const bool pre_valid = profile && collector != nullptr &&
+            last.valid &&
+            hash_shadow_cascade_set(set, last.cascades, pre_hash, parity);
+        g_engine_shadow_cascade_fit(collector);
+        ShadowSetHeader header{};
+        uint64_t post_hash{};
+        const bool post_valid =
+            (profile || action == ShadowPairAction::Seed) &&
+            collector != nullptr && read_shadow_set_header(set, header) &&
+            hash_shadow_cascade_set(set, header.cascades, post_hash, parity);
+        if (action == ShadowPairAction::Seed && post_valid) {
+            seed_shadow_pair_fit(collector_bytes, tag, header, post_hash);
+        }
+        if (profile && collector != nullptr) {
+            record_shadow_profile_fit(collector_bytes, profile_eye, tag,
+                pre_valid, pre_hash, post_valid, post_hash, header.cascades,
+                parity);
+        }
+    }
+    if (profile) {
+        if (action == ShadowPairAction::Skip) {
+            g_shadow_profile_eyes[profile_eye].skipped_fits.fetch_add(
+                1, std::memory_order_relaxed);
+        }
+        record_shadow_profile_stage(profile_eye, ShadowStage::Fit, begin);
+    }
+}
+
+void __fastcall hook_engine_shadow_cascade_render(
+    void* renderer, void* frame, void* set, void* smap) {
+    const bool profile = g_config.perf_shadow_profile;
+    const int64_t begin = profile ? shadow_profile_ticks() : 0;
+    const size_t profile_eye = profile ? shadow_profile_eye_index() : 2;
+    const auto* frame_bytes = static_cast<const uint8_t*>(frame);
+    const auto* set_bytes = static_cast<const uint8_t*>(set);
+    const ShadowPairRender render = t_shadow_pair_render;
+    t_shadow_pair_render = {};
+    ShadowPairTag tag{};
+    ShadowPairAction action = ShadowPairAction::Full;
+    if (render.fit_skipped && render.set == set_bytes) {
+        // One decision per render, made by the fit hook: this render's set
+        // holds the seed's cascades but no caster lists (the cleanup emptied
+        // them), so drawing would clear the seed's map and redraw only the
+        // SpeedTree and particle casters. No checks here and no fallback,
+        // not even when reuse was switched off since.
+        action = ShadowPairAction::Skip;
+    } else if (frame != nullptr && set != nullptr &&
+        shadow_pair_reuse_active()) {
+        tag = current_shadow_pair_tag();
+        action = decide_shadow_pair_render(set_bytes, tag, render);
+    }
+    if (action == ShadowPairAction::Skip) {
+        // The engine's own early exit (frame+0xF5E4 or the set count zero)
+        // returns before recording anything; so does a skipped render. The
+        // SpeedTree shadow job that 0x141CEBC30 launched for this render is
+        // joined by the end-of-render cleanup, as on that early exit.
+        g_shadow_pair_render_skips.fetch_add(1, std::memory_order_relaxed);
+    } else {
+        const bool drew = action == ShadowPairAction::Seed &&
+            shadow_cascade_render_draws(frame_bytes, set_bytes);
+        const uint64_t map_writes =
+            g_shadow_map_writes.fetch_add(1, std::memory_order_acq_rel) + 1;
+        const uint64_t draws_before = t_shadow_profile_cascade_draws;
+        t_shadow_profile_in_cascades = profile;
+        g_engine_shadow_cascade_render(renderer, frame, set, smap);
+        t_shadow_profile_in_cascades = false;
+        if (profile) {
+            g_shadow_profile_eyes[profile_eye].cascade_draws.fetch_add(
+                t_shadow_profile_cascade_draws - draws_before,
+                std::memory_order_relaxed);
+            record_shadow_profile_map(profile_eye, smap);
+        }
+        if (action == ShadowPairAction::Seed) {
+            finish_shadow_pair_seed_render(tag, set_bytes, drew, map_writes);
+        }
+    }
+    if (profile) {
+        if (action == ShadowPairAction::Skip) {
+            g_shadow_profile_eyes[profile_eye].skipped_renders.fetch_add(
+                1, std::memory_order_relaxed);
+        }
+        record_shadow_profile_stage(profile_eye, ShadowStage::Cascades, begin);
+    }
+    if (g_config.remaster_shadow_pair_reuse != 0) {
+        maybe_log_shadow_pair_counters();
+    }
+}
+
+void __fastcall hook_engine_speedtree_shadow_views(
+    void* speedtree, void* collector) {
+    const int64_t begin = shadow_profile_ticks();
+    const size_t eye = shadow_profile_eye_index();
+    g_engine_speedtree_shadow_views(speedtree, collector);
+    record_shadow_profile_stage(eye, ShadowStage::SpeedTreeViews, begin);
+}
+
+bool read_shadow_collector_active(const uint8_t* collector) {
+    __try {
+        return collector != nullptr &&
+            collector[kShadowCollectorActiveOffset] != 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+void __fastcall hook_engine_render_shadows(void* renderer, void* collector) {
+    const int64_t begin = shadow_profile_ticks();
+    const size_t eye = shadow_profile_eye_index();
+    if (read_shadow_collector_active(static_cast<const uint8_t*>(collector))) {
+        g_shadow_profile_eyes[eye].active.fetch_add(
+            1, std::memory_order_relaxed);
+    }
+    g_engine_render_shadows(renderer, collector);
+    record_shadow_profile_stage(eye, ShadowStage::RenderShadows, begin);
+}
+
+// [FEATURE:REMASTER-SHADOW-PAIR-REUSE 6/7] Called from the census under
+// g_vrs_census_busy: the reuse counters and, with [perf] shadow_profile, one
+// line per eye (ms per call of each stage, calls per Present, cascades,
+// parity, draws per depth-pass call, shadow map), one line for the set hash
+// between the eyes, and the frame's split inputs once.
+void log_shadow_census_locked(uint64_t window_presents, int64_t qpc_frequency) {
+    if (g_config.remaster_shadow_pair_reuse != 0) {
+        log_shadow_pair_counters(&log_vrs_line);
+    }
+    if (!g_config.perf_shadow_profile || qpc_frequency <= 0 ||
+        window_presents == 0) {
+        return;
+    }
+    struct EyeTotals {
+        std::array<uint64_t, kShadowStageCount> calls{};
+        std::array<uint64_t, kShadowStageCount> ticks{};
+        uint64_t skipped_fits{};
+        uint64_t skipped_renders{};
+        uint64_t hashed_fits{};
+        uint64_t cascades{};
+        uint64_t parity{};
+        uint64_t active{};
+        uint64_t cascade_draws{};
+    };
+    // Previous totals; the census is serialized, so plain statics suffice.
+    static std::array<EyeTotals, 3> previous{};
+    static uint64_t previous_pair_fits{};
+    static uint64_t previous_untouched{};
+    static uint64_t previous_same_fit{};
+    static uint64_t previous_smap_changes{};
+    static uint64_t previous_draws{};
+    static bool frame_logged{};
+    static constexpr const char* kEyeNames[] = {"left", "right", "untagged"};
+    const double presents = static_cast<double>(window_presents);
+    uint64_t cascade_draws_window{};
+    for (size_t eye = 0; eye < g_shadow_profile_eyes.size(); ++eye) {
+        const auto& stats = g_shadow_profile_eyes[eye];
+        EyeTotals now{};
+        for (size_t stage = 0; stage < kShadowStageCount; ++stage) {
+            now.calls[stage] =
+                stats.calls[stage].load(std::memory_order_relaxed);
+            now.ticks[stage] =
+                stats.ticks[stage].load(std::memory_order_relaxed);
+        }
+        now.skipped_fits = stats.skipped_fits.load(std::memory_order_relaxed);
+        now.skipped_renders =
+            stats.skipped_renders.load(std::memory_order_relaxed);
+        now.hashed_fits = stats.hashed_fits.load(std::memory_order_relaxed);
+        now.cascades = stats.cascades.load(std::memory_order_relaxed);
+        now.parity = stats.parity.load(std::memory_order_relaxed);
+        now.active = stats.active.load(std::memory_order_relaxed);
+        now.cascade_draws =
+            stats.cascade_draws.load(std::memory_order_relaxed);
+        auto& last = previous[eye];
+        std::array<uint64_t, kShadowStageCount> calls{};
+        std::array<double, kShadowStageCount> ms{};
+        uint64_t any_calls{};
+        for (size_t stage = 0; stage < kShadowStageCount; ++stage) {
+            calls[stage] = now.calls[stage] - last.calls[stage];
+            any_calls += calls[stage];
+            ms[stage] = calls[stage] != 0
+                ? 1000.0 * static_cast<double>(
+                      now.ticks[stage] - last.ticks[stage]) /
+                    static_cast<double>(qpc_frequency) /
+                    static_cast<double>(calls[stage])
+                : 0.0;
+        }
+        const uint64_t hashed_fits = now.hashed_fits - last.hashed_fits;
+        const uint64_t skipped_renders =
+            now.skipped_renders - last.skipped_renders;
+        const uint64_t cascade_calls =
+            calls[static_cast<size_t>(ShadowStage::Cascades)];
+        const uint64_t drawn_calls = cascade_calls - skipped_renders;
+        const uint64_t shadows_calls =
+            calls[static_cast<size_t>(ShadowStage::RenderShadows)];
+        const uint64_t eye_draws = now.cascade_draws - last.cascade_draws;
+        cascade_draws_window += eye_draws;
+        const auto average = [](uint64_t sum, uint64_t count) {
+            return count != 0
+                ? static_cast<double>(sum) / static_cast<double>(count) : 0.0;
+        };
+        if (any_calls != 0) {
+            log_vrs_line(
+                "PERF shadow eye=%s renders_per_present=%.2f fit_ms=%.3f "
+                "speedtree_ms=%.3f shadows_ms=%.3f cascades_ms=%.3f "
+                "fit_calls=%llu cascade_calls=%llu skipped_fits=%llu "
+                "skipped_renders=%llu cascades=%.2f parity=%.2f active=%.2f "
+                "draws_per_cascade_call=%.1f set_hash=%016llX smap=%ux%ux%u "
+                "smap_handle=%u",
+                kEyeNames[eye], static_cast<double>(shadows_calls) / presents,
+                ms[static_cast<size_t>(ShadowStage::Fit)],
+                ms[static_cast<size_t>(ShadowStage::SpeedTreeViews)],
+                ms[static_cast<size_t>(ShadowStage::RenderShadows)],
+                ms[static_cast<size_t>(ShadowStage::Cascades)],
+                static_cast<unsigned long long>(
+                    calls[static_cast<size_t>(ShadowStage::Fit)]),
+                static_cast<unsigned long long>(cascade_calls),
+                static_cast<unsigned long long>(
+                    now.skipped_fits - last.skipped_fits),
+                static_cast<unsigned long long>(skipped_renders),
+                average(now.cascades - last.cascades, hashed_fits),
+                average(now.parity - last.parity, hashed_fits),
+                average(now.active - last.active, shadows_calls),
+                average(eye_draws, drawn_calls),
+                static_cast<unsigned long long>(
+                    stats.set_hash.load(std::memory_order_relaxed)),
+                stats.smap_size.load(std::memory_order_relaxed),
+                stats.smap_size.load(std::memory_order_relaxed),
+                stats.smap_count.load(std::memory_order_relaxed),
+                stats.smap_handle.load(std::memory_order_relaxed));
+        }
+        last = now;
+    }
+    uint64_t draws{};
+    uint32_t draw_threads{};
+    for (const auto& slot : g_shadow_profile_draw_slots) {
+        if (slot.thread_id.load(std::memory_order_acquire) != 0) {
+            ++draw_threads;
+            draws += slot.draws.load(std::memory_order_relaxed);
+        }
+    }
+    const uint64_t pair_fits =
+        g_shadow_profile_pair_fits.load(std::memory_order_relaxed);
+    const uint64_t untouched =
+        g_shadow_profile_set_untouched.load(std::memory_order_relaxed);
+    const uint64_t same_fit =
+        g_shadow_profile_same_fit.load(std::memory_order_relaxed);
+    const uint64_t smap_changes =
+        g_shadow_profile_smap_changes.load(std::memory_order_relaxed);
+    const uint64_t draws_window = draws - previous_draws;
+    log_vrs_line(
+        "PERF shadow set pair_fits=%llu untouched=%llu same_fit=%llu "
+        "smap_handle_changes=%llu draws_per_present=%.1f "
+        "cascade_draw_share=%.3f draw_threads=%u draw_overflow=%llu",
+        static_cast<unsigned long long>(pair_fits - previous_pair_fits),
+        static_cast<unsigned long long>(untouched - previous_untouched),
+        static_cast<unsigned long long>(same_fit - previous_same_fit),
+        static_cast<unsigned long long>(smap_changes - previous_smap_changes),
+        static_cast<double>(draws_window) / presents,
+        draws_window != 0
+            ? static_cast<double>(cascade_draws_window) /
+                static_cast<double>(draws_window)
+            : 0.0,
+        draw_threads,
+        static_cast<unsigned long long>(
+            g_shadow_profile_draw_overflow.load(std::memory_order_relaxed)));
+    previous_pair_fits = pair_fits;
+    previous_untouched = untouched;
+    previous_same_fit = same_fit;
+    previous_smap_changes = smap_changes;
+    previous_draws = draws;
+    if (!frame_logged &&
+        g_shadow_profile_frame_ready.load(std::memory_order_acquire)) {
+        frame_logged = true;
+        const auto& f = g_shadow_profile_frame;
+        log_vrs_line(
+            "PERF shadow frame splits=%.0f split_far=%.2f,%.2f,%.2f,%.2f "
+            "cascade_params=%.4f,%.4f,%.4f,%.4f far=%.2f",
+            f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7], f[8], f[9]);
+    }
+}
+
+bool engine_code_matches(
+    const uint8_t* module, const EngineCodeBytes* code, size_t count) {
+    for (size_t index = 0; index < count; ++index) {
+        if (std::memcmp(module + code[index].rva, code[index].bytes,
+                code[index].size) != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool create_shadow_pair_hook(uint8_t* module, uintptr_t rva, void* detour,
+    void** original, const char* name) {
+    auto* target = module + rva;
+    if (MH_CreateHook(target, detour, original) == MH_OK &&
+        MH_EnableHook(target) == MH_OK) {
+        log_shadow_pair_line("Shadow %s hook installed target=%p", name, target);
+        return true;
+    }
+    *original = nullptr;
+    log_shadow_pair_line("Shadow %s hook failed target=%p", name, target);
+    return false;
+}
+
+// [FEATURE:REMASTER-SHADOW-PAIR-REUSE 7/7] 5.01 only. Every hook checks its
+// own code bytes first and stays out on a mismatch; reuse needs all of its
+// hooks (mode 1: fit and depth passes, mode 9: depth passes) and the
+// end-of-render cleanup it relies on, or is off.
+void install_remaster_shadow_pair_hooks() {
+    const bool profile = g_config.perf_shadow_profile;
+    if ((g_config.remaster_shadow_pair_reuse == 0 && !profile) ||
+        g_engine_shadow_cascade_render != nullptr ||
+        g_engine_shadow_cascade_fit != nullptr) {
+        return;
+    }
+    auto* module = reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr));
+    if (running_game_build() != w3vr::game_build::Build::Remaster501 ||
+        module == nullptr) {
+        g_config.remaster_shadow_pair_reuse = 0;
+        g_config.perf_shadow_profile = false;
+        log_shadow_pair_line("Shadow pair reuse and profile off: build mismatch");
+        return;
+    }
+    const bool fit_code = engine_code_matches(
+        module, kShadowFitCode, std::size(kShadowFitCode));
+    const bool render_code = engine_code_matches(
+        module, kShadowRenderCode, std::size(kShadowRenderCode));
+    const bool cleanup_code = engine_code_matches(
+        module, kShadowCleanupCode, std::size(kShadowCleanupCode));
+    const int requested = g_config.remaster_shadow_pair_reuse;
+    if (requested != 0 && (!render_code || !cleanup_code ||
+            (requested == 1 && !fit_code))) {
+        g_config.remaster_shadow_pair_reuse = 0;
+        log_shadow_pair_line(
+            "Shadow pair reuse off: code mismatch fit=%d render=%d cleanup=%d",
+            fit_code ? 1 : 0, render_code ? 1 : 0, cleanup_code ? 1 : 0);
+    }
+    const int mode = g_config.remaster_shadow_pair_reuse;
+    bool fit_hooked{};
+    bool render_hooked{};
+    if (fit_code && (mode == 1 || profile)) {
+        fit_hooked = create_shadow_pair_hook(module,
+            kRemaster501ShadowCascadeFitRva,
+            reinterpret_cast<void*>(&hook_engine_shadow_cascade_fit),
+            reinterpret_cast<void**>(&g_engine_shadow_cascade_fit),
+            "cascade fit");
+    }
+    if (render_code && (mode != 0 || profile)) {
+        render_hooked = create_shadow_pair_hook(module,
+            kRemaster501ShadowCascadeRenderRva,
+            reinterpret_cast<void*>(&hook_engine_shadow_cascade_render),
+            reinterpret_cast<void**>(&g_engine_shadow_cascade_render),
+            "cascade render");
+    }
+    bool speedtree_hooked{};
+    bool shadows_hooked{};
+    if (profile) {
+        if (engine_code_matches(module, kSpeedTreeShadowViewsCode,
+                std::size(kSpeedTreeShadowViewsCode))) {
+            speedtree_hooked = create_shadow_pair_hook(module,
+                kRemaster501SpeedTreeShadowViewsRva,
+                reinterpret_cast<void*>(&hook_engine_speedtree_shadow_views),
+                reinterpret_cast<void**>(&g_engine_speedtree_shadow_views),
+                "speedtree views timer");
+        }
+        if (engine_code_matches(module, kRenderShadowsCode,
+                std::size(kRenderShadowsCode))) {
+            shadows_hooked = create_shadow_pair_hook(module,
+                kRemaster501RenderShadowsRva,
+                reinterpret_cast<void*>(&hook_engine_render_shadows),
+                reinterpret_cast<void**>(&g_engine_render_shadows),
+                "render shadows timer");
+        }
+    }
+    const bool reuse_ready = mode != 0 && render_hooked &&
+        (mode == 9 || fit_hooked);
+    if (mode != 0 && !reuse_ready) {
+        g_config.remaster_shadow_pair_reuse = 0;
+    }
+    g_runtime_shadow_pair_reuse.store(reuse_ready, std::memory_order_release);
+    log_shadow_pair_line(
+        "Shadow pair reuse requested=%d mode=%d profile=%d code fit=%d "
+        "render=%d cleanup=%d hooks fit=%d render=%d speedtree_timer=%d "
+        "shadows_timer=%d",
+        requested, g_config.remaster_shadow_pair_reuse, profile ? 1 : 0,
+        fit_code ? 1 : 0, render_code ? 1 : 0, cleanup_code ? 1 : 0,
+        fit_hooked ? 1 : 0, render_hooked ? 1 : 0, speedtree_hooked ? 1 : 0,
+        shadows_hooked ? 1 : 0);
+}
+
 void install_remaster_engine_dlss_hooks() {
     namespace addresses = w3vr::engine_addresses;
     if (!remaster_engine_dlss_stereo_active() ||
@@ -53108,6 +54552,7 @@ void ensure_initialized() {
         install_remaster_dlss_mip_bias_hook();
         install_remaster_engine_fsr_hooks();
         install_remaster_gui_fade_fill_hook();
+        install_remaster_shadow_pair_hooks();
         install_engine_view_factory_probe();
         install_engine_render_proxy_distance_scale_hook();
         install_engine_native_camera_authority_hooks();
