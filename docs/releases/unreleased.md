@@ -31,3 +31,9 @@ Collected on `remaster` since v0.9.8v2-remastered.3; this file becomes the next 
   cut (`[engine] remaster_cut_history_reset`, on by default), as it already did for TAAU on 4.04.
   Tested in the headset on 5.01. For test runs, `[debug] history_event_log=1` writes only these
   history events to `witcher3vr.log`.
+- **No left-eye glitch in dialogues and no double pause menu on 5.x:** `[openxr] native_stereo=1`
+  half-enabled the 4.04 asymmetric projection, which is not ported to 5.x. In Full VR dialogues the
+  left eye then briefly showed the right eye's image now and then, and the pause menu showed a
+  double image. Merely opening the launcher set it to 1 until the next Save. The mod now ignores
+  `native_stereo` (and the F2 toggle) on 5.01, and the launcher keeps it at 0 on 5.x. Tested in the
+  headset on 5.01 (flicker in 4 of 4 dialogue runs before, 0 of 3 after).
