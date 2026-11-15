@@ -400,7 +400,7 @@ void MigrateConfigurationToV11(IniDocument& ini) {
     ini.Set("meta", "config_version", "11");
 }
 
-void NormalizeLauncherOwnedConfiguration(IniDocument& ini) {
+void NormalizeLauncherOwnedConfiguration(IniDocument& ini, bool remastered) {
     // The launcher owns the complete route tuple. Mode 1 is clean Mono and
     // Mode 3 is the validated dual-render producer used by AER and Stereo.
     // Repair stale fragments without touching user-owned resolution, HUD or
@@ -427,9 +427,11 @@ void NormalizeLauncherOwnedConfiguration(IniDocument& ini) {
 
     // ASYM is a launcher invariant in V16. F2 remains the runtime comparison
     // control, but every new process starts with asymmetric optics enabled.
+    // Remastered 5.x has no asymmetric projection yet: there it stays off, or
+    // merely opening the launcher would turn it on until the next Save.
     const bool fullscreen_projection = ReadBool(
         ini, "openxr", "fullscreen_projection", false);
-    ini.Set("openxr", "native_stereo", "1");
+    ini.Set("openxr", "native_stereo", remastered ? "0" : "1");
     ini.Set("openxr", "fullscreen_projection",
         fullscreen_projection ? "1" : "0");
 
@@ -1325,7 +1327,8 @@ std::wstring HudEditorManualSetupInstructions(const ConfigPaths& paths) {
 }
 
 bool EnsureVrConfiguration(const ConfigPaths& paths,
-    const std::string& template_contents, bool& created, std::wstring& error) {
+    const std::string& template_contents, bool& created, std::wstring& error,
+    bool remastered) {
     created = false;
     const auto defaults = IniDocument::FromText(template_contents);
     const DWORD attributes = GetFileAttributesW(paths.vr_ini.c_str());
@@ -1394,7 +1397,7 @@ bool EnsureVrConfiguration(const ConfigPaths& paths,
         // the default template must heal a partial current-version INI on the
         // very next launcher start, without overwriting manual tuning.
         migrated.FillMissingFrom(defaults);
-        NormalizeLauncherOwnedConfiguration(migrated);
+        NormalizeLauncherOwnedConfiguration(migrated, remastered);
         migrated.Set(
             "meta", "config_version", std::to_string(kCurrentConfigVersion));
         const auto serialized = migrated.Serialize();
@@ -1412,7 +1415,10 @@ bool EnsureVrConfiguration(const ConfigPaths& paths,
     }
     // New installations use the release defaults verbatim. Existing INIs
     // continue to preserve their selected route through the migration path.
-    const auto& first_run = defaults;
+    auto first_run = defaults;
+    if (remastered) {
+        first_run.Set("openxr", "native_stereo", "0");
+    }
     if (!AtomicWriteWithBackup(
             paths.vr_ini, first_run.Serialize(), error)) {
         return false;
@@ -1902,7 +1908,7 @@ bool BuildUpdatedDocuments(const ConfigPaths& paths, const LauncherState& state,
         IntegrationModeIniValue(state.integration_mode));
     // Repair stale route fragments and diagnostic probes while preserving all
     // unrelated advanced tuning.
-    NormalizeLauncherOwnedConfiguration(vr_ini);
+    NormalizeLauncherOwnedConfiguration(vr_ini, state.remastered);
     vr_ini.Set("meta", "config_version", std::to_string(kCurrentConfigVersion));
 
     game_settings.Set("Viewport", "Resolution", "\"" +

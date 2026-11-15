@@ -1550,6 +1550,25 @@ void TestFirstRunConfiguration(const fs::path& root) {
                 "openxr", "world_detail_range") == "0.500",
         "V17 migration reset the existing world-detail range");
 
+    // Remastered 5.x: opening the launcher keeps native_stereo off (no
+    // asymmetric projection there yet); Next-Gen keeps the V16 invariant.
+    Write(paths.vr_ini,
+        "[meta]\r\nconfig_version=19\r\n"
+        "[openxr]\r\nnative_stereo=1\r\n");
+    Require(w3vr::EnsureVrConfiguration(
+                paths, defaults, created, error, true),
+        "remastered start-up normalization failed");
+    const auto remastered_start = w3vr::IniDocument::Load(paths.vr_ini, error);
+    Require(remastered_start &&
+            remastered_start->Get("openxr", "native_stereo") == "0",
+        "opening the launcher on 5.x turned native_stereo on");
+    Require(w3vr::EnsureVrConfiguration(paths, defaults, created, error),
+        "next-gen start-up normalization failed");
+    const auto nextgen_start = w3vr::IniDocument::Load(paths.vr_ini, error);
+    Require(nextgen_start &&
+            nextgen_start->Get("openxr", "native_stereo") == "1",
+        "4.04 start-up normalization no longer enables native_stereo");
+
     // Retire the old resize switch without changing the user's scale.
     Write(paths.vr_ini,
         "[meta]\r\nconfig_version=17\r\n"

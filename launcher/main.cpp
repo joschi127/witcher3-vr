@@ -1883,7 +1883,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     bool created_ini{};
     std::wstring configuration_error;
     if (!w3vr::EnsureVrConfiguration(
-            g_app.paths, *default_ini, created_ini, configuration_error)) {
+            g_app.paths, *default_ini, created_ini, configuration_error,
+            Remastered())) {
         MessageBoxW(nullptr, configuration_error.c_str(),
             L"Witcher 3 VR Launcher", MB_OK | MB_ICONERROR);
         return 5;
