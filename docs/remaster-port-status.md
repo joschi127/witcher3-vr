@@ -1154,3 +1154,19 @@ FSR per eye) and merged into `remaster`; release v0.9.8v2-remastered.4 is tagged
 Install test from the release zip (null driver): 5.01 passed with all new features active; 4.04
 passed (balcony save), launcher keeps `native_stereo=1` there and sets the next-gen script variant.
 Open: a 4.04 headset check of #30 (the menu panel change is not limited to 5.01); 5.1c support.
+
+## 2026-11-16: menu mono camera, taken over from kaarele/witcher3-remastered-vr
+
+- Cause of the double image behind the system menu (#30 only hid it): fullscreen menus are single
+  view (the duplicate factory is off, `g_engine_factory_eye` stays -1), but the stereo offset and
+  the native projection shift fell back to the Present-parity eye and moved the one view by +/- half
+  the IPD every Present.
+- `[FIX:MENU-MONO-CAMERA]` (kaarele): no per-eye camera edits while a menu is open and the view has
+  no eye; Streamline/DLSS keeps untagged menu frames on eye 0 (menu state latched per Present).
+  FSR part (this fork): untagged FSR dispatches behind a menu alternated with eye-0 dispatches on
+  the same game context and reset it every frame (no AA behind the menu); they now count as eye 0.
+  The #30 hold (every second backbuffer) is removed.
+- Null driver, system menu with ten captures: before, captures shifted by 1-2 px of 384 against
+  each other (half IPD on a distant landscape); after, no shift. FSR resets during the menu: one per
+  frame before, none after (eye 1 restarts once when the menu closes). D3D12 debug layer: no errors.
+- Open: headset check (no double image, AA behind the menu, no artefact when the menu closes).
