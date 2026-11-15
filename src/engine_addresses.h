@@ -40,6 +40,7 @@ enum class Function : size_t {
     DlssMipBias,           // (frame_data, _, float* bias): texture LOD bias for the frame's samplers
     FsrUpscaleDispatch,    // FSR upscale dispatch (state, frame_data, params, index, ...)
     FrustumAabbTest,       // (frustum, world box {min, max}): 1 = box fully outside the frustum
+    GuiFillRect,           // 2D colour quad into the GUI target (_, x, y, w, h, const uint8_t rgba[4])
     Count,
 };
 
@@ -310,6 +311,24 @@ inline constexpr uint8_t kRenderTargetCreate501Bytes[] = {
 inline constexpr uint8_t kRenderTargetIdStore501Bytes[] = {
     0x41, 0x83, 0x7D, 0x14, 0x09, 0x49, 0x8D, 0x4D, 0x08, 0x44, 0x89, 0x31};
 
+// [FIX:HUD-FADE-FILL] Fill-rect helper of the GUI pass (5.01 only): two
+// vertex-coloured triangles with the render state at 0x05C78BF0. Its only
+// callers draw the screen fade (GuiFadeFillReturn, FadeObjectFillReturn); the
+// fill lands in the same target as the Flash HUD.
+inline constexpr uint8_t kGuiFillRect501Bytes[] = {
+    0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x74, 0x24, 0x10, 0x48, 0x89,
+    0x7C, 0x24, 0x18, 0x55, 0x48, 0x8D, 0x6C, 0x24, 0xB9, 0x48, 0x81, 0xEC,
+    0xD0, 0x00, 0x00, 0x00, 0x8B, 0xDA, 0x41, 0x8B, 0xF1};
+// Code at the two fade sites, checked before the fill-rect detour is placed:
+// the GUI pass's "fade amount > 0" test (vcomiss xmm0,[rdi+0x48]; jae) and the
+// call instructions that end at the two return addresses.
+inline constexpr uint8_t kGuiFadeAmountTest501Bytes[] = {
+    0xC5, 0xF8, 0x2F, 0x47, 0x48, 0x0F, 0x83};
+inline constexpr uint8_t kGuiFadeFillCall501Bytes[] = {
+    0xE8, 0x5D, 0x28, 0x07, 0x00};
+inline constexpr uint8_t kFadeObjectFillCall501Bytes[] = {
+    0xE8, 0x33, 0xDE, 0x08, 0x00};
+
 // [FIX:REMASTER-ANIMATED-VISIBILITY 1/8] Frustum AABB test (frustum, world
 // box {min at +0, max at +0x10}). Both builds return al = 1 when the box is
 // fully outside one of the six planes and 0 when it is inside or
@@ -421,6 +440,8 @@ inline constexpr Entry kEntries[] = {
         {kFsrUpscaleDispatch501Bytes, sizeof(kFsrUpscaleDispatch501Bytes)}},
     {"FrustumAabbTest", 0x0031E050, 0x0099B2B0,
         {kFrustumAabbTest501Bytes, sizeof(kFrustumAabbTest501Bytes)}},
+    {"GuiFillRect", 0, 0x01C99780,
+        {kGuiFillRect501Bytes, sizeof(kGuiFillRect501Bytes)}},
 };
 static_assert(sizeof(kEntries) / sizeof(kEntries[0]) ==
     static_cast<size_t>(Function::Count));
@@ -486,6 +507,9 @@ enum class Value : size_t {
     RenderTargetObjectSize,       // CRenderTarget: object size
     AnimatedComponentVisibilityReturn,  // return address of the frustum test call in the
                                         // animated-component visibility update
+    GuiFadeAmountTest,            // RVA of the GUI pass's fade-amount test (5.01 only)
+    GuiFadeFillReturn,            // return address of the fill-rect call drawing the GUI-pass fade
+    FadeObjectFillReturn,         // return address of the fill-rect call in the standalone fade draw
     Count,
 };
 
@@ -583,6 +607,14 @@ inline constexpr ValueEntry kValues[] = {
     // keeps its last pose, or the bind pose if it was never updated) and only
     // moves plain child transforms such as a held weapon.
     {"AnimatedComponentVisibilityReturn", 0x015E186C, 0x02437A90},
+    // [FIX:HUD-FADE-FILL] Screen fade (theGame.FadeOut/FadeIn, blackscreens)
+    // in the GUI pass 0x01C26A60: after the HUD movie lists, if the amount at
+    // fade block +0x48 is above 0, the colour (rgb*255, amount*255) goes to
+    // GuiFillRect (call 0x01C26F1E). 0x01C0B7E0 is a standalone copy of that
+    // draw (call 0x01C0B948). 4.04 has no such helper.
+    {"GuiFadeAmountTest", 0, 0x01C26DE4},
+    {"GuiFadeFillReturn", 0, 0x01C26F23},
+    {"FadeObjectFillReturn", 0, 0x01C0B94D},
 };
 static_assert(sizeof(kValues) / sizeof(kValues[0]) == static_cast<size_t>(Value::Count));
 

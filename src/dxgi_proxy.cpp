@@ -582,6 +582,13 @@ struct Config {
     // one nearest Load, so a shrunk HUD keeps its glyph strokes.
     bool hud_filtered_sampling{true};
     bool hud_controller_locked{};
+    // [FIX:HUD-FADE-FILL 1/5] 5.01 only: the game's screen fade is drawn
+    // into the HUD texture. While the VR HUD plane owns that texture, remove
+    // drops the fill (the world stays visible), uniform drops it and darkens
+    // each whole eye image with the same colour instead, native keeps the
+    // game's draw (a fading HUD-sized rectangle).
+    enum class HudFadeMode : uint8_t { Remove, Uniform, Native };
+    HudFadeMode hud_fade_mode{HudFadeMode::Uniform};
     int recenter_virtual_key{VK_F9};
     float menu_scale{0.7f};
     float cinema_scale{0.7f};
@@ -16890,6 +16897,17 @@ void load_config() {
                     w3vr::game_build::Build::Remaster501);
         g_config.hud_controller_locked =
             read_ini_bool("openxr", "hud_controller_locked", false);
+        {
+            const auto hud_fade_mode = read_ini_string(
+                "openxr", "hud_fade_mode", "uniform");
+            // Uniform by default: without any fade the first frames after a
+            // camera cut (lighting and LOD still settling) flash visibly.
+            g_config.hud_fade_mode = hud_fade_mode == "native"
+                ? Config::HudFadeMode::Native
+                : hud_fade_mode == "remove"
+                ? Config::HudFadeMode::Remove
+                : Config::HudFadeMode::Uniform;
+        }
         {
             const auto recenter_key = read_ini_string(
                 "openxr", "recenter_key", "F9");
@@ -46688,6 +46706,270 @@ void install_remaster_engine_fsr_hooks() {
     }
 }
 
+// [FIX:HUD-FADE-FILL 2/5] The 5.01 screen fade (FadeOut/FadeIn, blackscreens)
+// is a 2D colour quad that the GUI pass draws after the HUD movies, into the
+// same target: the UI texture t1. Mode 3 lifts t1 out of the eye images and
+// shows it as the shrunk HUD plane, so a full-screen fade became a black
+// HUD-sized rectangle with the centre-split square cut out of it. While that
+// plane owns t1 the fade fill is dropped; every HUD movie is drawn as before.
+// The engine reaches both fade sites only while the fade amount is above 0,
+// so normal play never takes this path, and other callers pass through.
+using EngineGuiFillRect = void(__fastcall*)(
+    void*, int32_t, int32_t, int32_t, int32_t, const uint8_t*);
+EngineGuiFillRect g_engine_gui_fill_rect{};
+uintptr_t g_gui_fade_fill_return{};
+uintptr_t g_fade_object_fill_return{};
+// Latest fade colour as 0xRRGGBBAA (A = amount * 255) and the Present of the
+// last fade fill and of the last suppressed one (UINT64_MAX = none yet). The
+// XR submit reads them without a lock; a one-Present lag is invisible.
+std::atomic<uint32_t> g_gui_fade_rgba{};
+std::atomic<uint64_t> g_gui_fade_present{UINT64_MAX};
+std::atomic<uint64_t> g_gui_fade_suppressed_present{UINT64_MAX};
+constexpr uint64_t kGuiFadeStalePresents = 3;
+// Per-fade counters for the bounded transition log.
+std::atomic<bool> g_gui_fade_active{};
+std::atomic<int> g_gui_fade_last_suppressed{-1};
+std::atomic<uint64_t> g_gui_fade_start_present{};
+std::atomic<uint64_t> g_gui_fade_calls{};
+std::atomic<uint64_t> g_gui_fade_suppressed_calls{};
+std::atomic<uint64_t> g_gui_fade_object_calls{};
+std::atomic<uint32_t> g_gui_fade_max_alpha{};
+std::atomic<uint32_t> g_gui_fade_log_count{};
+// Set once the uniform-mode XR pipeline exists; uniform keeps the native fade
+// until then (and for good if that pipeline cannot be created).
+std::atomic<bool> g_mode3_uniform_fade_ready{};
+
+const char* hud_fade_mode_name() {
+    switch (g_config.hud_fade_mode) {
+    case Config::HudFadeMode::Uniform:
+        return "uniform";
+    case Config::HudFadeMode::Native:
+        return "native";
+    case Config::HudFadeMode::Remove:
+        break;
+    }
+    return "remove";
+}
+
+// The VR HUD plane (or the baked eye composite that shrinks t1 the same way
+// during bootstrap) owns t1: Mode 3 gameplay and automatic Full VR cutscenes.
+// Menus, the loading video and the normal or manual (F10) Cinema panel show
+// t1 over the whole image, so they keep the native fade.
+bool mode3_fade_fill_suppressed() {
+    const bool cinema_panel =
+        g_force_mono_cinema.load(std::memory_order_relaxed) ||
+        (g_cinema_mode_active.load(std::memory_order_relaxed) &&
+            !g_config.cinema_full_vr);
+    return g_config.hud_fade_mode != Config::HudFadeMode::Native &&
+        (g_config.hud_fade_mode != Config::HudFadeMode::Uniform ||
+            g_mode3_uniform_fade_ready.load(std::memory_order_acquire)) &&
+        g_config.openxr_enabled &&
+        !g_config.disable_hud_composite_replacement &&
+        mode3_stereo_transport_active() &&
+        retained_hud_projection_route_configured() &&
+        g_engine_menu_state.load(std::memory_order_relaxed) == 0 &&
+        !g_engine_loading_screen_video_active.load(
+            std::memory_order_acquire) &&
+        !cinema_panel;
+}
+
+void log_gui_fade_fill(const char* event, const char* site, uint32_t rgba,
+    bool suppressed, uint64_t present) {
+    if (!g_config.runtime_diagnostics ||
+        !take_bounded_log_slot(g_gui_fade_log_count, 512)) {
+        return;
+    }
+    log_line("fade fill %s site=%s rgba=%08X suppressed=%d mode=%s present=%llu "
+        "menu=%d video=%d cinema=%d/%d",
+        event, site, rgba, suppressed ? 1 : 0, hud_fade_mode_name(),
+        static_cast<unsigned long long>(present),
+        g_engine_menu_state.load(std::memory_order_relaxed),
+        g_engine_loading_screen_video_active.load(
+            std::memory_order_relaxed) ? 1 : 0,
+        g_cinema_mode_active.load(std::memory_order_relaxed) ? 1 : 0,
+        g_force_mono_cinema.load(std::memory_order_relaxed) ? 1 : 0);
+    w3vr::minimal_xr_log::hud("FADE",
+        "present=%llu event=%s site=%s rgba=%08X suppressed=%d mode=%s",
+        static_cast<unsigned long long>(present), event, site, rgba,
+        suppressed ? 1 : 0, hud_fade_mode_name());
+}
+
+void __fastcall hook_engine_gui_fill_rect(void* context, int32_t x, int32_t y,
+    int32_t width, int32_t height, const uint8_t* rgba) {
+    const auto return_address =
+        reinterpret_cast<uintptr_t>(_ReturnAddress());
+    const bool gui_site = return_address == g_gui_fade_fill_return;
+    if (rgba == nullptr ||
+        (!gui_site && return_address != g_fade_object_fill_return)) {
+        g_engine_gui_fill_rect(context, x, y, width, height, rgba);
+        return;
+    }
+    const uint32_t packed = (uint32_t{rgba[0]} << 24) |
+        (uint32_t{rgba[1]} << 16) | (uint32_t{rgba[2]} << 8) | rgba[3];
+    const uint32_t alpha = packed & 0xFFu;
+    const uint64_t present = g_present_count.load(std::memory_order_relaxed);
+    const bool suppressed = mode3_fade_fill_suppressed();
+    const uint32_t previous =
+        g_gui_fade_rgba.exchange(packed, std::memory_order_acq_rel);
+    g_gui_fade_present.store(present, std::memory_order_release);
+    if (suppressed) {
+        g_gui_fade_suppressed_present.store(
+            present, std::memory_order_release);
+    }
+    const char* const site = gui_site ? "gui" : "object";
+    if (!g_gui_fade_active.exchange(true, std::memory_order_acq_rel)) {
+        g_gui_fade_start_present.store(present, std::memory_order_relaxed);
+        g_gui_fade_calls.store(0, std::memory_order_relaxed);
+        g_gui_fade_suppressed_calls.store(0, std::memory_order_relaxed);
+        g_gui_fade_object_calls.store(0, std::memory_order_relaxed);
+        g_gui_fade_max_alpha.store(0, std::memory_order_relaxed);
+        g_gui_fade_last_suppressed.store(
+            suppressed ? 1 : 0, std::memory_order_relaxed);
+        log_gui_fade_fill("start", site, packed, suppressed, present);
+    } else {
+        // Blackscreen reached (A 255) or left (fade-in begins), and gate
+        // changes inside one fade (menu, Cinema panel).
+        if (alpha == 0xFFu && (previous & 0xFFu) != 0xFFu) {
+            log_gui_fade_fill("full", site, packed, suppressed, present);
+        } else if (alpha != 0xFFu && (previous & 0xFFu) == 0xFFu) {
+            log_gui_fade_fill("partial", site, packed, suppressed, present);
+        }
+        if (g_gui_fade_last_suppressed.exchange(
+                suppressed ? 1 : 0, std::memory_order_relaxed) !=
+            (suppressed ? 1 : 0)) {
+            log_gui_fade_fill("gate", site, packed, suppressed, present);
+        }
+    }
+    g_gui_fade_calls.fetch_add(1, std::memory_order_relaxed);
+    if (!gui_site) {
+        g_gui_fade_object_calls.fetch_add(1, std::memory_order_relaxed);
+    }
+    if (alpha > g_gui_fade_max_alpha.load(std::memory_order_relaxed)) {
+        g_gui_fade_max_alpha.store(alpha, std::memory_order_relaxed);
+    }
+    if (suppressed) {
+        g_gui_fade_suppressed_calls.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    g_engine_gui_fill_rect(context, x, y, width, height, rgba);
+}
+
+// Called once per XR frame. Closes the per-fade log once no fade fill came
+// for kGuiFadeStalePresents Presents (the engine stops at amount 0), and
+// returns the colour of a fill suppressed within that window.
+bool latched_gui_fade_colour(uint64_t present, uint32_t& rgba) {
+    if (g_engine_gui_fill_rect == nullptr) {
+        return false;
+    }
+    const uint64_t last = g_gui_fade_present.load(std::memory_order_acquire);
+    if (last != UINT64_MAX && present > last &&
+        present - last > kGuiFadeStalePresents &&
+        g_gui_fade_active.load(std::memory_order_relaxed) &&
+        g_gui_fade_active.exchange(false, std::memory_order_acq_rel)) {
+        const uint64_t start =
+            g_gui_fade_start_present.load(std::memory_order_relaxed);
+        if (g_config.runtime_diagnostics &&
+            take_bounded_log_slot(g_gui_fade_log_count, 512)) {
+            log_line("fade fill end present=%llu start=%llu presents=%llu "
+                "calls=%llu suppressed=%llu object=%llu max_a=%u last_rgba=%08X mode=%s "
+                "menu=%d video=%d",
+                static_cast<unsigned long long>(present),
+                static_cast<unsigned long long>(start),
+                static_cast<unsigned long long>(last >= start ? last - start + 1 : 0),
+                static_cast<unsigned long long>(g_gui_fade_calls.load()),
+                static_cast<unsigned long long>(g_gui_fade_suppressed_calls.load()),
+                static_cast<unsigned long long>(g_gui_fade_object_calls.load()),
+                g_gui_fade_max_alpha.load(), g_gui_fade_rgba.load(),
+                hud_fade_mode_name(),
+                g_engine_menu_state.load(std::memory_order_relaxed),
+                g_engine_loading_screen_video_active.load(
+                    std::memory_order_relaxed) ? 1 : 0);
+            w3vr::minimal_xr_log::hud("FADE",
+                "present=%llu event=end calls=%llu suppressed=%llu",
+                static_cast<unsigned long long>(present),
+                static_cast<unsigned long long>(g_gui_fade_calls.load()),
+                static_cast<unsigned long long>(g_gui_fade_suppressed_calls.load()));
+        }
+    }
+    const uint64_t suppressed =
+        g_gui_fade_suppressed_present.load(std::memory_order_acquire);
+    if (suppressed == UINT64_MAX ||
+        (present > suppressed &&
+            present - suppressed > kGuiFadeStalePresents)) {
+        return false;
+    }
+    rgba = g_gui_fade_rgba.load(std::memory_order_acquire);
+    return true;
+}
+
+void install_remaster_gui_fade_fill_hook() {
+    namespace addresses = w3vr::engine_addresses;
+    // native installs nothing, except to log the fades of a diagnostic
+    // baseline run (the detour then never suppresses).
+    if ((g_config.hud_fade_mode == Config::HudFadeMode::Native &&
+            !g_config.runtime_diagnostics) ||
+        !g_config.openxr_enabled ||
+        !mode3_stereo_transport_active() ||
+        !retained_hud_projection_route_configured() ||
+        running_game_build() != w3vr::game_build::Build::Remaster501 ||
+        g_engine_gui_fill_rect != nullptr) {
+        return;
+    }
+    const auto build = running_game_build();
+    auto* module = reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr));
+    auto code_matches = [module](uintptr_t rva, const uint8_t* bytes,
+                                 size_t size) {
+        return module != nullptr && rva != 0 &&
+            addresses::signature_matches(
+                module + rva, addresses::Signature{bytes, size});
+    };
+    const uintptr_t amount_test =
+        addresses::value(build, addresses::Value::GuiFadeAmountTest);
+    const uintptr_t gui_return =
+        addresses::value(build, addresses::Value::GuiFadeFillReturn);
+    const uintptr_t object_return =
+        addresses::value(build, addresses::Value::FadeObjectFillReturn);
+    // The call bytes encode the call target, so they also prove that each
+    // return address belongs to a call of GuiFillRect.
+    if (!code_matches(amount_test, addresses::kGuiFadeAmountTest501Bytes,
+            sizeof(addresses::kGuiFadeAmountTest501Bytes)) ||
+        !code_matches(gui_return != 0
+                ? gui_return - sizeof(addresses::kGuiFadeFillCall501Bytes) : 0,
+            addresses::kGuiFadeFillCall501Bytes,
+            sizeof(addresses::kGuiFadeFillCall501Bytes))) {
+        log_line("HUD fade fill hook disabled: GUI-pass fade site mismatch "
+            "amount_test=0x%llX return=0x%llX",
+            static_cast<unsigned long long>(amount_test),
+            static_cast<unsigned long long>(gui_return));
+        return;
+    }
+    const bool object_site = code_matches(object_return != 0
+            ? object_return - sizeof(addresses::kFadeObjectFillCall501Bytes) : 0,
+        addresses::kFadeObjectFillCall501Bytes,
+        sizeof(addresses::kFadeObjectFillCall501Bytes));
+    auto* target = engine_function_target(addresses::Function::GuiFillRect);
+    if (target == nullptr) {
+        log_line("HUD fade fill hook disabled: GuiFillRect unavailable");
+        return;
+    }
+    g_gui_fade_fill_return = reinterpret_cast<uintptr_t>(module + gui_return);
+    g_fade_object_fill_return = object_site
+        ? reinterpret_cast<uintptr_t>(module + object_return) : 0;
+    if (MH_CreateHook(target, reinterpret_cast<void*>(&hook_engine_gui_fill_rect),
+            reinterpret_cast<void**>(&g_engine_gui_fill_rect)) != MH_OK ||
+        MH_EnableHook(target) != MH_OK) {
+        g_engine_gui_fill_rect = nullptr;
+        log_line("HUD fade fill hook failed target=%p", target);
+        return;
+    }
+    log_line("HUD fade fill hooked target=%p mode=%s gui_return=0x%llX "
+        "object_return=0x%llX%s",
+        target, hud_fade_mode_name(),
+        static_cast<unsigned long long>(gui_return),
+        static_cast<unsigned long long>(object_site ? object_return : 0),
+        object_site ? "" : " (object site mismatch, not handled)");
+}
+
 // [FIX:REMASTER-PAIR-JITTER 3/6] Index of the stereo pair a render belongs
 // to, for frame_data (FrameBuilder's frame + 0x10, as the jitter generator
 // and the noise passes receive it) or, inside the frame builder, for the
@@ -52688,6 +52970,7 @@ void ensure_initialized() {
         install_remaster_engine_dlss_hooks();
         install_remaster_dlss_mip_bias_hook();
         install_remaster_engine_fsr_hooks();
+        install_remaster_gui_fade_fill_hook();
         install_engine_view_factory_probe();
         install_engine_render_proxy_distance_scale_hook();
         install_engine_native_camera_authority_hooks();
@@ -53013,6 +53296,203 @@ bool wait_for_xr_command_allocator(size_t index) {
         return false;
     }
     return WaitForSingleObject(g_xr_fence_event, 1000) == WAIT_OBJECT_0;
+}
+
+// [FIX:HUD-FADE-FILL 3/5] hud_fade_mode=uniform: the fade fill dropped from
+// t1 is applied to each whole eye image instead, before the HUD plane, with
+// the latched colour and amount. Straight-alpha blending into the sRGB target
+// happens in linear light, like the flat composite's lerp(scene, t1, t1.a) in
+// decoded space, so a black fade gives scene * (1 - a) in both.
+ID3D12RootSignature* g_xr_fade_root_signature{};
+ID3D12PipelineState* g_xr_fade_pipeline{};
+
+bool initialize_mode3_uniform_fade_pipeline(DXGI_FORMAT target_format) {
+    if (g_xr_fade_pipeline != nullptr) {
+        return true;
+    }
+    if (g_d3d12_device == nullptr || !initialize_dxc()) {
+        return false;
+    }
+    static constexpr char kShader[] = R"(
+cbuffer FadeColour : register(b0) {
+    float4 fade_colour;
+};
+float4 vs_main(uint vertex_id : SV_VertexID) : SV_Position {
+    // One triangle that covers the whole viewport.
+    float2 corner = float2((vertex_id << 1) & 2, vertex_id & 2);
+    return float4(corner * float2(2.0, -2.0) + float2(-1.0, 1.0), 0.5, 1.0);
+}
+float4 ps_main(float4 position : SV_Position) : SV_Target0 {
+    return fade_colour;
+}
+)";
+    auto compile_stage = [](const wchar_t* entry,
+                            const wchar_t* target) -> IDxcBlob* {
+        DxcBuffer source{kShader, sizeof(kShader) - 1, DXC_CP_UTF8};
+        LPCWSTR arguments[] = {L"-E", entry, L"-T", target, L"-O3"};
+        IDxcResult* result{};
+        if (FAILED(g_dxc_compiler->Compile(&source, arguments,
+                static_cast<UINT32>(std::size(arguments)), nullptr,
+                IID_PPV_ARGS(&result))) ||
+            result == nullptr) {
+            return nullptr;
+        }
+        HRESULT status{};
+        result->GetStatus(&status);
+        IDxcBlob* shader{};
+        if (FAILED(status) || FAILED(result->GetOutput(
+                DXC_OUT_OBJECT, IID_PPV_ARGS(&shader), nullptr))) {
+            shader = nullptr;
+        }
+        result->Release();
+        return shader;
+    };
+    IDxcBlob* vertex_shader = compile_stage(L"vs_main", L"vs_6_0");
+    IDxcBlob* pixel_shader = compile_stage(L"ps_main", L"ps_6_0");
+    if (vertex_shader == nullptr || pixel_shader == nullptr) {
+        if (vertex_shader != nullptr) vertex_shader->Release();
+        if (pixel_shader != nullptr) pixel_shader->Release();
+        log_line("HUD fade uniform shader compile failed");
+        return false;
+    }
+
+    D3D12_ROOT_PARAMETER parameter{};
+    parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    parameter.Constants.ShaderRegister = 0;
+    parameter.Constants.RegisterSpace = 0;
+    parameter.Constants.Num32BitValues = 4;
+    parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    D3D12_ROOT_SIGNATURE_DESC root_desc{};
+    root_desc.NumParameters = 1;
+    root_desc.pParameters = &parameter;
+    ID3DBlob* serialized{};
+    ID3DBlob* errors{};
+    const auto serialize_hr = D3D12SerializeRootSignature(
+        &root_desc, D3D_ROOT_SIGNATURE_VERSION_1, &serialized, &errors);
+    if (errors != nullptr) errors->Release();
+    if (FAILED(serialize_hr) || serialized == nullptr ||
+        FAILED(g_d3d12_device->CreateRootSignature(0,
+            serialized->GetBufferPointer(), serialized->GetBufferSize(),
+            IID_PPV_ARGS(&g_xr_fade_root_signature)))) {
+        log_line("HUD fade uniform root signature failed hr=0x%08X",
+            static_cast<unsigned>(serialize_hr));
+        if (serialized != nullptr) serialized->Release();
+        vertex_shader->Release();
+        pixel_shader->Release();
+        return false;
+    }
+    serialized->Release();
+
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC pipeline_desc{};
+    pipeline_desc.pRootSignature = g_xr_fade_root_signature;
+    pipeline_desc.VS = {
+        vertex_shader->GetBufferPointer(), vertex_shader->GetBufferSize()};
+    pipeline_desc.PS = {
+        pixel_shader->GetBufferPointer(), pixel_shader->GetBufferSize()};
+    auto& target_blend = pipeline_desc.BlendState.RenderTarget[0];
+    target_blend.BlendEnable = TRUE;
+    target_blend.SrcBlend = D3D12_BLEND_SRC_ALPHA;
+    target_blend.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+    target_blend.BlendOp = D3D12_BLEND_OP_ADD;
+    target_blend.SrcBlendAlpha = D3D12_BLEND_ZERO;
+    target_blend.DestBlendAlpha = D3D12_BLEND_ONE;
+    target_blend.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+    target_blend.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    pipeline_desc.SampleMask = UINT_MAX;
+    pipeline_desc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    pipeline_desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    pipeline_desc.RasterizerState.DepthClipEnable = TRUE;
+    pipeline_desc.DepthStencilState.DepthEnable = FALSE;
+    pipeline_desc.DepthStencilState.StencilEnable = FALSE;
+    pipeline_desc.PrimitiveTopologyType =
+        D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    pipeline_desc.NumRenderTargets = 1;
+    pipeline_desc.RTVFormats[0] = target_format;
+    pipeline_desc.SampleDesc.Count = 1;
+    const auto pipeline_hr = g_d3d12_device->CreateGraphicsPipelineState(
+        &pipeline_desc, IID_PPV_ARGS(&g_xr_fade_pipeline));
+    vertex_shader->Release();
+    pixel_shader->Release();
+    if (FAILED(pipeline_hr) || g_xr_fade_pipeline == nullptr) {
+        g_xr_fade_pipeline = nullptr;
+        g_xr_fade_root_signature->Release();
+        g_xr_fade_root_signature = nullptr;
+        log_line("HUD fade uniform pipeline failed hr=0x%08X",
+            static_cast<unsigned>(pipeline_hr));
+        return false;
+    }
+    log_line("HUD fade uniform pipeline ready format=%u",
+        static_cast<unsigned>(target_format));
+    return true;
+}
+
+// Blends the 0xRRGGBBAA fade over both eye images of the current projection
+// image, which the scene copy left in render-target state on the XR list.
+bool record_mode3_uniform_fade(
+    XrEyeSwapchain& target_swapchain,
+    uint32_t image_index,
+    const XrCompositionLayerProjectionView* submitted_views,
+    uint32_t rgba) {
+    if (g_xr_fade_pipeline == nullptr ||
+        g_xr_fade_root_signature == nullptr ||
+        g_xr_command_list == nullptr ||
+        g_set_graphics_root_signature == nullptr ||
+        g_set_pipeline_state == nullptr ||
+        g_draw_instanced == nullptr ||
+        submitted_views == nullptr ||
+        image_index >= target_swapchain.images.size() ||
+        image_index * 2 + 1 >= target_swapchain.rtvs.size()) {
+        return false;
+    }
+    // The engine's fade colour is display-encoded like the rest of t1.
+    auto decode = [](uint32_t byte) {
+        const float value = static_cast<float>(byte) / 255.0f;
+        return value <= 0.04045f
+            ? value / 12.92f
+            : powf((value + 0.055f) / 1.055f, 2.4f);
+    };
+    const float colour[4]{
+        decode((rgba >> 24) & 0xFFu),
+        decode((rgba >> 16) & 0xFFu),
+        decode((rgba >> 8) & 0xFFu),
+        static_cast<float>(rgba & 0xFFu) / 255.0f};
+    g_set_graphics_root_signature(
+        g_xr_command_list, g_xr_fade_root_signature);
+    g_set_pipeline_state(g_xr_command_list, g_xr_fade_pipeline);
+    g_xr_command_list->IASetPrimitiveTopology(
+        D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    g_xr_command_list->SetGraphicsRoot32BitConstants(0, 4, colour, 0);
+    for (uint32_t eye = 0; eye < 2; ++eye) {
+        // The submitted imageRect, or the whole slice if it is not usable.
+        const auto& image_rect = submitted_views[eye].subImage.imageRect;
+        const bool valid_image_rect = image_rect.offset.x >= 0 &&
+            image_rect.offset.y >= 0 &&
+            image_rect.extent.width > 0 &&
+            image_rect.extent.height > 0 &&
+            static_cast<int64_t>(image_rect.offset.x) +
+                    image_rect.extent.width <= target_swapchain.width &&
+            static_cast<int64_t>(image_rect.offset.y) +
+                    image_rect.extent.height <= target_swapchain.height;
+        const LONG left = valid_image_rect ? image_rect.offset.x : 0;
+        const LONG top = valid_image_rect ? image_rect.offset.y : 0;
+        const LONG width = valid_image_rect
+            ? image_rect.extent.width
+            : static_cast<LONG>(target_swapchain.width);
+        const LONG height = valid_image_rect
+            ? image_rect.extent.height
+            : static_cast<LONG>(target_swapchain.height);
+        const D3D12_VIEWPORT viewport{
+            static_cast<float>(left), static_cast<float>(top),
+            static_cast<float>(width), static_cast<float>(height),
+            0.0f, 1.0f};
+        const D3D12_RECT scissor{left, top, left + width, top + height};
+        g_xr_command_list->RSSetViewports(1, &viewport);
+        g_xr_command_list->RSSetScissorRects(1, &scissor);
+        const auto rtv = target_swapchain.rtvs[image_index * 2 + eye];
+        g_xr_command_list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+        g_draw_instanced(g_xr_command_list, 3, 1, 0, 0);
+    }
+    return true;
 }
 
 // [FIX:RETAINED-EYE-HUD 4/9] This private pipeline samples only REDengine's
@@ -54823,6 +55303,18 @@ bool create_openxr_swapchains() {
         }
         g_mode3_hud_layer_available.store(
             hud_ready, std::memory_order_release);
+    }
+    // [FIX:HUD-FADE-FILL 4/5] Without this pipeline uniform keeps the native
+    // fade instead of dropping it.
+    if (g_config.hud_fade_mode == Config::HudFadeMode::Uniform &&
+        g_engine_gui_fill_rect != nullptr) {
+        const bool fade_ready =
+            initialize_mode3_uniform_fade_pipeline(selected_format);
+        if (!fade_ready) {
+            log_line("HUD fade uniform pipeline unavailable; keeping the native fade");
+        }
+        g_mode3_uniform_fade_ready.store(
+            fade_ready, std::memory_order_release);
     }
     const bool cinema_projection_ready =
         initialize_anchored_cinema_projection_pipeline(
@@ -61070,6 +61562,22 @@ void render_openxr_test_frame(
             current_present, hud_scene_pair_id, unsigned(command_list_recording),
             unsigned(submitted), unsigned(hud_composite_ready), unsigned(cinema_panel),
             unsigned(cinema_projection_panel_ready));
+        // [FIX:HUD-FADE-FILL 5/5] Uniform fade under the HUD plane; it does
+        // not depend on the HUD composite, so bootstrap frames fade too.
+        uint32_t uniform_fade_rgba{};
+        if (latched_gui_fade_colour(current_present, uniform_fade_rgba) &&
+            g_config.hud_fade_mode == Config::HudFadeMode::Uniform &&
+            command_list_recording && submitted &&
+            !fullscreen_menu && !cinema_panel &&
+            record_mode3_uniform_fade(swapchain, image_index,
+                projection_views.data(), uniform_fade_rgba)) {
+            static std::atomic<uint32_t> uniform_fade_logs{};
+            if (take_bounded_log_slot(uniform_fade_logs, 16)) {
+                log_line("fade fill uniform drawn rgba=%08X image=%u present=%llu",
+                    uniform_fade_rgba, image_index,
+                    static_cast<unsigned long long>(current_present));
+            }
+        }
         const bool fsr_hudless_recorded =
             command_list_recording && submitted && hud_composite_ready &&
             (!cinema_panel || cinema_projection_panel_ready) &&
