@@ -680,6 +680,10 @@ struct Config {
     // temporal_backend; the per-eye motion record follows
     // remaster_dlss_per_eye_motion as it does for DLSS.
     bool remaster_fsr_per_eye{};
+    // 5.01 per-eye FSR/DLSS: restart both eye histories on a Full VR camera
+    // cut, as the 4.04 TAAU route does; the game's own reset is not reliable
+    // once the mod drives the cutscene camera.
+    bool remaster_cut_history_reset{true};
     // 5.01 strict Stereo: _pair_jitter gives both eye renders of a pair the
     // same temporal jitter sample, advancing once per pair, so each eye's own
     // DLSS history sees the whole Halton sequence; _pair_noise does the same
@@ -17496,6 +17500,9 @@ void load_config() {
                     g_config.remaster_dlss_per_eye_motion ? 1 : 0);
             }
         }
+        g_config.remaster_cut_history_reset =
+            running_game_build() == w3vr::game_build::Build::Remaster501 &&
+            read_ini_bool("engine", "remaster_cut_history_reset", true);
         // [FIX:REMASTER-PAIR-JITTER 2/6] [FIX:REMASTER-PAIR-NOISE 2/4]
         // Default on (this fork, as in kaarele's release settings).
         g_config.remaster_pair_jitter = false;
@@ -42484,8 +42491,21 @@ void __fastcall hook_engine_view_rebuild(float* view) {
                     (automatic_full_vr_cutscene ? "full_vr_entry" :
                         "full_vr_exit"));
         }
-        // 5.x per-eye FSR/DLSS: log Full VR camera cuts with the eye whose
-        // view is being built, to line them up with the per-eye resets.
+        // [FIX:REMASTER-CUT-HISTORY-RESET] 5.x per-eye FSR/DLSS: a Full VR
+        // camera cut restarts both eye histories, as the TAAU route above
+        // does. Without it one eye could blend a frame of the previous shot.
+        // Logged with the eye whose view is being built.
+        if ((remaster_engine_fsr_stereo_active() ||
+                remaster_engine_dlss_stereo_active()) &&
+            (previous_full_vr != automatic_full_vr_cutscene ||
+                native_camera_changed)) {
+            if (g_config.remaster_cut_history_reset) {
+                g_remaster_fsr_external_reset_mask.fetch_or(
+                    0x3u, std::memory_order_release);
+                g_remaster_dlss_external_reset_mask.fetch_or(
+                    0x3u, std::memory_order_release);
+            }
+        }
         if ((remaster_engine_fsr_stereo_active() ||
                 remaster_engine_dlss_stereo_active()) &&
             (previous_full_vr != automatic_full_vr_cutscene ||
@@ -42494,12 +42514,13 @@ void __fastcall hook_engine_view_rebuild(float* view) {
             static std::atomic<uint32_t> cut_logs{};
             if (cut_logs.fetch_add(1, std::memory_order_relaxed) < 2000) {
                 log_history_event_line("5.x Full VR camera change present=%llu "
-                    "factory_eye=%d reason=%s camera=%p previous=%p",
+                    "factory_eye=%d reason=%s reset=%d camera=%p previous=%p",
                     static_cast<unsigned long long>(present),
                     g_engine_factory_eye,
                     native_camera_changed ? "native_camera_change" :
                         (automatic_full_vr_cutscene ? "full_vr_entry" :
                             "full_vr_exit"),
+                    g_config.remaster_cut_history_reset ? 1 : 0,
                     reinterpret_cast<void*>(current_native_camera),
                     reinterpret_cast<void*>(previous_native_camera));
             }
