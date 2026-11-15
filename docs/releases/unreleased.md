@@ -42,3 +42,8 @@ Collected on `remaster` since v0.9.8v2-remastered.3; this file becomes the next 
   with the loading screen's moving picture. They are now fixed in the room like the in-game menus,
   in the direction you look when they appear; if the headset moves more than 0.5 m (for example
   while putting it on), they are placed again. Tested in the headset on 5.01. 4.04 is unchanged.
+- **No double image behind the system menu on 5.x:** behind the system menu the game keeps
+  rendering both eyes, and the menu panel alternated between them from frame to frame, so the
+  scene behind the menu flickered as a double image (with FXAA and FSR alike). The panel now shows
+  one eye. The background runs at half the frame rate there, which is not noticeable behind a menu.
+  Tested in the headset on 5.01.

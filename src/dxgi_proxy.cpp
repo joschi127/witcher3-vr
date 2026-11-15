@@ -59009,6 +59009,99 @@ void render_openxr_test_frame(
                 auto* primary_source = direct_stereo
                     ? direct_stereo_sources[0]
                     : game_backbuffer;
+                // [FIX:MENU-PANEL-ONE-EYE] Behind a menu the game keeps
+                // rendering both eyes, and in the headset the backbuffer
+                // alternated between them from Present to Present (these
+                // Presents carry no eye tag). Copied to the panel as is, the
+                // scene behind the system menu flickered as a double image.
+                // Keep every second backbuffer in a private copy and write it
+                // back over the others, so every route below reads one eye.
+                // The menu is drawn into every backbuffer and lags at most one
+                // Present.
+                {
+                    static ID3D12Resource* menu_hold{};
+                    static bool menu_hold_valid{};
+                    static bool menu_hold_copy_source{};
+                    const bool hold_route = live_backbuffer_source &&
+                        fullscreen_menu && !loading_video &&
+                        mode == kOpenXrModeStereo &&
+                        g_engine_dual_render_active.load(
+                            std::memory_order_acquire);
+                    if (!hold_route) {
+                        menu_hold_valid = false;
+                    } else {
+                        const auto backbuffer_desc = game_backbuffer->GetDesc();
+                        if (menu_hold != nullptr) {
+                            const auto hold_desc = menu_hold->GetDesc();
+                            if (hold_desc.Width != backbuffer_desc.Width ||
+                                hold_desc.Height != backbuffer_desc.Height ||
+                                hold_desc.Format != backbuffer_desc.Format) {
+                                menu_hold->Release();
+                                menu_hold = nullptr;
+                                menu_hold_valid = false;
+                            }
+                        }
+                        if (menu_hold == nullptr && g_d3d12_device != nullptr) {
+                            D3D12_HEAP_PROPERTIES heap{};
+                            heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+                            auto desc = backbuffer_desc;
+                            desc.Flags = D3D12_RESOURCE_FLAG_NONE;
+                            if (FAILED(g_d3d12_device->CreateCommittedResource(
+                                    &heap, D3D12_HEAP_FLAG_NONE, &desc,
+                                    D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                    IID_PPV_ARGS(&menu_hold)))) {
+                                menu_hold = nullptr;
+                            }
+                            menu_hold_valid = false;
+                            menu_hold_copy_source = false;
+                        }
+                        if (menu_hold != nullptr) {
+                            const bool refresh = !menu_hold_valid ||
+                                (current_present & 1u) == 0;
+                            D3D12_RESOURCE_BARRIER barrier{};
+                            barrier.Type =
+                                D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+                            barrier.Transition.Subresource =
+                                D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+                            if (refresh) {
+                                barrier.Transition.pResource = menu_hold;
+                                if (menu_hold_copy_source) {
+                                    barrier.Transition.StateBefore =
+                                        D3D12_RESOURCE_STATE_COPY_SOURCE;
+                                    barrier.Transition.StateAfter =
+                                        D3D12_RESOURCE_STATE_COPY_DEST;
+                                    g_xr_command_list->ResourceBarrier(
+                                        1, &barrier);
+                                }
+                                g_xr_command_list->CopyResource(
+                                    menu_hold, game_backbuffer);
+                                barrier.Transition.StateBefore =
+                                    D3D12_RESOURCE_STATE_COPY_DEST;
+                                barrier.Transition.StateAfter =
+                                    D3D12_RESOURCE_STATE_COPY_SOURCE;
+                                g_xr_command_list->ResourceBarrier(
+                                    1, &barrier);
+                                menu_hold_copy_source = true;
+                                menu_hold_valid = true;
+                            } else if (menu_hold_copy_source) {
+                                // The game backbuffer is in COPY_SOURCE here.
+                                barrier.Transition.pResource = game_backbuffer;
+                                barrier.Transition.StateBefore =
+                                    D3D12_RESOURCE_STATE_COPY_SOURCE;
+                                barrier.Transition.StateAfter =
+                                    D3D12_RESOURCE_STATE_COPY_DEST;
+                                g_xr_command_list->ResourceBarrier(
+                                    1, &barrier);
+                                g_xr_command_list->CopyResource(
+                                    game_backbuffer, menu_hold);
+                                std::swap(barrier.Transition.StateBefore,
+                                    barrier.Transition.StateAfter);
+                                g_xr_command_list->ResourceBarrier(
+                                    1, &barrier);
+                            }
+                        }
+                    }
+                }
                 auto source_desc = primary_source->GetDesc();
                 const UINT copy_width = static_cast<UINT>(std::min<uint64_t>(source_desc.Width, swapchain.width));
                 const UINT copy_height = std::min<UINT>(source_desc.Height, swapchain.height);
