@@ -346,7 +346,8 @@ same). The material they were derived from is not.
   - The colour-blindness filter must stay off (the mod's replacement HUD composite does not
     reproduce it).
   - Per-eye render size = the OpenXR runtime's recommended size (INI `render_width/height`; the
-    mod forces it on 5.x too); `native_stereo` per runtime (symmetric FOVs: 0).
+    mod forces it on 5.x too); `native_stereo=0` on 5.x (the asymmetric projection is not ported
+    there; the mod ignores 1 and the F2 toggle on 5.01, and the launcher keeps it at 0).
   - Keep the user's camera inversion keys, as the 4.04 button does.
 
 ## Architecture decision records
