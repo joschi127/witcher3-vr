@@ -235,7 +235,8 @@ int FullVrHudConvergenceShift(float hud_scale, int offset);
 
 ConfigPaths DiscoverPaths();
 bool EnsureVrConfiguration(const ConfigPaths& paths,
-    const std::string& template_contents, bool& created, std::wstring& error);
+    const std::string& template_contents, bool& created, std::wstring& error,
+    bool remastered = false);
 bool EnsureHudEditorSetup(const ConfigPaths& paths, std::wstring& error);
 std::wstring HudEditorManualSetupInstructions(const ConfigPaths& paths);
 // On Remastered 5.x the game's AA keys use other values and are written by
