@@ -61,7 +61,8 @@ redistributed, see `THIRD_PARTY_NOTICES.md`). Output goes to `local/releases/`.
 
 Procedure when the maintainer asks for a release:
 1. `remaster` clean and pushed; Release build and CTest green.
-2. Write `docs/releases/<name>.md` (user-facing changes, not included parts, known issues);
+2. Write `docs/releases/<name>.md` (user-facing changes, not included parts, known issues), starting
+   from `docs/releases/unreleased.md`, where merged PRs add their user-facing changes;
    naming `v<original version>-remastered.<n>`, e.g. `v0.9.8v2-remastered.1`.
 3. Run the script; check the zip (no `PDAFWPlugin.dll`, no `dlc`, our DLL/launcher hashes in
    `Witcher3VR/BUILD.txt`).
