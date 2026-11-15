@@ -46,7 +46,8 @@ an AMD GPU with a Pico 4 over Virtual Desktop. What works and what does not:
   OptiScaler, OFXR and the other integrations are not ported yet.
 - HUD: the launcher's **Controller-locked HUD** option keeps the HUD in the recentered direction
   instead of following the head; it also holds subtitles and dialogue choices in Full VR cutscenes
-  and dialogues.
+  and dialogues. A smaller HUD (`hud_size`) is filtered so text stays sharp, and the game's fades
+  darken the whole view instead of showing a black rectangle on the HUD plane.
 - Camera: use the game's **close** exploration and combat cameras (**Configure Settings for VR** sets
   them). The 5.x default "Modern" camera re-frames while walking; in VR, where the camera pitch is
   locked, that shows as the camera jumping between far and near when you start or stop walking.

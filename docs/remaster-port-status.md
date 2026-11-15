@@ -1082,8 +1082,10 @@ From kaarele's port status log (state `e729bd9`, MIT); our own results follow.
   over the pixel's footprint in premultiplied linear light. Only the headset-projection HUD
   plane uses it; the Cinema panel and the legacy fallback keep the nearest `Load`. 0 restores
   the old sampling.
-- Status: kaarele tested it in the headset. This fork: build and CTest only so far; open:
-  headset check on 5.01 (text sharpness at `hud_size` 0.85) and a 4.04 smoke run.
+- Status: kaarele tested it in the headset. This fork: build, CTest and a 5.01 null-driver run
+  (`filtered_sampling=1` in the pipeline log); headset (2026-11-15, Pico 4 over Virtual Desktop,
+  5.01, `hud_size` 0.85): HUD text clearly sharper and steadier. Open: 4.04 smoke run (default off
+  there, so 4.04 is unchanged unless the key is set).
 
 ### Black HUD rectangle during fades (`hud_fade_mode`, 5.01)
 - Symptom: a black rectangle over about 2/3 of the view for 1-2 s when a cutscene loads, with a
@@ -1117,5 +1119,6 @@ From kaarele's port status log (state `e729bd9`, MIT); our own results follow.
   CTest; 5.01 null-driver runs (2026-11-15): hook installed, the load fade-in suppressed (`remove`)
   and drawn over the eye images (`uniform`; the test captures are taken before that draw, so they
   cannot show it). Headset (Pico 4/VD, 5.01): `remove` removes the rectangle but shows a short flash
-  at the start of cutscenes, hence `uniform` as the default. Open: headset check of `uniform`, and a
-  4.04 smoke run (no hook expected).
+  at the start of cutscenes, hence `uniform` as the default; with `uniform` the fades
+  darken the whole view and the flash is gone (headset, same day). Open: 4.04 smoke run (no hook
+  expected, the 4.04 addresses are 0).
