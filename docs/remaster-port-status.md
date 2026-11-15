@@ -1120,5 +1120,37 @@ From kaarele's port status log (state `e729bd9`, MIT); our own results follow.
   and drawn over the eye images (`uniform`; the test captures are taken before that draw, so they
   cannot show it). Headset (Pico 4/VD, 5.01): `remove` removes the rectangle but shows a short flash
   at the start of cutscenes, hence `uniform` as the default; with `uniform` the fades
-  darken the whole view and the flash is gone (headset, same day). Open: 4.04 smoke run (no hook
-  expected, the 4.04 addresses are 0).
+  darken the whole view and the flash is gone (headset, same day). 4.04 smoke run (same day):
+  passed, no hook (the 4.04 addresses are 0), `filtered_sampling=0`.
+
+## 2026-11-15: fixes from the 5.01 playthrough, released as v0.9.8v2-remastered.4
+
+All found while playing 5.01 in the headset (Pico 4 over Virtual Desktop, 90 Hz, AMD RX 7900 XTX,
+FSR per eye) and merged into `remaster`; release v0.9.8v2-remastered.4 is tagged on `d6d5719`.
+
+- **Subtitles with the controller-locked HUD** (#24): the lock now also applies to the Full VR
+  cutscene route. Headset: subtitles and dialogue choices stay in the recentered direction.
+- **HUD port from kaarele** (#25): filtered HUD sampling and the fade fill (see the section above).
+- **Launcher anti-aliasing choice** (#26): FXAA / FSR per eye / DLSS per eye on 5.x. Launcher tests
+  only here (no NVIDIA GPU); DLSS per eye confirmed on an RTX 5090 by the reporter of #23. Visual
+  check of the combo box on 5.01 and 4.04 (disabled there).
+- **Camera cut history reset** (#27): a new reset log (`[debug] history_event_log=1`) showed that
+  5.01 never sets the FSR reset byte (`game=0` throughout). Both eye histories are now reset at
+  every Full VR camera change. Headset: the flash at camera cuts in dialogues is gone.
+- **`native_stereo` ignored on 5.01** (#28): with `native_stereo=1` (written by the launcher's
+  start-up normalization) the left eye intermittently showed the right eye's image in Full VR
+  dialogues. Blind headset runs with a saved dialogue test state and the user's recorded inputs:
+  glitch in 4 of 4 runs with `native_stereo=1` (FXAA and FSR alike), 0 of 3 with 0. The DLL now
+  ignores it and the F2 toggle on 5.01; the launcher keeps it at 0 on 5.x.
+- **World-locked startup panel** (#29): the main menu and the loading screen after Continue were
+  deliberately in VIEW space. On 5.01 they are anchored in LOCAL space (re-anchored after 0.5 m of
+  head movement). Headset: they stay in place. 4.04 unchanged.
+- **One eye on the menu panel** (#30): behind the system menu the backbuffer alternated between the
+  eyes from Present to Present (these Presents carry no eye tag; a first variant waiting for a
+  left-eye tag froze the panel without the menu). Every second backbuffer is held and written back
+  over the others. Headset: no double image; the scene behind the menu still has no AA and runs at
+  half rate. D3D12 debug layer: no errors.
+
+Install test from the release zip (null driver): 5.01 passed with all new features active; 4.04
+passed (balcony save), launcher keeps `native_stereo=1` there and sets the next-gen script variant.
+Open: a 4.04 headset check of #30 (the menu panel change is not limited to 5.01); 5.1c support.
