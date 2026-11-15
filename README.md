@@ -44,6 +44,9 @@ an AMD GPU with a Pico 4 over Virtual Desktop. What works and what does not:
   **FSR per eye (5.x)**; smoother edges and less GPU load at high resolutions). Per-eye DLSS exists
   (`temporal_backend=dlss`) but is not tested in this fork. TAAU does not exist in 5.x; ray tracing,
   OptiScaler, OFXR and the other integrations are not ported yet.
+- HUD: the launcher's **Controller-locked HUD** option keeps the HUD in the recentered direction
+  instead of following the head; it also holds subtitles and dialogue choices in Full VR cutscenes
+  and dialogues.
 - Camera: use the game's **close** exploration and combat cameras (**Configure Settings for VR** sets
   them). The 5.x default "Modern" camera re-frames while walking; in VR, where the camera pitch is
   locked, that shows as the camera jumping between far and near when you start or stop walking.
