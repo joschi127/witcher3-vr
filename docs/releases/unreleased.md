@@ -37,3 +37,8 @@ Collected on `remaster` since v0.9.8v2-remastered.3; this file becomes the next 
   double image. Merely opening the launcher set it to 1 until the next Save. The mod now ignores
   `native_stereo` (and the F2 toggle) on 5.01, and the launcher keeps it at 0 on 5.x. Tested in the
   headset on 5.01 (flicker in 4 of 4 dialogue runs before, 0 of 3 after).
+- **Loading screen stays in place on 5.x:** the main menu and the loading screen after Continue
+  followed every head turn (they were deliberately head-locked during startup), which felt jerky
+  with the loading screen's moving picture. They are now fixed in the room like the in-game menus,
+  in the direction you look when they appear; if the headset moves more than 0.5 m (for example
+  while putting it on), they are placed again. Tested in the headset on 5.01. 4.04 is unchanged.
