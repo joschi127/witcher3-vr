@@ -138,6 +138,9 @@ struct LauncherState {
     // Remastered 5.x only: the game's FSR (AAMode 5) with one FSR history per
     // eye ([engine] remaster_fsr_per_eye=1) instead of FXAA (AAMode 1).
     bool fsr_per_eye{};
+    // Remastered 5.x only, NVIDIA: the game's DLSS (AAMode 6) with one DLSS
+    // history per eye ([engine] temporal_backend=dlss). Excludes fsr_per_eye.
+    bool dlss_per_eye{};
     bool fullscreen_projection{};
     bool diagnostic_logging{};
     bool route_logging{};

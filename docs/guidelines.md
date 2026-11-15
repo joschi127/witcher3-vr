@@ -315,9 +315,11 @@ same). The material they were derived from is not.
   - `[PostProcess] AAMode=1` (FXAA; 5.x values: 0 off, 1 FXAA, 5 FSR, 6 DLSS, 7 XeSS). The mod
     runs the No-AA route on 5.x; TAAU does not exist there. FSR (5) and DLSS (6) are usable only
     with the mod's per-eye histories (`remaster_fsr_per_eye=1`, `temporal_backend=dlss`). The
-    launcher's "FSR per eye (5.x)" switch writes `AAMode=5`, `remaster_fsr_per_eye=1` and, when
-    the game's `FSR2Quality` is automatic (0), Quality (2); off writes `AAMode=1`. DLSS per eye has
-    no launcher switch yet; XeSS keeps one history for both eyes.
+    launcher's 5.x anti-aliasing choice writes: "FXAA (5.x)" `AAMode=1`; "FSR per eye (5.x)"
+    `AAMode=5`, `remaster_fsr_per_eye=1` and, when the game's `FSR2Quality` is automatic (0),
+    Quality (2); "DLSS per eye (5.x)" `AAMode=6`, `[Rendering] AllowDLSS=true`,
+    `[engine] temporal_backend=dlss` and, when `DLSSQuality` is 0, Quality (1); the other choices
+    write `AllowDLSS=false` and `temporal_backend=none`. XeSS keeps one history for both eyes.
   - `[PostProcess] AllowShafts=false`: 5.x light shafts veil the whole image whenever the sun is
     in view, which the wide VR field of view makes almost permanent (washed-out colours).
   - Ray tracing off (`[Rendering/RT] EnableRT`, `RTAOEnabled`, `RTGIPreset`, `Shadows`,
@@ -326,8 +328,8 @@ same). The material they were derived from is not.
     generation off (`FSRFramegen=0`, `XessFrameGeneration=false`, `DLSSGMode=0`), low-latency
     modes off (`XeLowLatency=false`, `[Viewport] AMDAntiLag=0`, `ReflexMode=0`), HDR off
     (`[Visuals] HdrEnabled=false`), editor preset detection off
-    (`[Rendering] ShouldDetectEditorGraphicsPreset=false`), the game's DLSS off
-    (`[Rendering] AllowDLSS=false`, until per-eye upscaling exists), no V-Sync or frame limit
+    (`[Rendering] ShouldDetectEditorGraphicsPreset=false`), the game's DLSS off unless DLSS per eye
+    is chosen (`[Rendering] AllowDLSS=false`), no V-Sync or frame limit
     (`[Viewport] VSync=false`, `[Engine] LimitFPS=0`; the OpenXR runtime paces the frames).
   - Close exploration and combat cameras, as on 4.04 (`[Gameplay]
     EnableAlternateExplorationCamera=1`, `EnableAlternateCombatCamera=1`): the 5.x defaults (Modern,

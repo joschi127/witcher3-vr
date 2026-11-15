@@ -12,9 +12,10 @@ version of these steps.
 > **State in this repository.** This guide and the Linux tools come from
 > [kaarele/witcher3-remastered-vr](https://github.com/kaarele/witcher3-remastered-vr) (tested there with an NVIDIA GPU, Proton and WiVRn on a
 > Quest 3) and are being taken over feature by feature. On Remastered 5.01, `configure` offers
-> FXAA (`--aa none`, the default) or the game's FSR with one FSR history per eye (`--aa fsr`, the
-> Windows launcher's *FSR per eye (5.x)* switch). Per-eye DLSS is taken over but not verified
-> here yet (no NVIDIA test), so `--aa dlss` is refused on 5.01. Keys that `configure` writes for
+> FXAA (`--aa none`, the default), the game's FSR with one FSR history per eye (`--aa fsr`) or, on
+> NVIDIA, the game's DLSS with one DLSS history per eye (`--aa dlss`), as the Windows launcher's
+> 5.x anti-aliasing choice. Per-eye DLSS was confirmed by a user on NVIDIA (Windows); this
+> repository has no NVIDIA test machine. Keys that `configure` writes for
 > features not taken over yet are ignored by the mod. The tool installs the
 > state-bridge variant of this repository's releases (`variants/remastered` or `variants/nextgen`),
 > as the Windows launcher does, and `install --sha256` also accepts this repository's release
@@ -392,9 +393,9 @@ start the game once and run `configure` again.
   other. With `[engine] remaster_fsr_per_eye=1` (written by `configure --aa fsr`) the mod gives each
   eye its own FSR context, through the game's FidelityFX loader or the built-in FSR 2. It only acts
   while the game uses FSR (`AAMode=5`).
-- **DLSS per eye** (taken over, not verified here yet). Each eye gets its own Streamline viewport,
-  and with it its own DLSS history and motion-vector camera history. `configure` refuses
-  `--aa dlss` on 5.01 until it has been tested on an NVIDIA GPU. 5.01 has no TAAU and no AER mode.
+- **DLSS per eye** (NVIDIA; confirmed by a user on Windows, not tested under Proton in this
+  repository). Each eye gets its own Streamline viewport, and with it its own DLSS history and
+  motion-vector camera history. `configure --aa dlss` writes it. 5.01 has no TAAU and no AER mode.
 - **Camera.** The 5.01 default exploration camera (*Modern*) re-frames while walking. With the game
   pitch locked for VR only the camera translation remains, so the view seems to zoom in and out.
   The *Close* preset (*Options > Gameplay > Exploration camera*), which `configure` selects, does
