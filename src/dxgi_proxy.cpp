@@ -17555,6 +17555,18 @@ void load_config() {
                 "V1360 clean Mode1 hardening applied: one producer, "
                 "no stereo offsets/dual render/AFW/RT/per-eye history");
         }
+        // [FIX:REMASTER-NO-NATIVE-STEREO] The native asymmetric projection is
+        // not ported to 5.01. native_stereo=1 there (a 4.04 INI, or the
+        // launcher's start-up normalization) only half-enabled its route: in
+        // Full VR dialogues the left eye intermittently showed the right
+        // eye's image and the pause menu showed a double image.
+        if (running_game_build() == w3vr::game_build::Build::Remaster501 &&
+            g_config.native_stereo) {
+            g_config.native_stereo = false;
+            g_runtime_native_stereo.store(false, std::memory_order_release);
+            log_line("native_stereo=1 ignored on 5.01: the native asymmetric "
+                "projection is not ported there");
+        }
 
         const bool mode3_non_taau_backend =
             g_config.openxr_mode == 3 &&
@@ -62323,6 +62335,15 @@ void handle_runtime_mode3_projection_hotkey() {
     if (!mode3_stereo_transport_active()) {
         log_line(
             "V1352 runtime projection hotkey=F2 ignored route=non_mode3 "
+            "present=%llu",
+            static_cast<unsigned long long>(
+                g_present_count.load(std::memory_order_relaxed)));
+        return;
+    }
+    // [FIX:REMASTER-NO-NATIVE-STEREO] No asymmetric projection on 5.01.
+    if (running_game_build() == w3vr::game_build::Build::Remaster501) {
+        log_line(
+            "V1352 runtime projection hotkey=F2 ignored route=remaster_501 "
             "present=%llu",
             static_cast<unsigned long long>(
                 g_present_count.load(std::memory_order_relaxed)));
