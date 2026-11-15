@@ -1084,3 +1084,38 @@ From kaarele's port status log (state `e729bd9`, MIT); our own results follow.
   the old sampling.
 - Status: kaarele tested it in the headset. This fork: build and CTest only so far; open:
   headset check on 5.01 (text sharpness at `hud_size` 0.85) and a 4.04 smoke run.
+
+### Black HUD rectangle during fades (`hud_fade_mode`, 5.01)
+- Symptom: a black rectangle over about 2/3 of the view for 1-2 s when a cutscene loads, with a
+  small see-through area near the middle; after a loading screen a rectangle fades away.
+- Cause: 5.01 draws its screen fade (`FadeOut`/`FadeIn`, blackscreens) in the GUI pass 0x01C26A60,
+  after the HUD movies and into the same target, the UI texture t1: fill-rect helper 0x01C99780
+  called at 0x01C26F1E (and from the standalone fade draw at 0x01C0B948), only while the fade
+  amount (fade block +0x48) is above 0. Mode 3 removes t1 from the eye images and shows it as the
+  shrunk HUD plane, so the full-screen fade became a HUD-sized rectangle; the see-through area is
+  the part of the centre-split hole that the centre square does not cover.
+- Fix: a detour on the fill-rect helper (prologue, the amount test and both call sites checked;
+  5.01 only, nothing is hooked on 4.04 or unknown builds) drops the fade fill while the VR HUD
+  plane owns t1: Mode 3 with the retained HUD route, not in menus (needs `menu_state_probe=1`,
+  which the launcher writes), the loading video or a normal/manual (F10) Cinema panel. The HUD
+  movies are drawn as before; other callers and other return addresses pass through.
+  `[openxr] hud_fade_mode`:
+  - `uniform` (default): the fill is dropped, and each whole eye image is blended with the latched fade colour and amount
+    in the XR submit, before the HUD plane (so subtitles stay readable). The latch goes stale 3
+    Presents after the last fill. Without its XR pipeline it keeps the native fade.
+  - `remove`: the fill is dropped without a replacement; the world stays visible during
+    blackscreens. Not the default: in the headset the first frames after a camera cut (lighting
+    and NPC LOD still switching behind the fade) flash briefly.
+  - `native`: the game's draw (the rectangle). Nothing is hooked unless diagnostics are on, where
+    the detour only logs.
+- Logs: `HUD fade fill hooked` at startup; with diagnostics on, per fade `fade fill
+  start|full|partial|gate` lines (`site=gui|object rgba=RRGGBBAA suppressed=0|1 mode=...`), one
+  `fade fill end ... calls= suppressed= max_a=` summary, and `fade fill uniform drawn` (first 16)
+  in uniform mode; also `HUD_FADE` in the minimal XR log.
+- Status: kaarele verified it with the null OpenXR runtime (captures: `remove` shows the world and
+  the HUD where `native` shows the rectangle) and played it in the headset. This fork: build and
+  CTest; 5.01 null-driver runs (2026-11-15): hook installed, the load fade-in suppressed (`remove`)
+  and drawn over the eye images (`uniform`; the test captures are taken before that draw, so they
+  cannot show it). Headset (Pico 4/VD, 5.01): `remove` removes the rectangle but shows a short flash
+  at the start of cutscenes, hence `uniform` as the default. Open: headset check of `uniform`, and a
+  4.04 smoke run (no hook expected).

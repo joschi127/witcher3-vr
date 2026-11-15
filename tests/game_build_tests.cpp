@@ -154,6 +154,42 @@ int main() {
                         addresses::rva(Build::Remaster501, Function::FrustumAabbTest),
                 "5.01 visibility call reaches the frustum test");
         }
+        require(addresses::rva(Build::Remaster501, Function::GuiFillRect) == 0x01C99780 &&
+                addresses::rva(Build::NextGen404, Function::GuiFillRect) == 0 &&
+                addresses::value(Build::NextGen404,
+                    addresses::Value::GuiFadeAmountTest) == 0 &&
+                addresses::value(Build::NextGen404,
+                    addresses::Value::GuiFadeFillReturn) == 0 &&
+                addresses::value(Build::NextGen404,
+                    addresses::Value::FadeObjectFillReturn) == 0,
+            "the HUD fade fill hook is 5.01 only");
+        {
+            // Both 5.01 fade call sites end at their return address and
+            // encode the fill-rect helper.
+            struct FadeCall {
+                const uint8_t* bytes;
+                size_t size;
+                addresses::Value return_value;
+            };
+            const FadeCall calls[] = {
+                {addresses::kGuiFadeFillCall501Bytes,
+                    sizeof(addresses::kGuiFadeFillCall501Bytes),
+                    addresses::Value::GuiFadeFillReturn},
+                {addresses::kFadeObjectFillCall501Bytes,
+                    sizeof(addresses::kFadeObjectFillCall501Bytes),
+                    addresses::Value::FadeObjectFillReturn},
+            };
+            for (const auto& call : calls) {
+                int32_t rel{};
+                std::memcpy(&rel, call.bytes + 1, sizeof(rel));
+                const auto return_rva = static_cast<int64_t>(
+                    addresses::value(Build::Remaster501, call.return_value));
+                require(call.bytes[0] == 0xE8 && call.size == 5 &&
+                        static_cast<uintptr_t>(return_rva + rel) ==
+                            addresses::rva(Build::Remaster501, Function::GuiFillRect),
+                    "5.01 fade call reaches the fill-rect helper");
+            }
+        }
         require(addresses::rva(Build::Unknown, Function::IsAnyMenu) == 0,
             "no engine addresses on unknown builds");
         require(addresses::signature(Build::NextGen404, Function::IsAnyMenu).size == 0,
