@@ -40,6 +40,18 @@ an AMD GPU with a Pico 4 over Virtual Desktop. What works and what does not:
 
 - Third-person gameplay in Stereo mode with correct 3D depth, HUD, menus, loading screens, combat,
   horse riding and cutscenes.
+- **Recommended setup on 5.x: Windows, with a Quest or Pico headset over Virtual Desktop (VDXR).**
+  Virtual Desktop reports a symmetric field of view, which is what the 5.x port renders. Other
+  runtimes with an asymmetric per-eye field of view (Quest over SteamVR/Steam Link, Quest Link or
+  WiVRn) work too, but 5.x then renders a wider centred image per eye and about a third of it is
+  cropped away, so the same render cost gives a less sharp image. The per-eye projection that avoids
+  this is not ported to 5.x yet.
+- **Performance tip:** reduce the field of view in the **Virtual Desktop Streamer settings on the PC**
+  (FOV tangent multiplier, horizontal and vertical; not in the Virtual Desktop app on the headset).
+  With the launcher resolution on AUTO the render size follows, and the GPU load drops a lot while
+  the sharpness per degree stays the same; only the outer edge of the view is cut off. Example that
+  plays smoothly at 90 Hz on an AMD RX 7900 XTX with a Pico 4: VR Graphics Quality "Ultra", FOV
+  tangent 80 % horizontal and 65 % vertical (2292x1884 per eye), FSR per eye.
 - Anti-aliasing (launcher choice next to Integration): the game's FXAA, the game's FSR with one
   history per eye (**FSR per eye (5.x)**; smoother edges and less GPU load at high resolutions), or
   on NVIDIA the game's DLSS with one history per eye (**DLSS per eye (5.x)**; confirmed by a user
