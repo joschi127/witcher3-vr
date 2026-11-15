@@ -40,10 +40,11 @@ an AMD GPU with a Pico 4 over Virtual Desktop. What works and what does not:
 
 - Third-person gameplay in Stereo mode with correct 3D depth, HUD, menus, loading screens, combat,
   horse riding and cutscenes.
-- Anti-aliasing: the game's FXAA, or the game's FSR with one history per eye (launcher switch
-  **FSR per eye (5.x)**; smoother edges and less GPU load at high resolutions). Per-eye DLSS exists
-  (`temporal_backend=dlss`) but is not tested in this fork. TAAU does not exist in 5.x; ray tracing,
-  OptiScaler, OFXR and the other integrations are not ported yet.
+- Anti-aliasing (launcher choice next to Integration): the game's FXAA, the game's FSR with one
+  history per eye (**FSR per eye (5.x)**; smoother edges and less GPU load at high resolutions), or
+  on NVIDIA the game's DLSS with one history per eye (**DLSS per eye (5.x)**; confirmed by a user
+  on an RTX 5090, not testable in this fork). TAAU does not exist in 5.x; ray tracing, OptiScaler,
+  OFXR and the other integrations are not ported yet.
 - HUD: the launcher's **Controller-locked HUD** option keeps the HUD in the recentered direction
   instead of following the head; it also holds subtitles and dialogue choices in Full VR cutscenes
   and dialogues. A smaller HUD (`hud_size`) is filtered so text stays sharp, and the game's fades
@@ -116,7 +117,7 @@ The table describes Next-Gen 4.04. For Remastered 5.x see [Remastered (5.x) stat
 | Feature | Status |
 | --- | --- |
 | The Witcher 3 Next-Gen 4.04 | Supported |
-| The Witcher 3 Remastered 5.x | Experimental (Stereo, FXAA or FSR per eye) |
+| The Witcher 3 Remastered 5.x | Experimental (Stereo, FXAA, FSR per eye or DLSS per eye) |
 | OpenXR | Supported |
 | VDXR | Supported and recommended for Quest headsets |
 | SteamVR OpenXR | Supported; standard Presentation Size |
@@ -184,7 +185,8 @@ Back up any files you have edited manually before installing a new release.
 On Linux the Windows launcher is replaced by `linux/w3vr-linux.py` (Python 3, standard library only),
 and `dxgi.dll` is built with clang-cl ([linux/BUILD-LINUX.md](linux/BUILD-LINUX.md)). Both come from
 [kaarele/witcher3-remastered-vr](https://github.com/kaarele/witcher3-remastered-vr) and are being taken
-over feature by feature; on Remastered 5.01 `configure` offers FXAA or FSR per eye (`--aa fsr`).
+over feature by feature; on Remastered 5.01 `configure` offers FXAA, FSR per eye (`--aa fsr`) or
+DLSS per eye on NVIDIA (`--aa dlss`).
 Steam and Heroic (GOG) are supported. Short version, from a checkout of this repository
 with the headset connected to the OpenXR runtime (WiVRn is tested):
 
@@ -204,7 +206,7 @@ The full guide, requirements and troubleshooting are in [LINUX.md](LINUX.md).
 Press **Configure Settings for VR** at least once before playing. It applies the tested game profile and creates a backup that can be restored later with **Restore Original Settings**.
 
 On Remastered 5.x the button applies the 5.x VR settings to your existing game settings instead of
-the 4.04 profile: anti-aliasing **FXAA** (or FSR with **FSR per eye (5.x)** ticked); the **close**
+the 4.04 profile: anti-aliasing **FXAA** (or the choice **FSR per eye (5.x)** or **DLSS per eye (5.x)**); the **close**
 exploration and combat cameras (recommended for VR, see above); ray tracing, path tracing, light shafts
 (they veil the image whenever the sun is in view), frame generation, low-latency modes, HDR and motion
 blur/lens effects **off**. Everything else, such as texture quality, language and camera inversion,

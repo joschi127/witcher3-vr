@@ -1587,8 +1587,14 @@ LoadResult LoadConfiguration(const ConfigPaths& paths, bool remastered) {
     const bool dlss_dlaa = ReadBool(*vr, "engine", "dlss_dlaa", false);
     int aa_mode = ReadInt(*game, "PostProcess", "AAMode", 0);
     bool allow_dlss = ReadBool(*game, "Rendering", "AllowDLSS", false);
-    // 5.x AAMode 5 = FSR: the launcher's per-eye FSR switch.
-    result.state.fsr_per_eye = remastered && aa_mode == 5;
+    // 5.x AAMode 6 = DLSS and 5 = FSR: the launcher's per-eye DLSS and FSR
+    // switches. temporal_backend=dlss on 5.x only selects per-eye DLSS; the
+    // transport stays No-AA, so it does not choose a render mode there.
+    result.state.dlss_per_eye = remastered &&
+        (aa_mode == 6 || backend == "dlss");
+    result.state.fsr_per_eye = remastered && aa_mode == 5 &&
+        !result.state.dlss_per_eye;
+    if (remastered && backend == "dlss") backend = "none";
     const int launcher_xr_mode = legacy_aer_mode
         ? 3
         : (legacy_mono_mode ? 1 : xr_mode);
@@ -1906,7 +1912,13 @@ bool BuildUpdatedDocuments(const ConfigPaths& paths, const LauncherState& state,
         // or with the game's FSR and one FSR history per eye (5.x AAMode
         // values: 0 off, 1 FXAA, 5 FSR, 6 DLSS, 7 XeSS). The Fast
         // Transitions DLC modifies 4.04 behavior data and stays disabled.
-        if (state.fsr_per_eye) {
+        if (state.dlss_per_eye) {
+            game_settings.Set("PostProcess", "AAMode", "6");
+            // Keep the player's DLSS quality; 0 (automatic) becomes Quality.
+            if (ReadInt(game_settings, "PostProcess", "DLSSQuality", 0) <= 0) {
+                game_settings.Set("PostProcess", "DLSSQuality", "1");
+            }
+        } else if (state.fsr_per_eye) {
             game_settings.Set("PostProcess", "AAMode", "5");
             // Keep the player's FSR quality; 0 (automatic) becomes Quality.
             if (ReadInt(game_settings, "PostProcess", "FSR2Quality", 0) <= 0) {
@@ -1916,8 +1928,13 @@ bool BuildUpdatedDocuments(const ConfigPaths& paths, const LauncherState& state,
             game_settings.Set("PostProcess", "AAMode", "1");
         }
         vr_ini.Set("engine", "remaster_fsr_per_eye",
-            state.fsr_per_eye ? "1" : "0");
-        game_settings.Set("Rendering", "AllowDLSS", "false");
+            state.fsr_per_eye && !state.dlss_per_eye ? "1" : "0");
+        // On 5.x the mod keeps the No-AA transport and gives the game's own
+        // DLSS one history per eye when temporal_backend is dlss.
+        vr_ini.Set("engine", "temporal_backend",
+            state.dlss_per_eye ? "dlss" : "none");
+        game_settings.Set("Rendering", "AllowDLSS",
+            state.dlss_per_eye ? "true" : "false");
         game_settings.Set("DLC", "DlcEnabled_movementinputfix", "0");
         // The native asymmetric projection is not ported to 5.x yet.
         vr_ini.Set("openxr", "native_stereo", "0");
@@ -2251,8 +2268,8 @@ bool ConfigureRemasteredGameSettingsForVr(
         const char* value;
     };
     static constexpr Setting kSettings[] = {
-        // FXAA; the launcher's per-eye FSR switch is applied when the caller
-        // saves the launcher state right afterwards.
+        // FXAA; the launcher's per-eye FSR or DLSS choice is applied when the
+        // caller saves the launcher state right afterwards.
         {"PostProcess", "AAMode", "1"},
         // Close exploration and combat cameras, as on 4.04. The 5.x defaults
         // (Modern, Dynamic) re-frame while walking; with the game pitch locked

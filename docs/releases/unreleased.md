@@ -19,3 +19,9 @@ Collected on `remaster` since v0.9.8v2-remastered.3; this file becomes the next 
   `remove` drops the fade, `native` keeps the game's rectangle). Taken over from kaarele's fork,
   with `uniform` as the default here because `remove` showed a short flash at the start of
   cutscenes.
+- **DLSS per eye in the launcher (5.x, NVIDIA):** the "FSR per eye (5.x)" checkbox is now an
+  anti-aliasing choice next to Integration: **FXAA (5.x)**, **FSR per eye (5.x)** or **DLSS per eye
+  (5.x)**. DLSS per eye writes the game's DLSS (`AAMode=6`, `AllowDLSS=true`) and
+  `[engine] temporal_backend=dlss`, which before had to be set by hand. Confirmed working on an
+  NVIDIA RTX 5090 by a user (#23); not testable on the AMD test machine of this fork. The Linux tool
+  accepts `configure --aa dlss` on 5.01 as well.

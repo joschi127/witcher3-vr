@@ -288,6 +288,54 @@ void TestRemasteredAndOptionalAfw(const w3vr::ConfigPaths& paths) {
     Write(paths.game_settings, fixture->Serialize());
     Require(!w3vr::LoadConfiguration(paths, true).state.fsr_per_eye,
         "5.x FXAA loads with per-eye FSR off");
+
+    // Per-eye DLSS: AAMode 6, the game's DLSS allowed, temporal_backend=dlss
+    // for the mod's per-eye histories, per-eye FSR off, and Quality only when
+    // the game's DLSS quality is automatic (0 or missing).
+    state.fsr_per_eye = false;
+    state.dlss_per_eye = true;
+    fixture->Set("PostProcess", "DLSSQuality", "0");
+    Write(paths.game_settings, fixture->Serialize());
+    Require(w3vr::BuildUpdatedDocuments(paths, state, vr, game, error),
+        "Remastered per-eye DLSS documents build");
+    Require(game.Get("PostProcess", "AAMode") == "6" &&
+            game.Get("PostProcess", "DLSSQuality") == "1" &&
+            game.Get("Rendering", "AllowDLSS") == "true" &&
+            vr.Get("engine", "temporal_backend") == "dlss" &&
+            vr.Get("engine", "remaster_fsr_per_eye") == "0",
+        "Per-eye DLSS writes AAMode 6, AllowDLSS, temporal_backend=dlss and "
+        "turns per-eye FSR off");
+    fixture->Set("PostProcess", "DLSSQuality", "3");
+    Write(paths.game_settings, fixture->Serialize());
+    Require(w3vr::BuildUpdatedDocuments(paths, state, vr, game, error) &&
+            game.Get("PostProcess", "DLSSQuality") == "3",
+        "Per-eye DLSS keeps the player's DLSS quality");
+    state.dlss_per_eye = false;
+    Require(w3vr::BuildUpdatedDocuments(paths, state, vr, game, error) &&
+            game.Get("PostProcess", "AAMode") == "1" &&
+            game.Get("Rendering", "AllowDLSS") == "false" &&
+            vr.Get("engine", "temporal_backend") == "none",
+        "Leaving per-eye DLSS writes FXAA, AllowDLSS false and "
+        "temporal_backend=none");
+
+    // Loading: AAMode 6, or temporal_backend=dlss (a game that cannot use
+    // DLSS rewrites AAMode to 5), is the DLSS switch on 5.x; it stays Stereo
+    // No AA without an inconsistency warning.
+    loaded_vr->Set("engine", "temporal_backend", "dlss");
+    Write(paths.vr_ini, loaded_vr->Serialize());
+    fixture->Set("PostProcess", "AAMode", "6");
+    Write(paths.game_settings, fixture->Serialize());
+    const auto dlss = w3vr::LoadConfiguration(paths, true);
+    Require(dlss.state.dlss_per_eye && !dlss.state.fsr_per_eye &&
+            dlss.warning.empty() &&
+            dlss.state.mode == w3vr::RenderMode::StereoNone,
+        "5.x AAMode 6 with temporal_backend=dlss loads as per-eye DLSS");
+    fixture->Set("PostProcess", "AAMode", "5");
+    Write(paths.game_settings, fixture->Serialize());
+    const auto rewritten = w3vr::LoadConfiguration(paths, true);
+    Require(rewritten.state.dlss_per_eye && !rewritten.state.fsr_per_eye,
+        "5.x temporal_backend=dlss keeps the DLSS switch when the game "
+        "rewrote AAMode");
 }
 
 void TestRecenterKey(const w3vr::ConfigPaths& paths) {
