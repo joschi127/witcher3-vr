@@ -1007,6 +1007,9 @@ bool remaster_engine_fsr_stereo_active() {
 std::atomic<uint8_t> g_remaster_dlss_external_reset_mask{};
 // The same for the per-eye FSR contexts.
 std::atomic<uint8_t> g_remaster_fsr_external_reset_mask{};
+// [FIX:MENU-MONO-CAMERA 4/4] Set once per Present while a fullscreen menu is
+// open in Stereo: its frames are one centre view (see latch_streamline_menu_mono).
+std::atomic<bool> g_streamline_menu_mono_latched{};
 
 // The game's own upscaler (DLSS or FSR) currently keeps one history per eye.
 bool remaster_engine_upscaler_per_eye_running() {
@@ -42747,6 +42750,16 @@ void __fastcall hook_engine_view_rebuild(float* view) {
     const bool render_right_eye = g_engine_factory_eye >= 0
         ? g_engine_factory_eye == 1
         : (present & 1ull) != 0;
+    // [FIX:MENU-MONO-CAMERA 1/4] Fullscreen menus are single-view: the
+    // duplicate factory is disabled (stereo_render_eligible requires
+    // menu==0), g_engine_factory_eye stays -1 and the menu panel shows the
+    // one live backbuffer to both eyes. Per-eye camera edits must then not
+    // fall back to the Present-parity eye above, which alternated the world
+    // behind the menu by +/- half the IPD (and the optional native projection
+    // shift) on every Present. Snapshot once so both edits below agree.
+    // Taken over from kaarele/witcher3-remastered-vr (MIT).
+    const bool eye_camera_edits_allowed = g_engine_factory_eye >= 0 ||
+        g_engine_menu_state.load(std::memory_order_relaxed) == 0;
     if (!world_camera && caller_rva == kViewFactoryReturnRva && view != nullptr &&
         g_engine_menu_state.load(std::memory_order_relaxed) == 0) {
         static std::atomic<uint32_t> rejected_world_camera_logs{};
@@ -43333,8 +43346,10 @@ void __fastcall hook_engine_view_rebuild(float* view) {
     const bool native_projection_ready = g_config.engine_native_projection_shift &&
         (!g_engine_dual_render_active.load() ||
             present > g_dual_render_activation_present.load() + 300);
+    // [FIX:MENU-MONO-CAMERA 2/4] Same gate as the stereo offset.
     if (!native_asymmetric_factory_projection_applied &&
         hmd_scene_camera && !suppress_hmd_camera && native_projection_ready &&
+        eye_camera_edits_allowed &&
         g_game_render_width > 0 && g_game_render_height > 0) {
         view[engine_view_centre()] = render_right_eye
             ? static_cast<float>(g_config.engine_native_projection_shift_px)
@@ -43405,6 +43420,7 @@ void __fastcall hook_engine_view_rebuild(float* view) {
     }
     if ((world_camera || (view != nullptr && caller_rva == kViewFactoryReturnRva &&
             g_engine_factory_eye >= 0)) &&
+        eye_camera_edits_allowed &&
         geometry_stereo_transport_active() &&
         g_config.engine_factory_stereo_offset != 0.0f &&
         active_stereo_offset != 0.0f && !native_canted_applied) {
@@ -46215,6 +46231,15 @@ RemasterFsrDispatch remaster_fsr_begin_dispatch_locked(
     void* state, void* frame_data, uint8_t* reset_byte) {
     RemasterFsrDispatch d{};
     d.eye = remaster_dlss_eye_for_frame_data(frame_data);
+    // [FIX:MENU-MONO-CAMERA FSR] Behind a fullscreen menu the game upscales
+    // one centre view, alternately untagged and as eye 0. Untagged dispatches
+    // reset the game's (eye-0) history and both eye histories every time, so
+    // the menu background had no anti-aliasing. Keep the untagged ones on
+    // eye 0, so the one view keeps one continuous history.
+    if (d.eye < 0 &&
+        g_streamline_menu_mono_latched.load(std::memory_order_relaxed)) {
+        d.eye = 0;
+    }
     d.slot = d.eye == 0 || d.eye == 1
         ? static_cast<size_t>(d.eye)
         : kRemasterFsrUntaggedSlot;
@@ -49170,6 +49195,14 @@ bool dispatch_clean_mono_dlss_camera_motion(
     return true;
 }
 
+// [FIX:MENU-MONO-CAMERA 4/4] Mode-3 menu state latched once per Present.
+void latch_streamline_menu_mono() {
+    g_streamline_menu_mono_latched.store(
+        geometry_stereo_transport_active() &&
+            g_engine_menu_state.load(std::memory_order_relaxed) != 0,
+        std::memory_order_relaxed);
+}
+
 uint32_t streamline_eye() {
     if (g_streamline_forced_eye >= 0) {
         return static_cast<uint32_t>(g_streamline_forced_eye);
@@ -49179,6 +49212,14 @@ uint32_t streamline_eye() {
     }
     if (g_engine_dual_render_active.load() && g_engine_render_eye >= 0) {
         return static_cast<uint32_t>(g_engine_render_eye);
+    }
+    // [FIX:MENU-MONO-CAMERA 3/4] Untagged Mode-3 frames while a fullscreen
+    // menu is open are one centre-camera view (1/4). Keep them on the eye-0
+    // DLSS viewport/history instead of ping-ponging between the two per-eye
+    // instances by Present parity. The flag is latched at Present (4/4), the
+    // same clock as the parity fallback below.
+    if (g_streamline_menu_mono_latched.load(std::memory_order_relaxed)) {
+        return 0;
     }
     return static_cast<uint32_t>(g_present_count.load() & 1ull);
 }
@@ -59009,99 +59050,6 @@ void render_openxr_test_frame(
                 auto* primary_source = direct_stereo
                     ? direct_stereo_sources[0]
                     : game_backbuffer;
-                // [FIX:MENU-PANEL-ONE-EYE] Behind a menu the game keeps
-                // rendering both eyes, and in the headset the backbuffer
-                // alternated between them from Present to Present (these
-                // Presents carry no eye tag). Copied to the panel as is, the
-                // scene behind the system menu flickered as a double image.
-                // Keep every second backbuffer in a private copy and write it
-                // back over the others, so every route below reads one eye.
-                // The menu is drawn into every backbuffer and lags at most one
-                // Present.
-                {
-                    static ID3D12Resource* menu_hold{};
-                    static bool menu_hold_valid{};
-                    static bool menu_hold_copy_source{};
-                    const bool hold_route = live_backbuffer_source &&
-                        fullscreen_menu && !loading_video &&
-                        mode == kOpenXrModeStereo &&
-                        g_engine_dual_render_active.load(
-                            std::memory_order_acquire);
-                    if (!hold_route) {
-                        menu_hold_valid = false;
-                    } else {
-                        const auto backbuffer_desc = game_backbuffer->GetDesc();
-                        if (menu_hold != nullptr) {
-                            const auto hold_desc = menu_hold->GetDesc();
-                            if (hold_desc.Width != backbuffer_desc.Width ||
-                                hold_desc.Height != backbuffer_desc.Height ||
-                                hold_desc.Format != backbuffer_desc.Format) {
-                                menu_hold->Release();
-                                menu_hold = nullptr;
-                                menu_hold_valid = false;
-                            }
-                        }
-                        if (menu_hold == nullptr && g_d3d12_device != nullptr) {
-                            D3D12_HEAP_PROPERTIES heap{};
-                            heap.Type = D3D12_HEAP_TYPE_DEFAULT;
-                            auto desc = backbuffer_desc;
-                            desc.Flags = D3D12_RESOURCE_FLAG_NONE;
-                            if (FAILED(g_d3d12_device->CreateCommittedResource(
-                                    &heap, D3D12_HEAP_FLAG_NONE, &desc,
-                                    D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
-                                    IID_PPV_ARGS(&menu_hold)))) {
-                                menu_hold = nullptr;
-                            }
-                            menu_hold_valid = false;
-                            menu_hold_copy_source = false;
-                        }
-                        if (menu_hold != nullptr) {
-                            const bool refresh = !menu_hold_valid ||
-                                (current_present & 1u) == 0;
-                            D3D12_RESOURCE_BARRIER barrier{};
-                            barrier.Type =
-                                D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-                            barrier.Transition.Subresource =
-                                D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-                            if (refresh) {
-                                barrier.Transition.pResource = menu_hold;
-                                if (menu_hold_copy_source) {
-                                    barrier.Transition.StateBefore =
-                                        D3D12_RESOURCE_STATE_COPY_SOURCE;
-                                    barrier.Transition.StateAfter =
-                                        D3D12_RESOURCE_STATE_COPY_DEST;
-                                    g_xr_command_list->ResourceBarrier(
-                                        1, &barrier);
-                                }
-                                g_xr_command_list->CopyResource(
-                                    menu_hold, game_backbuffer);
-                                barrier.Transition.StateBefore =
-                                    D3D12_RESOURCE_STATE_COPY_DEST;
-                                barrier.Transition.StateAfter =
-                                    D3D12_RESOURCE_STATE_COPY_SOURCE;
-                                g_xr_command_list->ResourceBarrier(
-                                    1, &barrier);
-                                menu_hold_copy_source = true;
-                                menu_hold_valid = true;
-                            } else if (menu_hold_copy_source) {
-                                // The game backbuffer is in COPY_SOURCE here.
-                                barrier.Transition.pResource = game_backbuffer;
-                                barrier.Transition.StateBefore =
-                                    D3D12_RESOURCE_STATE_COPY_SOURCE;
-                                barrier.Transition.StateAfter =
-                                    D3D12_RESOURCE_STATE_COPY_DEST;
-                                g_xr_command_list->ResourceBarrier(
-                                    1, &barrier);
-                                g_xr_command_list->CopyResource(
-                                    game_backbuffer, menu_hold);
-                                std::swap(barrier.Transition.StateBefore,
-                                    barrier.Transition.StateAfter);
-                                g_xr_command_list->ResourceBarrier(
-                                    1, &barrier);
-                            }
-                        }
-                    }
-                }
                 auto source_desc = primary_source->GetDesc();
                 const UINT copy_width = static_cast<UINT>(std::min<uint64_t>(source_desc.Width, swapchain.width));
                 const UINT copy_height = std::min<UINT>(source_desc.Height, swapchain.height);
@@ -62662,6 +62610,7 @@ HRESULT STDMETHODCALLTYPE hook_present(IDXGISwapChain* swapchain, UINT sync_inte
     }
 
     const auto frame = ++g_present_count;
+    latch_streamline_menu_mono();
     record_route_flight_present(frame);
     test_mode_on_present(frame);
     test_mode_capture_if_pending(swapchain);
@@ -63384,6 +63333,7 @@ HRESULT STDMETHODCALLTYPE hook_present1(
     handle_f3_capture_hotkey(swapchain);
     handle_puredark_afw_visual_debug_hotkey();
     const auto frame = ++g_present_count;
+    latch_streamline_menu_mono();
     record_route_flight_present(frame);
     test_mode_on_present(frame);
     test_mode_capture_if_pending(swapchain);
