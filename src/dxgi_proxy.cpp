@@ -665,6 +665,11 @@ struct Config {
     // (Streamline 2) with one Streamline viewport and history per eye; the mod
     // keeps the No-AA presentation transport.
     bool remaster_engine_dlss{};
+    // 5.01 only: join the retained HUD capture to its eye through queue
+    // submission order instead of requiring t1 copy, HUD draw and PRESENT on
+    // one command list. Defaults to on with the game's DLSS, which records
+    // the HUD on a different command list than PRESENT.
+    bool remaster_submitted_hud_join{};
     bool remaster_dlss_per_eye_motion{true};
     // 5.01 per-eye DLSS image controls. dlss_preset: Streamline DLSSPreset
     // value forced for every quality mode (0 = the game's choice).
@@ -1194,7 +1199,10 @@ bool retained_hud_projection_route_configured() {
 }
 
 bool mode3_submitted_hud_join_route_configured() {
-    const auto backend = temporal_backend_is_dlss()
+    // [FIX:REMASTER-DLSS-SUBMITTED-HUD-JOIN 2/2] 5.01 keeps the No-AA
+    // transport but joins the HUD like the DLSS backend when requested.
+    const auto backend =
+        temporal_backend_is_dlss() || g_config.remaster_submitted_hud_join
         ? w3vr::mode3_transport::TemporalAdapter::Dlss
         : (temporal_backend_is_taau()
             ? w3vr::mode3_transport::TemporalAdapter::Taau
@@ -17513,6 +17521,19 @@ void load_config() {
                 log_line("FSR per-eye contexts requested on 5.01: per_eye_motion=%d",
                     g_config.remaster_dlss_per_eye_motion ? 1 : 0);
             }
+        }
+        // [FIX:REMASTER-DLSS-SUBMITTED-HUD-JOIN 1/2] With the game's DLSS the
+        // HUD copy and PRESENT land on different command lists, so the
+        // pointer-exact label never matches: no HUD pair is accepted and the
+        // baked, head-locked HUD stays (hud_controller_locked has no effect).
+        // Use the submission-order join the 4.04 DLSS route uses.
+        g_config.remaster_submitted_hud_join =
+            running_game_build() == w3vr::game_build::Build::Remaster501 &&
+            read_ini_bool("engine", "remaster_submitted_hud_join",
+                g_config.remaster_engine_dlss);
+        if (g_config.remaster_submitted_hud_join) {
+            log_line("Submitted HUD join on 5.01: engine_dlss=%d",
+                g_config.remaster_engine_dlss ? 1 : 0);
         }
         g_config.remaster_cut_history_reset =
             running_game_build() == w3vr::game_build::Build::Remaster501 &&
