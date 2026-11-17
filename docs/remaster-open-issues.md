@@ -55,6 +55,17 @@ black, with or without the mod (see `remaster-port-status.md`, 2026-10-17).
   subtitles followed the head. Since 2026-11-15 the lock also applies there (confirmed in the headset on
   5.01, Pico 4 over Virtual Desktop). The loading screens with the 2D parallax pictures are world-locked
   since 2026-11-15 too (startup panel fix).
+- With the game's DLSS per eye the lock had no effect (HUD always head-locked; #23, fix in #33,
+  confirmed by the reporter on 2026-11-17). The same reporter (NVIDIA, Steam Frame over SteamVR) still
+  sees a head-locked HUD with FSR and FXAA; open, waiting for a test with
+  `[engine] remaster_submitted_hud_join=1`.
+
+### Crossbow reticle does not follow vertical aim with the controller-locked HUD
+- Reported in #23 (2026-11-17): with `hud_controller_locked=1` the crossbow aim follows the vertical
+  mouse/stick movement, but the reticle stays in the centre of the HUD, so the vertical aim cannot be
+  read. Likely cause: the mod locks the game camera's pitch for VR, so the game no longer pitches the
+  camera when aiming and its reticle stays centred. Not investigated yet; to do: check whether the
+  reticle can be placed along the actual aim direction (also with the head-locked HUD).
 
 ### Anti-aliasing on 5.01
 - Edges looked rough at Virtual Desktop "High" (1748x1468 per eye). Rendering at the runtime's
