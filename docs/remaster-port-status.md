@@ -1169,7 +1169,7 @@ Open: a 4.04 headset check of #30 (the menu panel change is not limited to 5.01)
 - Null driver, system menu with ten captures: before, captures shifted by 1-2 px of 384 against
   each other (half IPD on a distant landscape); after, no shift. FSR resets during the menu: one per
   frame before, none after (eye 1 restarts once when the menu closes). D3D12 debug layer: no errors.
-- Open: headset check (no double image, AA behind the menu, no artefact when the menu closes).
+- Headset check 2026-11-18 (see below): passed.
 
 ## 2026-11-16: sun shadows once per eye pair, taken over from kaarele/witcher3-remastered-vr
 
@@ -1183,4 +1183,17 @@ Open: a 4.04 headset check of #30 (the menu panel change is not limited to 5.01)
   fallback except menu/untagged frames (`gate`, `no_tag`); shadow work per pair: right eye
   (seed) ~3.6 ms in the shadow passes, left eye ~0.1 ms. Shadows match between the eye images;
   mean brightness of the eyes equal. D3D12 debug layer: no errors.
-- Open: headset check (shadows identical in both eyes, no shimmer at cascade borders, GPU headroom).
+- Headset check 2026-11-18 (see below): passed.
+
+## 2026-11-18: headset check of the menu mono camera and the shadow pair reuse
+
+Build `test/night-e-a` (code identical to `remaster` 2ed9d1f + ee787ea), 5.01, Pico 4 over Virtual
+Desktop (VDXR), FSR per eye, the user's playthrough save.
+- System menu: no double image, stable over repeated opening and closing, no flash. The scene behind
+  the menu is anti-aliased, though slightly less smooth and with a little shimmer compared with
+  gameplay; accepted, no further work planned. Game menu (START) normal.
+- Sun shadows identical in both eyes, no shimmer at cascade borders, image quality good. No
+  noticeable performance change on an RX 7900 XTX (already smooth before).
+- `history_event_log`: about 30 single FSR resets in six minutes after an eye gap (menu open/close),
+  no per-frame resets behind the menu.
+- Open: 4.04 headset check of the menu changes (#30/#31 apply to 4.04 too).
