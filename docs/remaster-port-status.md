@@ -1197,3 +1197,11 @@ Desktop (VDXR), FSR per eye, the user's playthrough save.
 - `history_event_log`: about 30 single FSR resets in six minutes after an eye gap (menu open/close),
   no per-frame resets behind the menu.
 - Open: 4.04 headset check of the menu changes (#30/#31 apply to 4.04 too).
+
+## 2026-11-18: release v0.9.8v2-remastered.5
+
+Tag on 4f6f777 (#31 menu mono camera, #32 shadow pair reuse, #33 DLSS HUD join). Install test from the
+release zip with the null driver: 5.01 Continue passed (stereo, controller-locked HUD plane active,
+shadow pairs reused 468 of 468); 4.04 balcony save passed (stereo). The 4.04 smoke script that picks
+the fourth load-list entry fails once newer 5.x saves are in the shared folder; run it with only the
+4.04 test save in `gamesaves`.
