@@ -670,6 +670,11 @@ struct Config {
     // one command list. Defaults to on with the game's DLSS, which records
     // the HUD on a different command list than PRESENT.
     bool remaster_submitted_hud_join{};
+    // 5.01 only: leave swapchains created with a 0x0 size untouched (no queue
+    // capture, no forced size, no OpenXR start). Some setups create such a
+    // second swapchain for another window before the game's own one, and the
+    // mod then bound its primary queue to that window's queue.
+    bool remaster_skip_zero_size_swapchain{};
     bool remaster_dlss_per_eye_motion{true};
     // 5.01 per-eye DLSS image controls. dlss_preset: Streamline DLSSPreset
     // value forced for every quality mode (0 = the game's choice).
@@ -17535,6 +17540,19 @@ void load_config() {
             log_line("Submitted HUD join on 5.01: engine_dlss=%d",
                 g_config.remaster_engine_dlss ? 1 : 0);
         }
+        // [FIX:REMASTER-ZERO-SIZE-SWAPCHAIN-QUEUE 1/2]
+        g_config.remaster_skip_zero_size_swapchain =
+            running_game_build() == w3vr::game_build::Build::Remaster501 &&
+            read_ini_bool("engine", "remaster_skip_zero_size_swapchain", false);
+        // [DIAG:SWAPCHAIN-QUEUE-TOPOLOGY 1/3] The retained HUD join depends
+        // on these; log them unconditionally (one line).
+        log_line(
+            "HUD route config: steady_icons=%d hud_controller_locked=%d "
+            "submitted_hud_join=%d skip_zero_size_swapchain=%d",
+            g_config.steady_icons ? 1 : 0,
+            g_config.hud_controller_locked ? 1 : 0,
+            g_config.remaster_submitted_hud_join ? 1 : 0,
+            g_config.remaster_skip_zero_size_swapchain ? 1 : 0);
         g_config.remaster_cut_history_reset =
             running_game_build() == w3vr::game_build::Build::Remaster501 &&
             read_ini_bool("engine", "remaster_cut_history_reset", true);
@@ -64065,6 +64083,24 @@ HRESULT STDMETHODCALLTYPE hook_present(IDXGISwapChain* swapchain, UINT sync_inte
     if (g_game_swapchain == nullptr && swapchain != nullptr) {
         g_game_swapchain = swapchain;
         g_game_swapchain->AddRef();
+        // [DIAG:SWAPCHAIN-QUEUE-TOPOLOGY 3/3] The queue the mod treats as
+        // primary must be the one the game swapchain presents on.
+        {
+            ID3D12CommandQueue* present_queue{};
+            DXGI_SWAP_CHAIN_DESC present_desc{};
+            swapchain->GetDesc(&present_desc);
+            if (SUCCEEDED(swapchain->GetDevice(IID_PPV_ARGS(&present_queue))) &&
+                present_queue != nullptr) {
+                log_line(
+                    "Game swapchain=%p hwnd=%p present_queue=%p primary_queue=%p match=%d",
+                    swapchain, present_desc.OutputWindow, present_queue,
+                    g_command_queue, present_queue == g_command_queue ? 1 : 0);
+                present_queue->Release();
+            } else {
+                log_line("Game swapchain=%p hwnd=%p present_queue=unknown primary_queue=%p",
+                    swapchain, present_desc.OutputWindow, g_command_queue);
+            }
+        }
 
         ID3D12Resource* backbuffer{};
         if (taau_metadata_hooks_needed() &&
@@ -64881,6 +64917,45 @@ void install_test_keep_focus(HWND hwnd) {
         g_test_keep_focus_original != nullptr ? "installed" : "failed", hwnd);
 }
 
+// [DIAG:SWAPCHAIN-QUEUE-TOPOLOGY 2/3] Which window and module a swapchain
+// belongs to, and which Streamline modules are loaded at that point. A few
+// lines per swapchain; window titles are not logged.
+void log_swapchain_window_topology(HWND hwnd, void* return_address) {
+    char class_name[128]{};
+    RECT client{};
+    DWORD window_process{};
+    if (hwnd != nullptr) {
+        GetClassNameA(hwnd, class_name, static_cast<int>(sizeof(class_name)));
+        GetClientRect(hwnd, &client);
+        GetWindowThreadProcessId(hwnd, &window_process);
+    }
+    char caller[MAX_PATH]{};
+    HMODULE caller_module{};
+    if (GetModuleHandleExA(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            static_cast<LPCSTR>(return_address), &caller_module) &&
+        caller_module != nullptr) {
+        char path[MAX_PATH]{};
+        if (GetModuleFileNameA(caller_module, path, MAX_PATH) != 0) {
+            const char* base = std::strrchr(path, '\\');
+            strncpy_s(caller, base != nullptr ? base + 1 : path, _TRUNCATE);
+        }
+    }
+    log_line(
+        "Swapchain window class=%s visible=%d client=%ldx%ld own_process=%d "
+        "caller=%s sl_interposer=%d sl_dlss=%d sl_common=%d",
+        class_name[0] != '\0' ? class_name : "-",
+        hwnd != nullptr && IsWindowVisible(hwnd) ? 1 : 0,
+        static_cast<long>(client.right - client.left),
+        static_cast<long>(client.bottom - client.top),
+        window_process == GetCurrentProcessId() ? 1 : 0,
+        caller[0] != '\0' ? caller : "-",
+        GetModuleHandleA("sl.interposer.dll") != nullptr ? 1 : 0,
+        GetModuleHandleA("sl.dlss.dll") != nullptr ? 1 : 0,
+        GetModuleHandleA("sl.common.dll") != nullptr ? 1 : 0);
+}
+
 HRESULT STDMETHODCALLTYPE hook_create_swapchain_for_hwnd(
     IDXGIFactory2* factory,
     IUnknown* device,
@@ -64895,6 +64970,19 @@ HRESULT STDMETHODCALLTYPE hook_create_swapchain_for_hwnd(
         desc != nullptr ? desc->Width : 0,
         desc != nullptr ? desc->Height : 0,
         desc != nullptr ? static_cast<unsigned>(desc->Format) : 0);
+    log_swapchain_window_topology(hwnd, _ReturnAddress());
+
+    // [FIX:REMASTER-ZERO-SIZE-SWAPCHAIN-QUEUE 2/2] A 0x0 swapchain created
+    // before the game's own one would otherwise become the primary queue,
+    // the game window and the OpenXR session's queue. Pass it through as is.
+    if (g_config.remaster_skip_zero_size_swapchain && desc != nullptr &&
+        (desc->Width == 0 || desc->Height == 0)) {
+        log_line("Zero-size swapchain passed through unchanged hwnd=%p queue=%p",
+            hwnd, device);
+        return g_create_swapchain_for_hwnd(
+            factory, device, hwnd, desc, fullscreen_desc, restrict_to_output,
+            swapchain);
+    }
 
     capture_d3d12_objects(device);
     g_game_hwnd = hwnd;
@@ -64938,6 +65026,8 @@ HRESULT STDMETHODCALLTYPE hook_create_swapchain(
         desc != nullptr ? desc->BufferDesc.Width : 0,
         desc != nullptr ? desc->BufferDesc.Height : 0,
         desc != nullptr ? static_cast<unsigned>(desc->BufferDesc.Format) : 0);
+    log_swapchain_window_topology(
+        desc != nullptr ? desc->OutputWindow : nullptr, _ReturnAddress());
 
     DXGI_SWAP_CHAIN_DESC forced_desc{};
     auto* effective_desc = desc;
