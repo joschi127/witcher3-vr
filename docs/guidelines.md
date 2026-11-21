@@ -47,6 +47,8 @@ Its remote is recorded in `local/NOTES.md`, never in this repository.
 - The same rules as for this repository apply to anything that might later be shared: tokens and
   credentials (such as the GOG refresh token in `dx12user.settings`) never go into either
   repository.
+- Work directly on `main` in the `local/` repository and avoid branches where possible: commit
+  and push notes as they change, so every machine sees one current state.
 
 ## Build
 
