@@ -28,6 +28,8 @@ CLAUDE.local.md
 CMakeUserPresets.json
 /.claude/settings.local.json
 /local/
+# Temporary builds, staging folders and other large files (see docs/guidelines.md)
+/tmp/
 *.jsonl
 *.gpr
 *.rep/
