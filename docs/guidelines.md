@@ -29,6 +29,25 @@ Machine-specific paths, the current state and the to-do list live outside git, u
 The notes may contain local paths and machine details; that is why they stay out of git. Their
 language is the maintainer's choice; committed files are in English.
 
+**Keeping `local/` safe (optional):** `local/` may be its own private git repository, separate
+from this one, pushed to a private remote of the maintainer's choice (for example a bare
+repository on a home server). That keeps the notes available on several machines and in backups.
+Its remote is recorded in `local/NOTES.md`, never in this repository.
+
+- `local/` holds text only: notes, scripts, run records, checksum lists, and reference data that
+  cannot be recreated later (for example shader dumps of a game build that is no longer
+  installed). Its own `.gitignore` is an allow-list: everything is ignored except text types
+  (`.md`, `.txt`, `.sh`, `.ps1`, `.py`, `.tsv`, `.sha256`, `.patch`) and such named reference
+  folders. Copies of user data (saves, `dx12user.settings` and other files from
+  `Documents\The Witcher 3`) are excluded even if their type is allowed.
+- Large binaries and temporary files do not go into `local/` at all: builds, test builds, release
+  packages, downloaded packages and extra git worktrees go to `tmp/` in the repository root, which
+  this repository ignores. Backups, saves, logs and captures that belong to a test or run may stay
+  under `local/` and are kept out by the allow-list.
+- The same rules as for this repository apply to anything that might later be shared: tokens and
+  credentials (such as the GOG refresh token in `dx12user.settings`) never go into either
+  repository.
+
 ## Build
 
 Run from the **Developer PowerShell for VS** (cmake/cl are not on the plain PATH). The presets
@@ -57,7 +76,8 @@ PureDark AFW plugin, OFXR API layer, the ReShade and OptiScaler forks, RenderDoc
 release zip from the pinned original release (downloaded with `gh`, SHA256-checked; third-party
 runtime files and game scripts unchanged) plus this repository's `dxgi.dll`, launcher, documents and
 example INI. It leaves out PureDark's `PDAFWPlugin.dll` and the Fast Transitions DLC (not
-redistributed, see `THIRD_PARTY_NOTICES.md`). Output goes to `local/releases/`.
+redistributed, see `THIRD_PARTY_NOTICES.md`). Output goes to `tmp/releases/`
+(the downloaded original release is cached in `tmp/upstream-release/`).
 
 Procedure when the maintainer asks for a release:
 1. `remaster` clean and pushed; Release build and CTest green.
@@ -272,6 +292,8 @@ headset model, OpenXR runtime, driver module names (e.g. "AMD GPU, Pico 4 over V
 
 Address constants and byte patterns needed by the code are fine in source (upstream does the
 same). The material they were derived from is not.
+
+Temporary builds and large files go to `tmp/` (ignored), not into the source tree or `local/`.
 
 ## Git workflow
 

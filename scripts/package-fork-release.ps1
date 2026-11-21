@@ -10,9 +10,9 @@ param(
     [string] $UpstreamTag = 'v0.9.8v2',
     [string] $UpstreamAsset = 'Witcher3VR-v0.9.8v2-V1581-Main.zip',
     [string] $UpstreamSha256 = 'a59f96f43db9c9509d0ee07638a7f5d1edd280010a836105b6e93f820b31bd5a',
-    [string] $CacheDirectory = 'local/upstream-release',
+    [string] $CacheDirectory = 'tmp/upstream-release',
     [string] $BuildDirectory = 'build/release-vs2026',
-    [string] $OutputDirectory = 'local/releases',
+    [string] $OutputDirectory = 'tmp/releases',
     [switch] $AllowDirtyWorktree
 )
 
