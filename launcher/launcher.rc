@@ -1,4 +1,7 @@
 #include "resources.h"
 
+// Generated from icon/witcher3vr-launcher.svg by icon/make-icon.py.
+IDI_LAUNCHER ICON "icon/witcher3vr-launcher.ico"
+
 IDR_VR_SETTINGS RCDATA "vr_dx12user.settings"
 IDR_VR_INI RCDATA "witcher3vr.default.ini"

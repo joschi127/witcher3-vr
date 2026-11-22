@@ -1896,7 +1896,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     window_class.lpfnWndProc = WindowProcedure;
     window_class.hInstance = instance;
     window_class.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    window_class.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+    window_class.hIcon = static_cast<HICON>(LoadImageW(instance, MAKEINTRESOURCEW(IDI_LAUNCHER),
+        IMAGE_ICON, GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON), LR_DEFAULTCOLOR));
+    window_class.hIconSm = static_cast<HICON>(LoadImageW(instance, MAKEINTRESOURCEW(IDI_LAUNCHER),
+        IMAGE_ICON, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR));
     window_class.hbrBackground = GetSysColorBrush(COLOR_WINDOW);
     window_class.lpszClassName = kWindowClass;
     if (!RegisterClassExW(&window_class)) return 1;
