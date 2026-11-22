@@ -1205,3 +1205,18 @@ release zip with the null driver: 5.01 Continue passed (stereo, controller-locke
 shadow pairs reused 468 of 468); 4.04 balcony save passed (stereo). The 4.04 smoke script that picks
 the fourth load-list entry fails once newer 5.x saves are in the shared folder; run it with only the
 4.04 test save in `gamesaves`.
+
+## 2026-11-22: controller-locked HUD with FSR/FXAA on NVIDIA (#23)
+
+- The reporter's logs (NVIDIA, SteamVR) with the 2026-11-21 test build (`steady_icons=0`,
+  `remaster_submitted_hud_join=1`, `remaster_skip_zero_size_swapchain=1`): HUD locked in both FSR and
+  FXAA. HUD composites 683 (FSR) / 959 (FXAA) with as many retired slots; the runs of 2026-11-19 with
+  `steady_icons=1` had none. No 0x0 swapchain this time (it appeared in both runs of 2026-11-19, once
+  before and once after the game's swapchain), so the skip switch is untested.
+- `remaster` 0ff2be0 (topology logging, skip switch default off) and 30088d5: the submitted HUD join is
+  on by default on 5.01 and `steady_icons` is ignored while it is on.
+- Null driver, AMD, FSR per eye, `steady_icons=1` in the INI (run R6S2): override logged, stereo
+  active, 464 HUD composites (release .5 install test: 467).
+- ac32c85: `smoke-test.ps1` refuses to start when the SteamVR null driver is off and fails runs that
+  stayed flat (the first run of the day passed while SteamVR had no HMD).
+- Open: headset check on AMD with the join on by default (the user's playthrough setup).
