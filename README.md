@@ -1,3 +1,5 @@
+<img src="launcher/icon/witcher3vr-launcher.svg" alt="Witcher 3 VR launcher icon" width="128" align="right">
+
 # The Witcher 3 VR
 
 > [!NOTE]
