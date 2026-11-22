@@ -1219,4 +1219,12 @@ the fourth load-list entry fails once newer 5.x saves are in the shared folder; 
   active, 464 HUD composites (release .5 install test: 467).
 - ac32c85: `smoke-test.ps1` refuses to start when the SteamVR null driver is off and fails runs that
   stayed flat (the first run of the day passed while SteamVR had no HMD).
-- Open: headset check on AMD with the join on by default (the user's playthrough setup).
+- Headset check on AMD with the join on by default: passed (see the release entry below).
+
+## 2026-11-22: release v0.9.8v2-remastered.6
+
+Tag on ff92767 (#23 HUD join by default on 5.01, steady_icons ignored there; swapchain topology
+logging; null driver check in the smoke test). Install test from the release zip with the null driver:
+5.01 Continue passed (stereo, 482 HUD composites). 4.04 not run (no 4.04 code changed).
+Headset check (Pico 4 over Virtual Desktop, AMD, FSR per eye, the user's playthrough): HUD stays
+locked, everything else as in .5.
