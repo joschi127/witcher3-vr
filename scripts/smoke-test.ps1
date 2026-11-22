@@ -57,6 +57,26 @@ if (Get-Process -Name 'witcher3' -ErrorAction SilentlyContinue) {
     throw 'witcher3.exe is already running.'
 }
 
+# A headset-free run through SteamVR needs its null driver. SteamVR updates or a real headset session
+# can switch it off; the game then gets no OpenXR system, waits in the intro and runs flat. Check the
+# settings before anything in the game folder changes.
+if ($OpenXrRuntimeJson -and $OpenXrRuntimeJson -match '^(.*?)[\\/]steamapps[\\/]common[\\/]SteamVR[\\/]') {
+    $vrSettingsPath = Join-Path $Matches[1] 'config\steamvr.vrsettings'
+    if (-not (Test-Path -LiteralPath $vrSettingsPath)) { throw "Not found: $vrSettingsPath" }
+    $vrSettings = Get-Content -LiteralPath $vrSettingsPath -Raw | ConvertFrom-Json
+    $nullProblems = @()
+    if ($vrSettings.steamvr.forcedDriver -ne 'null') { $nullProblems += 'steamvr.forcedDriver is not "null"' }
+    if ($vrSettings.driver_null.enable -ne $true) { $nullProblems += 'driver_null.enable is not true' }
+    if ($vrSettings.steamvr.requireHmd -eq $false) { $nullProblems += 'steamvr.requireHmd is false' }
+    if ($vrSettings.steamvr.startMonitorFromAppLaunch -ne $false) {
+        $nullProblems += 'steamvr.startMonitorFromAppLaunch is not false (Room Setup quits the game)'
+    }
+    if ($nullProblems.Count -gt 0) {
+        throw ("SteamVR null driver not set up in ${vrSettingsPath}: " + ($nullProblems -join '; ') +
+            ' (see docs/remaster-port-status.md, SteamVR null driver)')
+    }
+}
+
 $runDirectory = Join-Path ([System.IO.Path]::GetFullPath($OutputDirectory)) $RunName
 New-Item -ItemType Directory -Force -Path $runDirectory | Out-Null
 
@@ -193,8 +213,24 @@ if ($lines | Where-Object { $_ -match 'Test mode quit' }) {
 if ($lines | Where-Object { $_ -match 'GameInput virtual pad announced' }) {
     $notes.Add('input: virtual GameInput gamepad')
 }
-if ($lines | Where-Object { $_ -match 'Engine dual render INI auto-start queued' }) {
+$dualRenderStarted = [bool]($lines | Where-Object { $_ -match 'Engine dual render INI auto-start queued' })
+if ($dualRenderStarted) {
     $notes.Add('stereo: dual render started')
+}
+# With a runtime given the run is meant to test the OpenXR path; a run that fell back to flat
+# rendering (no OpenXR system or session, e.g. null driver off) must not pass.
+if ($OpenXrRuntimeJson -and $lines.Count -gt 0) {
+    $systemError = $lines | Where-Object { $_ -match 'OpenXR xrGetSystem result=XR_ERROR' } |
+        Select-Object -First 1
+    if ($systemError) {
+        $failures.Add('OpenXR: ' + ($systemError -replace '^\[[^\]]*\]\s*OpenXR\s*', '') +
+            ' (no headset; SteamVR null driver off?)')
+    } elseif (-not ($lines | Where-Object { $_ -match 'OpenXR xrCreateSession\(D3D12\) result=XR_SUCCESS' })) {
+        $failures.Add('OpenXR: no session created')
+    }
+    if (-not $dualRenderStarted) {
+        $failures.Add('OpenXR runtime given, but dual render never started (run was flat)')
+    }
 }
 
 $passed = $failures.Count -eq 0

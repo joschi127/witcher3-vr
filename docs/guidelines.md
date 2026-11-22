@@ -142,7 +142,9 @@ game folder. Add Defender exclusions for the build directory and the installed `
   `-IniSet 'openxr.enabled=1,openxr.hmd_roll_scale=0'` plus
   `-OpenXrRuntimeJson <SteamVR>\steamxr_win64.json` runs the full OpenXR/dual-render path
   without a headset through the SteamVR null driver (setup in `docs/remaster-port-status.md`,
-  2026-10-13). A `flight_dump` script action writes the flight recorders and, with
+  2026-10-13). With a SteamVR runtime the script refuses to start when the null driver is not set
+  up in `steamvr.vrsettings` (SteamVR updates or a real headset session can switch it off), and a
+  run with a runtime fails when no OpenXR session or dual render started. A `flight_dump` script action writes the flight recorders and, with
   `[debug] thread_stack_sampler=1`, a render-thread CPU profile to the log. An `hmd <yaw> <pitch>`
   action turns the located OpenXR head pose (degrees, held until changed), so head-motion bugs can
   be reproduced with the static null HMD. Captures include the
