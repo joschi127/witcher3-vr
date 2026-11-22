@@ -17532,13 +17532,22 @@ void load_config() {
         // pointer-exact label never matches: no HUD pair is accepted and the
         // baked, head-locked HUD stays (hud_controller_locked has no effect).
         // Use the submission-order join the 4.04 DLSS route uses.
+        // [FIX:REMASTER-SUBMITTED-HUD-JOIN-DEFAULT 1/1] On by default on
+        // 5.01: on NVIDIA with FSR or FXAA the game also records the HUD and
+        // PRESENT on different queues, and the join works on one queue too.
+        // The join consumes the strict HUD target pair, which the publication
+        // only maintains without steady_icons; with steady_icons=1 no HUD
+        // pair was ever accepted (#23). Steady icons are ignored while the
+        // join is active.
         g_config.remaster_submitted_hud_join =
             running_game_build() == w3vr::game_build::Build::Remaster501 &&
-            read_ini_bool("engine", "remaster_submitted_hud_join",
-                g_config.remaster_engine_dlss);
+            read_ini_bool("engine", "remaster_submitted_hud_join", true);
         if (g_config.remaster_submitted_hud_join) {
-            log_line("Submitted HUD join on 5.01: engine_dlss=%d",
-                g_config.remaster_engine_dlss ? 1 : 0);
+            log_line("Submitted HUD join on 5.01: engine_dlss=%d "
+                "steady_icons_requested=%d (ignored)",
+                g_config.remaster_engine_dlss ? 1 : 0,
+                g_config.steady_icons ? 1 : 0);
+            g_config.steady_icons = false;
         }
         // [FIX:REMASTER-ZERO-SIZE-SWAPCHAIN-QUEUE 1/2]
         g_config.remaster_skip_zero_size_swapchain =

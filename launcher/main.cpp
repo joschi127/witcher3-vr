@@ -1585,7 +1585,7 @@ void CreateInterface(HWND window) {
         L"Keeps supported automatic cutscenes in geometry stereo Full VR instead of placing them on the Cinema3D screen.");
     AddTooltip(AddControl(L"BUTTON", L"Steady Icons",
         BS_AUTOCHECKBOX | WS_TABSTOP, 304, 514, 256, 26, IdSteadyIcons),
-        L"Stabilizes world-space icons. It adds one frame only in Stereo; under AER + AFW it may not remain as stable as it does in Stereo.");
+        L"Stabilizes world-space icons. It adds one frame only in Stereo; under AER + AFW it may not remain as stable as it does in Stereo. Ignored on 5.x (Remastered), where it kept the controller-locked HUD from working.");
 
     AddTooltip(AddControl(L"BUTTON",
         L"Enable vertical mouse/pad pitch",

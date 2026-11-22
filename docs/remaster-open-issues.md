@@ -57,8 +57,10 @@ black, with or without the mod (see `remaster-port-status.md`, 2026-10-17).
   since 2026-11-15 too (startup panel fix).
 - With the game's DLSS per eye the lock had no effect (HUD always head-locked; #23, fix in #33,
   confirmed by the reporter on 2026-11-17). The same reporter (NVIDIA, Steam Frame over SteamVR) still
-  sees a head-locked HUD with FSR and FXAA; open, waiting for a test with
-  `[engine] remaster_submitted_hud_join=1`.
+  saw a head-locked HUD with FSR and FXAA: there the game also records the HUD and the final image on
+  different queues, and `steady_icons=1` kept the submission-order match from starting. A test build
+  with `steady_icons=0` and `[engine] remaster_submitted_hud_join=1` fixed it in both modes (confirmed
+  2026-11-22). Since then the join is on by default on 5.01 and `steady_icons` is ignored there.
 
 ### Crossbow reticle does not follow vertical aim with the controller-locked HUD
 - Reported in #23 (2026-11-17): with `hud_controller_locked=1` the crossbow aim follows the vertical
